@@ -429,7 +429,6 @@ function renderStudentLedger(body){
         const actions = [];
         if(!p.voided && canSub('managefee_collection', 'managefee', 'print')) actions.push(sfBtn('link', 'receipt', 'Print Receipt', `printReceipt('${p.id}')`));
         if(!p.voided && canSub('managefee_collection', 'managefee', 'delete')) actions.push(sfBtn('danger', '', 'Void', `voidPayment('${p.id}')`));
-        if(!p.voided && refundPerm('create') && payRefundable(p) > 0) actions.push(sfBtn('danger', '', 'Refund', `openRefundRequest('${p.id}')`));
         return `<tr${p.voided ? ' style="opacity:.6;"' : ''}><td>${p.date || '—'}</td><td><span class="pill">${feeLabelFor(p)}</span></td><td>${escapeHtml(p.instalment || '—')}</td><td>${p.mode || '—'}</td><td>${p.voided ? `<s>${fmtMoney(p.amount)}</s>` : fmtMoney(p.amount)}</td><td>${fmtMoney(p.discount)}</td><td>${statusHtml}</td><td class="sf-actions">${actions.join('')}</td></tr>`;
       }).join('') : `<tr><td colspan="8"><div class="empty-state"><b>No payments yet</b></div></td></tr>`}
     </tbody></table></div>`;

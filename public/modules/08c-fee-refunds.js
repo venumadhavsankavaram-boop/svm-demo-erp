@@ -31,6 +31,10 @@ OBJECT_BACKED_KEYS[REFUND_POLICY_KEY] = '/api/kv/' + REFUND_POLICY_KEY;
 let feeRefunds = [];
 let refundPolicy = Object.assign({}, RF_DEFAULT_POLICY);
 let rfBusy = false;
+let rfView = 'list';          // 'list' | 'create' (the New Refund page inside the Refunds tab)
+let rfCreateSid = '';
+let rfSearchTimer = null;
+function rfScope(){ return document.getElementById('rfCreatePage') || document.getElementById('rfModalContent'); }
 let _rfCache = null;
 
 async function loadRefundData(){
@@ -157,7 +161,7 @@ function rfOpenModal(html){
 }
 function rfCloseModal(){
   const ov = document.getElementById('rfModalOverlay');
-  if(ov) ov.classList.remove('open');
+  if(ov){ ov.classList.remove('open'); const c = document.getElementById('rfModalContent'); if(c) c.innerHTML = ''; }
   rfBusy = false;
 }
 
@@ -170,39 +174,119 @@ async function openRefundRequest(paymentId){
   if(!p || p.voided){ showToast("This payment can't be refunded."); return; }
   rfReqGroup = (p.receiptNo ? payments.filter(x => x.receiptNo === p.receiptNo && x.studentId === p.studentId) : [p]).filter(x => !x.voided);
   if(!rfReqGroup.some(x => x.id === p.id)) rfReqGroup.push(p);
-  const isAdmin = currentUser.role === 'Admin';
-  const accounts = (acctBankAccounts || []).filter(b => b.active !== false);
-  const rows = rfReqGroup.map(x => {
-    const max = payRefundable(x);
-    const nonRef = rfIsNonRefundable(x);
-    const blocked = max <= 0 || (nonRef && !isAdmin);
-    const note = max <= 0 ? 'Nothing left to refund' : (nonRef ? (isAdmin ? 'Non-refundable head — Admin override' : 'Non-refundable head — Admin only') : '');
-    return `<tr data-pid="${x.id}">
-      <td><input type="checkbox" class="rf-chk" ${x.id === p.id && !blocked ? 'checked' : ''} ${blocked ? 'disabled' : ''} onchange="rfUpdateRequestTotal()"></td>
-      <td><b>${escapeHtml(feeLabelFor(x))}</b>${x.instalment ? `<br><small>${escapeHtml(x.instalment)}</small>` : ''}${note ? `<br><small style="color:#b45309;">${note}</small>` : ''}</td>
-      <td>${fmtMoney(x.amount)}${payRefunded(x) ? `<br><small>refunded ${fmtMoney(payRefunded(x))}</small>` : ''}${payPendingRefund(x) ? `<br><small>pending ${fmtMoney(payPendingRefund(x))}</small>` : ''}</td>
-      <td><input type="number" class="input rf-amt" min="0" max="${max}" value="${blocked ? 0 : max}" ${blocked ? 'disabled' : ''} style="width:110px;" oninput="rfUpdateRequestTotal()"><br><small>max ${fmtMoney(max)}</small></td>
-    </tr>`;
-  }).join('');
-  const defMethod = refundPolicy.defaultMethod === 'credit' || !RF_METHODS[refundPolicy.defaultMethod] ? 'credit' : refundPolicy.defaultMethod;
+  const rows = rfLineRowsHtml(rfReqGroup, p.id);
   rfOpenModal(`
     <h2>Refund — Receipt ${escapeHtml(p.receiptNo || '—')}</h2>
     <p class="modal-sub">${escapeHtml(rfStudentName(p.studentId, p.studentName))} · the original receipt stays intact; this creates a linked refund (credit note).</p>
-    <div class="table-wrap rf-m" style="margin-bottom:12px;"><style>@media(max-width:600px){.rf-m table{font-size:12.5px}.rf-m th,.rf-m td{padding:8px 6px!important}.rf-m td input[type=number],.rf-m td input[type=text]{width:84px!important;min-width:0}.rf-m th{font-size:10px!important;letter-spacing:0!important}}</style><table><thead><tr><th></th><th>Fee head</th><th>Paid</th><th>Refund amount (₹)</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="f-field" style="margin-bottom:12px;"><label>Reason</label><select class="input" id="rfReason" style="width:100%;">${RF_REASONS.map(r => `<option>${r}</option>`).join('')}</select></div>
-    <div class="f-field" style="margin-bottom:12px;"><label>Notes <small>(required for "Other")</small></label><textarea class="input" id="rfNote" rows="2" style="width:100%;"></textarea></div>
-    <div class="f-field" style="margin-bottom:12px;"><label>Return the money as</label><select class="input" id="rfMethod" style="width:100%;" onchange="rfUpdateRequestTotal()">${Object.keys(RF_METHODS).map(k => `<option value="${k}" ${k === defMethod ? 'selected' : ''}>${RF_METHODS[k]}</option>`).join('')}</select></div>
-    <div class="f-field" id="rfBankWrap" style="margin-bottom:12px;display:none;"><label>Pay out from (Bank / Cash account)</label><select class="input" id="rfBank" style="width:100%;">${accounts.map(b => `<option value="${b.id}">${escapeHtml(b.name)}</option>`).join('')}</select></div>
-    <div id="rfRouteInfo" class="note" style="margin:8px 0 14px;padding:10px 12px;border-radius:10px;background:rgba(122,46,143,.08);font-size:.88rem;"></div>
+    <div class="table-wrap rf-m" style="margin-bottom:12px;">${RF_TABLE_CSS}<table><thead><tr><th></th><th>Fee head</th><th>Paid</th><th>Refund amount (₹)</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${rfFieldsHtml()}
     <div class="modal-actions">
       <button type="button" class="btn btn-ghost" onclick="rfCloseModal()">Cancel</button>
       <button type="button" class="btn btn-primary" id="rfSubmitBtn" onclick="submitRefundRequest()">💸 Submit refund</button>
     </div>`);
   rfUpdateRequestTotal();
 }
+
+function rfLineRowsHtml(group, preselectId, showReceipt){
+  const isAdmin = currentUser.role === 'Admin';
+  return group.map(x => {
+    const max = payRefundable(x);
+    const nonRef = rfIsNonRefundable(x);
+    const blocked = max <= 0 || (nonRef && !isAdmin);
+    const note = max <= 0 ? 'Nothing left to refund' : (nonRef ? (isAdmin ? 'Non-refundable head — Admin override' : 'Non-refundable head — Admin only') : '');
+    return `<tr data-pid="${x.id}">
+      <td><input type="checkbox" class="rf-chk" ${x.id === preselectId && !blocked ? 'checked' : ''} ${blocked ? 'disabled' : ''} onchange="rfUpdateRequestTotal()"></td>
+      <td><b>${escapeHtml(feeLabelFor(x))}</b>${x.instalment ? `<br><small>${escapeHtml(x.instalment)}</small>` : ''}${showReceipt ? `<br><small>Receipt ${escapeHtml(x.receiptNo || '—')} · ${escapeHtml(x.date || '')}</small>` : ''}${note ? `<br><small style="color:#b45309;">${note}</small>` : ''}</td>
+      <td>${fmtMoney(x.amount)}${payRefunded(x) ? `<br><small>refunded ${fmtMoney(payRefunded(x))}</small>` : ''}${payPendingRefund(x) ? `<br><small>pending ${fmtMoney(payPendingRefund(x))}</small>` : ''}</td>
+      <td><input type="number" class="input rf-amt" min="0" max="${max}" value="${blocked ? 0 : max}" ${blocked ? 'disabled' : ''} style="width:110px;" oninput="rfUpdateRequestTotal()"><br><small>max ${fmtMoney(max)}</small></td>
+    </tr>`;
+  }).join('');
+}
+function rfFieldsHtml(){
+  const accounts = (acctBankAccounts || []).filter(b => b.active !== false);
+  const defMethod = refundPolicy.defaultMethod === 'credit' || !RF_METHODS[refundPolicy.defaultMethod] ? 'credit' : refundPolicy.defaultMethod;
+  return `<div class="f-field" style="margin-bottom:12px;"><label>Reason</label><select class="input" id="rfReason" style="width:100%;">${RF_REASONS.map(r => `<option>${r}</option>`).join('')}</select></div>
+    <div class="f-field" style="margin-bottom:12px;"><label>Notes <small>(required for "Other")</small></label><textarea class="input" id="rfNote" rows="2" style="width:100%;"></textarea></div>
+    <div class="f-field" style="margin-bottom:12px;"><label>Return the money as</label><select class="input" id="rfMethod" style="width:100%;" onchange="rfUpdateRequestTotal()">${Object.keys(RF_METHODS).map(k => `<option value="${k}" ${k === defMethod ? 'selected' : ''}>${RF_METHODS[k]}</option>`).join('')}</select></div>
+    <div class="f-field" id="rfBankWrap" style="margin-bottom:12px;display:none;"><label>Pay out from (Bank / Cash account)</label><select class="input" id="rfBank" style="width:100%;">${accounts.map(b => `<option value="${b.id}">${escapeHtml(b.name)}</option>`).join('')}</select></div>
+    <div id="rfRouteInfo" class="note" style="margin:8px 0 14px;padding:10px 12px;border-radius:10px;background:rgba(122,46,143,.08);font-size:.88rem;"></div>`;
+}
+const RF_TABLE_CSS = '<style>@media(max-width:600px){.rf-m table{font-size:12.5px}.rf-m th,.rf-m td{padding:8px 6px!important}.rf-m td input[type=number],.rf-m td input[type=text]{width:84px!important;min-width:0}.rf-m th{font-size:10px!important;letter-spacing:0!important}}</style>';
+
+/* ---------- 1b. New Refund page (student-first, like Add Student Discount) ---------- */
+function openRefundCreate(){
+  if(!refundPerm('create')){ showToast("You don't have permission to request refunds."); return; }
+  rfView = 'create'; rfCreateSid = '';
+  renderRefundsTab(document.getElementById('feeBody'));
+}
+function backToRefundList(){
+  window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  rfView = 'list'; rfCreateSid = '';
+  renderRefundsTab(document.getElementById('feeBody'));
+}
+function renderRefundCreate(body){
+  const m = document.getElementById('rfModalContent'); if(m) m.innerHTML = '';
+  body.innerHTML = `<div id="rfCreatePage">
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;">
+      <button class="btn btn-ghost btn-sm" onclick="backToRefundList()">← Back</button>
+      <h3 style="margin:0;font-family:'Baloo 2',cursive;color:var(--navy);">New Fee Refund</h3>
+    </div>
+    <div class="f-field full">
+      <label>Search Student <span class="required-star">*</span></label>
+      <div class="search-wrap" style="max-width:none;">
+        <input class="input" id="rfSearch" placeholder="Search by name or admission no..." style="width:100%;" autocomplete="off" oninput="rfOnSearchInput()" onblur="setTimeout(rfHideSuggestions,150)" onfocus="rfOnSearchInput()">
+        <div class="search-suggestions" id="rfSuggestions"></div>
+      </div>
+    </div>
+    <div id="rfStudentBox" style="margin-top:18px;"></div>
+  </div>`;
+  if(rfCreateSid) rfPickStudent(rfCreateSid);
+}
+function rfOnSearchInput(){
+  clearTimeout(rfSearchTimer);
+  rfSearchTimer = setTimeout(() => {
+    const box = document.getElementById('rfSuggestions'); const inp = document.getElementById('rfSearch');
+    if(!box || !inp) return;
+    const q = inp.value.trim().toLowerCase();
+    if(q.length < 2){ box.classList.remove('open'); box.innerHTML = ''; return; }
+    const ms = students.filter(s => ((s.firstName || '') + ' ' + (s.lastName || '') + ' ' + (s.name || '')).toLowerCase().includes(q) || (s.admissionNo || '').toLowerCase().includes(q)).slice(0, 8);
+    box.innerHTML = ms.length ? ms.map(s => `<div class="sg-item" onmousedown="rfPickStudent('${s.id}')">
+      <div class="sg-avatar">${s.photo ? `<img src="${s.photo}">` : (typeof initials === 'function' ? initials(s) : '')}</div>
+      <div><div class="sg-name">${escapeHtml(rfStudentName(s.id))}</div><div class="sg-meta">${escapeHtml(s.admissionNo || '')} · ${escapeHtml(s.className || '')} — Section ${escapeHtml(s.section || '')}</div></div>
+    </div>`).join('') : `<div class="sg-empty">No students match "${escapeHtml(inp.value.trim())}"</div>`;
+    box.classList.add('open');
+  }, 150);
+}
+function rfHideSuggestions(){ const b = document.getElementById('rfSuggestions'); if(b){ b.classList.remove('open'); } }
+async function rfPickStudent(sid){
+  rfHideSuggestions();
+  rfCreateSid = sid;
+  const inp = document.getElementById('rfSearch'); if(inp) inp.value = '';
+  await rfEnsureAll();
+  const s = students.find(x => x.id === sid);
+  const box = document.getElementById('rfStudentBox'); if(!box || !s) return;
+  const group = payments.filter(x => x.studentId === sid && !x.voided && (Number(x.amount) || 0) > 0)
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const refundable = group.filter(x => payRefundable(x) > 0);
+  const head = `<section class="sf-card" style="padding:14px 16px;margin-bottom:14px;"><b>${escapeHtml(rfStudentName(sid))}</b>
+    <div style="font-size:.85rem;color:var(--ink-soft);">${escapeHtml(s.admissionNo || '')} · ${escapeHtml(s.className || '')} — Section ${escapeHtml(s.section || '')}</div></section>
+    ${rfCreditBannerHtml(sid)}`;
+  if(!refundable.length){
+    box.innerHTML = head + `<div class="empty-state"><b>Nothing to refund</b>This student has no paid fee left that can be refunded.</div>`;
+    return;
+  }
+  box.innerHTML = head + `<label style="font-size:.8rem;font-weight:600;color:var(--navy);margin:6px 0 8px;display:block;">Fees paid — select what to refund <span class="required-star">*</span></label>
+    <div class="table-wrap rf-m" style="margin-bottom:12px;">${RF_TABLE_CSS}<table><thead><tr><th></th><th>Fee head / receipt</th><th>Paid</th><th>Refund amount (₹)</th></tr></thead><tbody>${rfLineRowsHtml(refundable, '', true)}</tbody></table></div>
+    ${rfFieldsHtml()}
+    <div class="modal-actions" style="display:flex;gap:10px;justify-content:flex-end;">
+      <button type="button" class="btn btn-ghost" onclick="backToRefundList()">Cancel</button>
+      <button type="button" class="btn btn-primary" id="rfSubmitBtn" onclick="submitRefundRequest()">💸 Submit refund</button>
+    </div>`;
+  rfUpdateRequestTotal();
+}
 function rfReadLines(){
   const lines = [];
-  document.querySelectorAll('#rfModalContent tr[data-pid]').forEach(tr => {
+  (rfScope() || document).querySelectorAll('tr[data-pid]').forEach(tr => {
     const chk = tr.querySelector('.rf-chk');
     if(!chk || !chk.checked || chk.disabled) return;
     const amount = Math.round((Number(tr.querySelector('.rf-amt').value) || 0) * 100) / 100;
@@ -255,14 +339,14 @@ async function submitRefundRequest(){
       id: 'rf_' + Date.now(), refundNo: rfNextNo(), status: 'pending',
       studentId: first.studentId, studentName: rfStudentName(first.studentId, first.studentName),
       className: (students.find(x => x.id === first.studentId) || {}).className || first.classAtPayment || '',
-      receiptNo: first.receiptNo || '', lines: full, total, reasonCode, note, method, bankAccountId,
+      receiptNo: Array.from(new Set(full.map(l => l.receiptNo).filter(Boolean))).join(', '), lines: full, total, reasonCode, note, method, bankAccountId,
       requestedBy: currentUser.name, requestedByRole: currentUser.role, requestedAt: new Date().toISOString(),
       nonRefundableOverride: nonRefOverride, audit: [],
     };
     rfAudit(r, 'requested', `${fmtMoney(total)} · ${reasonCode}${note ? ' — ' + note : ''}`);
     feeRefunds.push(r); _rfCache = null;
     await storageSet(FEE_REFUNDS_KEY, feeRefunds);
-    rfCloseModal();
+    rfCloseModal(); rfView = 'list'; rfCreateSid = '';
     if(rfCanApproveAmount(total)){
       await rfProcess(r.id);
     }else{
@@ -475,6 +559,8 @@ let rfFilter = { status: 'all', q: '' };
 async function renderRefundsTab(body){
   await rfEnsureAll();
   if(!refundPerm('view')){ body.innerHTML = `<div class="empty-state"><b>You don't have access to Refunds.</b></div>`; return; }
+  if(rfView === 'create' && refundPerm('create')) return renderRefundCreate(body);
+  rfView = 'list';
   const pend = feeRefunds.filter(r => r.status === 'pending');
   const done = feeRefunds.filter(r => r.status === 'processed');
   const month = new Date().toISOString().slice(0, 7);
@@ -511,6 +597,7 @@ async function renderRefundsTab(body){
     <td>${statusPill(r)}<br><small>by ${escapeHtml(r.requestedBy)}${r.approvedBy ? ' · ok ' + escapeHtml(r.approvedBy) : ''}</small></td>
     <td>${actionCell(r)}<br>${trail(r)}</td></tr>`;
   body.innerHTML = `
+    ${refundPerm('create') ? `<div style="display:flex;justify-content:flex-end;margin-bottom:14px;">${sfBtn('primary', 'plus', 'New Refund', 'openRefundCreate()')}</div>` : ''}
     <section class="sf-kpis">
       ${sfKpi('Pending approval', pend.length, pend.length ? 'danger' : 'plain', fmtMoney(sum(pend)))}
       ${sfKpi('Refunded this month', fmtMoney(sum(doneMonth)), 'plain', doneMonth.length + ' refund(s)')}
@@ -525,7 +612,7 @@ async function renderRefundsTab(body){
         <input class="input" placeholder="Search student / receipt / refund no" value="${escapeHtml(rfFilter.q)}" onchange="rfFilter.q=this.value;renderRefundsTab(document.getElementById('feeBody'))" style="min-width:230px;">
       </div></div>
     <div class="table-wrap" style="overflow-x:auto;margin-bottom:24px;"><table><thead><tr><th>Refund</th><th>Student</th><th>Heads</th><th>Amount</th><th>Reason</th><th>Status</th><th></th></tr></thead><tbody>
-      ${hist.length ? hist.map(row).join('') : `<tr><td colspan="7"><div class="empty-state"><b>No refunds yet</b>Use the Refund button on a receipt in a student's fee ledger.</div></td></tr>`}
+      ${hist.length ? hist.map(row).join('') : `<tr><td colspan="7"><div class="empty-state"><b>No refunds yet</b>Click “+ New Refund” above to start one.</div></td></tr>`}
     </tbody></table></div>
     ${credits.length ? `<div class="dash-section-title"><div><h3>Students with account credit</h3></div></div>
       <div class="table-wrap" style="margin-bottom:24px;"><table><thead><tr><th>Student</th><th>Credit</th><th></th></tr></thead><tbody>
