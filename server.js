@@ -216,6 +216,16 @@ async function ensureSchema() {
   // silently lose the time-of-day on every read. approved_date/requested_date
   // on student_discounts use the same TEXT-for-timestamp-strings approach.
   await addColumnIfMissing('payments', 'voided_at TEXT');
+  // Fee Pro: payment details (cheque / reference / deposit account / cashier).
+  await addColumnIfMissing('payments', 'cheque_no TEXT');
+  await addColumnIfMissing('payments', 'cheque_bank TEXT');
+  await addColumnIfMissing('payments', 'cheque_date VARCHAR(32)');
+  await addColumnIfMissing('payments', 'cheque_status VARCHAR(32)');
+  await addColumnIfMissing('payments', 'cheque_status_date VARCHAR(64)');
+  await addColumnIfMissing('payments', 'cheque_note TEXT');
+  await addColumnIfMissing('payments', 'ref TEXT');
+  await addColumnIfMissing('payments', 'bank_account_id TEXT');
+  await addColumnIfMissing('payments', 'collected_by TEXT');
   await sql`CREATE TABLE IF NOT EXISTS student_discounts (
     id VARCHAR(191) PRIMARY KEY, batch_id VARCHAR(191), student_id VARCHAR(191), type TEXT, applies_to TEXT, mode TEXT,
     value DECIMAL(14,2) DEFAULT 0, note TEXT, status TEXT, requested_by TEXT, requested_role TEXT, requested_date TEXT,
@@ -225,6 +235,12 @@ async function ensureSchema() {
     id VARCHAR(191) PRIMARY KEY, student_id VARCHAR(191), name TEXT, amount DECIMAL(14,2) DEFAULT 0, paid BOOLEAN DEFAULT false,
     paid_amount DECIMAL(14,2) DEFAULT 0, date TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`;
+  // Fee Pro: late-fee / opening-balance markers on extra fees, and the concession rule behind a discount.
+  await addColumnIfMissing('student_extra_fees', 'kind VARCHAR(32)');
+  await addColumnIfMissing('student_extra_fees', 'late_key VARCHAR(191)');
+  await addColumnIfMissing('student_extra_fees', 'assessed_by TEXT');
+  await addColumnIfMissing('student_extra_fees', 'added_by TEXT');
+  await addColumnIfMissing('student_discounts', 'rule_id VARCHAR(191)');
   await sql`CREATE TABLE IF NOT EXISTS attendance_records (
     id VARCHAR(191) PRIMARY KEY, student_id VARCHAR(191), date VARCHAR(32), status TEXT,
     session VARCHAR(20), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1192,6 +1208,7 @@ const SIMPLE_RESOURCES = {
       { app: 'extraFeeName', col: 'extra_fee_name' }, { app: 'extraFeeId', col: 'extra_fee_id' },
       { app: 'voided', col: 'voided' }, { app: 'voidType', col: 'void_type' }, { app: 'voidReason', col: 'void_reason' },
       { app: 'voidedBy', col: 'voided_by' }, { app: 'voidedAt', col: 'voided_at' },
+      { app: 'chequeNo', col: 'cheque_no' }, { app: 'chequeBank', col: 'cheque_bank' }, { app: 'chequeDate', col: 'cheque_date' }, { app: 'chequeStatus', col: 'cheque_status' }, { app: 'chequeStatusDate', col: 'cheque_status_date' }, { app: 'chequeNote', col: 'cheque_note' }, { app: 'ref', col: 'ref' }, { app: 'bankAccountId', col: 'bank_account_id' }, { app: 'collectedBy', col: 'collected_by' },
     ],
   },
   discounts: {
@@ -1203,7 +1220,7 @@ const SIMPLE_RESOURCES = {
       { app: 'requestedBy', col: 'requested_by' }, { app: 'requestedRole', col: 'requested_role' },
       { app: 'requestedDate', col: 'requested_date' }, { app: 'approverId', col: 'approver_id' },
       { app: 'approverName', col: 'approver_name' }, { app: 'approvedBy', col: 'approved_by' },
-      { app: 'approvedDate', col: 'approved_date' },
+      { app: 'approvedDate', col: 'approved_date' }, { app: 'ruleId', col: 'rule_id' },
     ],
   },
   'extra-fees': {
@@ -1212,6 +1229,7 @@ const SIMPLE_RESOURCES = {
       { app: 'id', col: 'id' }, { app: 'studentId', col: 'student_id' }, { app: 'name', col: 'name' },
       { app: 'amount', col: 'amount', numeric: true }, { app: 'paid', col: 'paid' }, { app: 'paidAmount', col: 'paid_amount', numeric: true },
       { app: 'date', col: 'date' },
+      { app: 'kind', col: 'kind' }, { app: 'lateKey', col: 'late_key' }, { app: 'assessedBy', col: 'assessed_by' }, { app: 'addedBy', col: 'added_by' },
     ],
   },
   attendance: {
@@ -1452,6 +1470,10 @@ const KV_KEY_TO_MODULE = {
   // Fee refund requests (request → approval → credit note) and the refund policy.
   'fee-refunds': ['managefee'],
   'refund-policy': ['managefee'],
+  'fee-pro-settings': ['managefee'],
+  'fee-day-closings': ['managefee'],
+  'fee-late-waivers': ['managefee'],
+  'concession-rules': ['managefee'],
   'grading-scale': ['exams', 'result'],
   'grading-schemes': ['exams', 'result'],
   'exam-types': ['exams', 'result'],
