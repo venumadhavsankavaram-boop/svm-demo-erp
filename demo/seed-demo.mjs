@@ -1,7 +1,8 @@
 // Demo school sample data  —  node demo/seed-demo.mjs [--base=http://127.0.0.1:3000]
 //
 // Fills a DEMO database with a fictional school ("Sunrise Public School"): students, staff,
-// fees + receipts, accounting vouchers, attendance, exams, notices and one login per role.
+// fees + receipts, accounting vouchers, attendance, exams, notices, transport, hostel, timetable,
+// library, inventory and one login per role.
 // It saves through the ERP's own API (same validation, same record formats as the app).
 //
 // SAFETY: this script WIPES the database it is pointed at. It refuses to run unless
@@ -34,6 +35,25 @@ const FEES = { 'Baby Class':9000,'LKG':10000,'UKG':11000,'1st Class':12000,'2nd 
 const ADMISSION = c => (['6th Class','7th Class','8th Class','9th Class','10th Class'].includes(c) ? 1500 : 1000);
 const SUBJECTS_LOW = ['TELUGU','ENGLISH','MATHS','EVS','HINDI','COMPUTERS'];
 const SUBJECTS_HIGH = ['TELUGU','HINDI','ENGLISH','MATHS','SCIENCE','SOCIAL'];
+
+
+// ---------- facilities: fixed ids so students can point at them ----------
+const ROUTES = [
+  { id: 'route_demo_1', name: 'Route 1 - Market Road', busNumber: 'TS 09 UA 1234', driverName: 'Mohan Lal', driverPhone: '9876500101',
+    stops: [{ id: 'stop_demo_1a', name: 'Market Road', fare: 6000 }, { id: 'stop_demo_1b', name: 'Temple Circle', fare: 6500 }, { id: 'stop_demo_1c', name: 'Bus Stand', fare: 7000 }] },
+  { id: 'route_demo_2', name: 'Route 2 - Green Park', busNumber: 'TS 09 UB 5678', driverName: 'Shankar Das', driverPhone: '9876500102',
+    stops: [{ id: 'stop_demo_2a', name: 'Green Park', fare: 5500 }, { id: 'stop_demo_2b', name: 'City Hospital', fare: 6000 }, { id: 'stop_demo_2c', name: 'Lake View', fare: 6500 }] },
+  { id: 'route_demo_3', name: 'Route 3 - Railway Colony', busNumber: 'TS 09 UC 9012', driverName: 'Ravi Teja', driverPhone: '9876500103',
+    stops: [{ id: 'stop_demo_3a', name: 'Railway Colony', fare: 7500 }, { id: 'stop_demo_3b', name: 'Old Town', fare: 8000 }] },
+];
+const HOSTEL_ROOMS = [
+  { id: 'room_demo_a1', blockName: 'Boys Block A', roomNumber: 'A-101', roomType: 'Shared', capacity: 4, fee: 30000, wardenName: 'Mr. Satish Kumar', wardenPhone: '9876500201' },
+  { id: 'room_demo_a2', blockName: 'Boys Block A', roomNumber: 'A-102', roomType: 'Shared', capacity: 4, fee: 30000, wardenName: 'Mr. Satish Kumar', wardenPhone: '9876500201' },
+  { id: 'room_demo_a3', blockName: 'Boys Block A', roomNumber: 'A-103', roomType: 'Double', capacity: 2, fee: 38000, wardenName: 'Mr. Satish Kumar', wardenPhone: '9876500201' },
+  { id: 'room_demo_b1', blockName: 'Girls Block B', roomNumber: 'B-101', roomType: 'Shared', capacity: 4, fee: 30000, wardenName: 'Mrs. Radha Devi', wardenPhone: '9876500202' },
+  { id: 'room_demo_b2', blockName: 'Girls Block B', roomNumber: 'B-102', roomType: 'Shared', capacity: 4, fee: 30000, wardenName: 'Mrs. Radha Devi', wardenPhone: '9876500202' },
+  { id: 'room_demo_b3', blockName: 'Girls Block B', roomNumber: 'B-103', roomType: 'Double', capacity: 2, fee: 38000, wardenName: 'Mrs. Radha Devi', wardenPhone: '9876500202' },
+];
 
 const today = new Date();
 const isoDay = d => d.toISOString().slice(0, 10);
@@ -142,6 +162,18 @@ function buildStudents() {
       }
     }
   }
+  // Bus riders: spread over the routes/stops. Boarders (6th class and above): fill the hostel rooms by gender.
+  let ti = 0;
+  out.forEach(st => {
+    if (st.needsTransport === 'Yes') { const r = ROUTES[ti % ROUTES.length]; st.transportRouteId = r.id; st.transportStopId = r.stops[Math.floor(ti / ROUTES.length) % r.stops.length].id; ti++; }
+  });
+  const fill = {}; HOSTEL_ROOMS.forEach(r => { fill[r.id] = 0; });
+  out.filter(st => CLASSES.indexOf(st.className) >= 8).forEach(st => {
+    const rooms = HOSTEL_ROOMS.filter(r => (st.gender === 'Male') === r.blockName.startsWith('Boys') && fill[r.id] < r.capacity - (r.capacity > 2 ? 1 : 0));
+    if (!rooms.length || rnd() > 0.28) return;
+    const r = rooms[0]; fill[r.id]++;
+    st.isBoarder = 'Yes'; st.hostelRoomId = r.id; st.needsTransport = 'No'; delete st.transportRouteId; delete st.transportStopId;
+  });
   return out;
 }
 function buildStaff() {
@@ -282,6 +314,113 @@ async function main() {
   ];
   await pool(notices.map((n, k) => ({ id: `msg_demo_${k}`, title: n[0], body: n[1], type: 'Announcement', channels: ['In-App'], audienceLabel: 'Public website', link: '', sentBy: 'Demo Admin', sentDate: isoDay(daysAgo(k * 3)) })),
     m => api('POST', '/api/comms-messages', m));
+
+
+  // ---------- Facilities: transport, hostel, timetable, library, inventory ----------
+  console.log('Transport & hostel…');
+  await api('PUT', '/api/kv/transport-routes', ROUTES);
+  await api('PUT', '/api/kv/hostel-rooms', HOSTEL_ROOMS);
+
+  console.log('Timetable…');
+  const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const PERIODS = [
+    { id: 'p1', label: 'Period 1', start: '09:00', end: '09:45', isBreak: false }, { id: 'p2', label: 'Period 2', start: '09:45', end: '10:30', isBreak: false },
+    { id: 'p3', label: 'Period 3', start: '10:30', end: '11:15', isBreak: false }, { id: 'b1', label: 'Short Break', start: '11:15', end: '11:30', isBreak: true },
+    { id: 'p4', label: 'Period 4', start: '11:30', end: '12:15', isBreak: false }, { id: 'p5', label: 'Period 5', start: '12:15', end: '13:00', isBreak: false },
+    { id: 'lunch', label: 'Lunch', start: '13:00', end: '13:40', isBreak: true }, { id: 'p6', label: 'Period 6', start: '13:40', end: '14:25', isBreak: false },
+    { id: 'p7', label: 'Period 7', start: '14:25', end: '15:10', isBreak: false }, { id: 'p8', label: 'Period 8', start: '15:10', end: '15:55', isBreak: false },
+  ];
+  const classPeriods = PERIODS.filter(x => !x.isBreak);
+  const busy = new Set(); const tt = [];
+  const sectionsOf = cls => (TWO_SECTIONS.has(cls) ? ['A', 'B'] : ['A']);
+  let rot = 0;
+  DAYS.forEach((day, di) => {
+    classPeriods.forEach((per, pi) => {
+      CLASSES.forEach((cls, ci) => {
+        const list = ci >= 3 ? SUBJECTS_HIGH : SUBJECTS_LOW;
+        sectionsOf(cls).forEach((sec, si) => {
+          const subj = list[(pi + di + ci + si) % list.length];
+          for (let tries = 0; tries < teachers.length; tries++) {
+            const t = teachers[(ci + si + rot + tries) % teachers.length];
+            const key = `${day}|${per.id}|${t.id}`;
+            if (busy.has(key)) continue;
+            busy.add(key);
+            tt.push({ id: `tt_demo_${tt.length}`, className: cls, section: sec, day, period: per.id, subject: subj, staffId: t.id });
+            break;
+          }
+          rot++;
+        });
+      });
+    });
+  });
+  await api('PUT', '/api/kv/timetable-periods', PERIODS);
+  await api('PUT', '/api/kv/timetable-days', DAYS);
+  await api('PUT', '/api/kv/timetable-entries', tt);
+
+  console.log('Library…');
+  const BOOKS = [
+    ['Panchatantra Stories', 'Vishnu Sharma', 'Story'], ['Wings of Fire', 'A. P. J. Abdul Kalam', 'Biography'], ['Malgudi Days', 'R. K. Narayan', 'Story'],
+    ['The Jungle Book', 'Rudyard Kipling', 'Story'], ['Discovery of India', 'Jawaharlal Nehru', 'History'], ['Gitanjali', 'Rabindranath Tagore', 'Poetry'],
+    ['Oxford Student Dictionary', 'Oxford Press', 'Reference'], ['Concise Atlas of India', 'Survey Dept.', 'Reference'], ['Science Experiments for Kids', 'M. Rao', 'Science'],
+    ['The Story of the Earth', 'S. Kumar', 'Science'], ['Famous Scientists', 'P. Iyer', 'Biography'], ['Mathematics Magic', 'Shakuntala Devi', 'Maths'],
+    ['Puzzles to Puzzle You', 'Shakuntala Devi', 'Maths'], ['Tales of Tenali Rama', 'Anant Pai', 'Story'], ['Mahabharata for Children', 'C. Rajagopalachari', 'Epic'],
+    ['Ramayana for Children', 'C. Rajagopalachari', 'Epic'], ['Telugu Vyakaranam', 'B. Rao', 'Language'], ['Hindi Vyakaran', 'K. Sharma', 'Language'],
+    ['English Grammar in Use', 'R. Murphy', 'Language'], ['Our Environment', 'NCERT', 'Science'], ['General Knowledge 2026', 'Manorama', 'Reference'],
+    ['Stories of Great Indians', 'L. Devi', 'Biography'], ['Birbal the Wise', 'Anant Pai', 'Story'], ['Computer Basics', 'T. Reddy', 'Computers'],
+    ['Sports Heroes of India', 'V. Naidu', 'Biography'], ['Trees of India', 'N. Menon', 'Science'], ['Moral Stories', 'A. Prasad', 'Story'],
+    ['Space Exploration', 'D. Singh', 'Science'], ['Poems for Little Ones', 'S. Varma', 'Poetry'], ['The Water Cycle', 'NCERT', 'Science'],
+  ];
+  const libBooks = BOOKS.map((b, k) => ({ id: `book_demo_${k}`, title: b[0], author: b[1], category: b[2], isbn: `978-81-${pad(1000 + k * 7, 4)}-${pad(k, 3)}-0`, publisher: 'Demo Publishers',
+    shelfLocation: `Shelf ${String.fromCharCode(65 + (k % 5))}-${1 + (k % 4)}`, totalCopies: int(2, 6), availableCopies: 0, addedDate: isoDay(daysAgo(int(30, 300))) }));
+  libBooks.forEach(b => { b.availableCopies = b.totalCopies; });
+  const libIssues = [];
+  const borrowers = students.filter(x => CLASSES.indexOf(x.className) >= 3).slice(0, 14);
+  borrowers.forEach((st, k) => {
+    const book = libBooks[(k * 3 + 1) % libBooks.length];
+    const back = int(2, 30), returned = k % 4 === 3;
+    const issueDate = isoDay(daysAgo(back)), dueDate = isoDay(daysAgo(back - 14));
+    libIssues.push({ id: `issue_demo_${k}`, bookId: book.id, bookTitle: book.title, borrowerType: 'Student', borrowerId: st.id, borrowerName: st.name, issueDate, dueDate,
+      returnDate: returned ? isoDay(daysAgo(Math.max(0, back - int(5, 13)))) : '', status: returned ? 'Returned' : 'Issued', fineAmount: 0 });
+    if (!returned) book.availableCopies = Math.max(0, book.availableCopies - 1);
+  });
+  [['stf_demo_004', 'Lakshmi Devi'], ['stf_demo_005', 'Srinivas Reddy']].forEach((t, k) => {
+    const book = libBooks[(k * 5 + 2) % libBooks.length];
+    libIssues.push({ id: `issue_demo_t${k}`, bookId: book.id, bookTitle: book.title, borrowerType: 'Staff', borrowerId: t[0], borrowerName: t[1], issueDate: isoDay(daysAgo(6 + k)), dueDate: isoDay(daysAgo(-8 + k)), returnDate: '', status: 'Issued', fineAmount: 0 });
+    book.availableCopies = Math.max(0, book.availableCopies - 1);
+  });
+  await api('PUT', '/api/kv/library-settings', { loanPeriodDays: 14, finePerDay: 2 });
+  await api('PUT', '/api/kv/library-books', libBooks);
+  await api('PUT', '/api/kv/library-issues', libIssues);
+
+  console.log('Inventory…');
+  const ITEMS = [
+    ['School Bag', 'Student Supplies', 'Bag', 'Piece', 320, 450, 40, 8], ['Water Bottle', 'Student Supplies', 'Water Bottle', 'Piece', 90, 150, 60, 15],
+    ['Lunch Box', 'Student Supplies', 'Lunch Box', 'Piece', 110, 180, 50, 10], ['Uniform Shirt', 'Uniforms', 'Shirt', 'Piece', 280, 400, 120, 25],
+    ['Uniform Trousers', 'Uniforms', 'Trousers', 'Piece', 330, 480, 100, 25], ['Uniform Skirt', 'Uniforms', 'Skirt', 'Piece', 300, 430, 70, 20],
+    ['School Tie', 'Uniforms', 'Tie', 'Piece', 45, 80, 150, 30], ['School Belt', 'Uniforms', 'Belt', 'Piece', 55, 90, 110, 30],
+    ['Sports Shoes', 'Uniforms', 'Shoes', 'Pair', 380, 520, 6, 15], ['Telugu Textbook', 'Books', 'Textbook', 'Piece', 120, 160, 130, 20],
+    ['English Textbook', 'Books', 'Textbook', 'Piece', 140, 190, 125, 20], ['Maths Textbook', 'Books', 'Textbook', 'Piece', 150, 200, 120, 20],
+    ['Long Notebook (200 pages)', 'Books', 'Notebook', 'Piece', 38, 55, 400, 100], ['Student Diary', 'Books', 'Diary', 'Piece', 30, 50, 180, 40],
+    ['Geometry Box', 'Stationery', 'Geometry Box', 'Box', 85, 130, 70, 15], ['Pen Pack (10)', 'Stationery', 'Pen', 'Packet', 60, 95, 90, 20],
+    ['Football', 'Sports', 'Ball', 'Piece', 450, 650, 4, 5], ['Cricket Kit', 'Sports', 'Kit', 'Set', 1800, 2500, 8, 3],
+  ];
+  const invItems = ITEMS.map((x, k) => ({ id: `item_demo_${k}`, name: x[0], type: 'Sellable', category: x[1], subCategory: x[2], quantity: x[6], threshold: x[7], costPrice: x[4], sellingPrice: x[5],
+    unit: x[3], size: '', applicableClass: '', taxRate: 0, hsnCode: '', description: '', active: true, createdBy: 'Demo Admin' }));
+  const invSales = [];
+  students.slice(0, 40).forEach((st, k) => {
+    const lines = 1 + (k % 3);
+    for (let l = 0; l < lines; l++) {
+      const it = invItems[(k * 2 + l * 5) % invItems.length]; const qty = 1 + ((k + l) % 3);
+      if (it.quantity < qty) continue;
+      const unit = it.sellingPrice, total = unit * qty, paid = (k + l) % 7 === 0 ? Math.round(total / 2) : total;
+      it.quantity -= qty;
+      invSales.push({ id: `isale_demo_${k}_${l}`, itemId: it.id, itemName: it.name, buyerType: 'Student', studentId: st.id, buyerName: st.name, qty, unitPrice: unit, unitCost: it.costPrice, discount: 0,
+        totalAmount: total, totalCost: it.costPrice * qty, paidAmount: paid, mode: pick(['Cash', 'UPI', 'Cash']), notes: '', date: isoDay(daysAgo(int(1, 60))), soldBy: 'Demo Accountant', sefId: '' });
+    }
+  });
+  await api('PUT', '/api/kv/inventory-items', invItems);
+  await api('PUT', '/api/kv/inventory-sales', invSales);
+  console.log(`  ${ROUTES.length} routes, ${HOSTEL_ROOMS.length} hostel rooms, ${tt.length} timetable slots, ${libBooks.length} books, ${invItems.length} products, ${invSales.length} sales`);
 
   // Remove the temporary seeder login
   await sql`DELETE FROM sessions WHERE user_id = 'u_seeder'`;
