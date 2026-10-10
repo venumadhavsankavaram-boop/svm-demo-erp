@@ -5156,7 +5156,7 @@ if (DEMO_MODE) {
   const runDemoSeed = () => {
     if (seeding) return; seeding = true;
     import('node:child_process').then(({ spawn }) => {
-      const p = spawn(process.execPath, ['demo/seed-demo.mjs', `--base=http://127.0.0.1:${PORT}`], { stdio: 'inherit', env: process.env });
+      const p = spawn(process.execPath, ['demo/seed-demo.mjs', `--base=http://127.0.0.1:${PORT}`], { stdio: 'inherit', env: { ...process.env, NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost', NODE_USE_ENV_PROXY: '0' } });
       p.on('exit', code => { seeding = false; console.log('Demo seed finished with code', code); });
     }).catch(e => { seeding = false; console.error('Demo seed failed to start:', e); });
   };

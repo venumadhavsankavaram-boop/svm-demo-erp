@@ -287,4 +287,4 @@ async function main() {
   ['demo.admin', 'demo.principal', 'demo.accountant', 'demo.office', 'demo.teacher', 'demo.parent', 'demo.student'].forEach(u => console.log('  ' + u));
 }
 
-main().then(() => closePool()).catch(async e => { console.error('SEED FAILED:', e.message); try { await closePool(); } catch (x) {} process.exit(1); });
+main().then(() => closePool()).catch(async e => { console.error('SEED FAILED:', e.message, e.cause ? '(cause: ' + (e.cause.code || e.cause.message || e.cause) + ')' : ''); try { await closePool(); } catch (x) {} process.exit(1); });
