@@ -2085,7 +2085,8 @@ async function purgeExpiredTrash() {
 // purgeExpiredTrash definitions above it — see the note near the top of this
 // file (search "Cannot access 'PURGEABLE_RESOURCES'") for why this used to
 // live up there and broke on every boot.
-purgeExpiredTrash().catch(err => console.error('purgeExpiredTrash (startup) failed:', err));
+// Delayed so a brand-new database has finished creating its tables first (a first boot on a slow host takes a while).
+setTimeout(() => { purgeExpiredTrash().catch(err => console.error('purgeExpiredTrash (startup) failed:', err)); }, 90 * 1000);
 setInterval(() => { purgeExpiredTrash().catch(err => console.error('purgeExpiredTrash (interval) failed:', err)); }, 24 * 60 * 60 * 1000);
 // Shared by both handleUsers' and handleHybrid's PUT ?purge=1 branches: an
 // Admin/Principal jumping the retention queue to remove one specific
@@ -3230,7 +3231,7 @@ async function feeReminderTick() {
   await runFeeDueReminders().catch(err => console.error('runFeeDueReminders failed:', err));
 }
 setInterval(feeReminderTick, 60 * 60 * 1000);
-setTimeout(feeReminderTick, 30 * 1000);
+setTimeout(feeReminderTick, 120 * 1000); // after first-boot table creation has finished
 
 // ---------- Push subscription endpoints ----------
 // Any signed-in login can call these (not just Parent/Student) so a Teacher
@@ -5155,6 +5156,15 @@ const httpServer = app.listen(PORT, () => {
 // and reload it every night at 02:00 IST so the demo never drifts. Does nothing on a real school.
 if (DEMO_MODE) {
   let seeding = false, lastNightly = '';
+  // Re-load the sample school whenever demo/seed-demo.mjs changes (its fingerprint is kept in kv_store).
+  const seedFingerprint = async () => {
+    const { createHash } = await import('node:crypto'); const fs = await import('node:fs');
+    return createHash('sha256').update(fs.readFileSync(new URL('./demo/seed-demo.mjs', import.meta.url))).digest('hex').slice(0, 16);
+  };
+  const markSeeded = async () => {
+    const h = await seedFingerprint();
+    await sql`INSERT INTO kv_store (\`key\`, value) VALUES ('demo-seed-version', ${JSON.stringify(h)}) ON DUPLICATE KEY UPDATE value = VALUES(value)`;
+  };
   const runDemoSeed = () => {
     if (seeding) return; seeding = true;
     // Run the seed inside this process, calling the app directly (no network):
@@ -5169,6 +5179,7 @@ if (DEMO_MODE) {
       };
       const mod = await import('./demo/seed-demo.mjs?run=' + Date.now());
       await mod.finished;
+      await markSeeded();
       console.log('Demo seed finished OK');
     }).catch(e => console.error('SEED FAILED:', e && e.message, e && e.cause ? '(cause: ' + (e.cause.code || e.cause.message) + ')' : ''))
       .finally(() => { seeding = false; delete globalThis.__demoFetch; });
@@ -5176,7 +5187,10 @@ if (DEMO_MODE) {
   setTimeout(async () => {
     try {
       const r = await sql`SELECT COUNT(*) AS n FROM students`;
+      const v = await sql`SELECT value FROM kv_store WHERE \`key\` = 'demo-seed-version'`;
+      const stored = v.length ? String(v[0].value).replace(/"/g, '') : '';
       if (Number(r[0].n) === 0) { console.log('Demo mode: database is empty, loading sample school…'); runDemoSeed(); }
+      else if (stored !== await seedFingerprint()) { console.log('Demo mode: sample data is out of date, reloading…'); runDemoSeed(); }
     } catch (e) { console.error('Demo mode check failed:', e.message); }
   }, 90 * 1000);
   setInterval(() => {
