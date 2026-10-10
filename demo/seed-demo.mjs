@@ -40,9 +40,12 @@ const isoDay = d => d.toISOString().slice(0, 10);
 const daysAgo = n => { const d = new Date(today); d.setDate(d.getDate() - n); return d; };
 
 // ---------- HTTP helper (signed in as the temporary seeder account) ----------
+// Hosted demo: GoDaddy blocks the app from opening a connection to itself, so the server
+// hands this script an in-process fetch (globalThis.__demoFetch). Standalone runs use real HTTP.
+const doFetch = globalThis.__demoFetch || fetch;
 let cookie = '';
 async function api(method, path, body, { allow = [] } = {}) {
-  const res = await fetch(BASE + path, {
+  const res = await doFetch(BASE + path, {
     method,
     headers: { 'Content-Type': 'application/json', Cookie: cookie, 'X-Actor-Name': 'Demo%20Seeder', 'X-Actor-Role': 'Admin' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -105,7 +108,7 @@ async function loginAsSeeder() {
   // The seeder's password is random and never stored in plaintext: set a known one just for this run.
   const pw = 'seed-' + Math.random().toString(36).slice(2) + 'Aa1';
   await sql`UPDATE users SET password = ${await bcrypt.hash(pw, 10)} WHERE id = 'u_seeder'`;
-  const res = await fetch(BASE + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: SEED_USER, password: pw, audience: 'staff' }) });
+  const res = await doFetch(BASE + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: SEED_USER, password: pw, audience: 'staff' }) });
   if (!res.ok) throw new Error('Seeder login failed: ' + res.status + ' ' + (await res.text()).slice(0, 120));
   const set = res.headers.getSetCookie ? res.headers.getSetCookie() : [res.headers.get('set-cookie') || ''];
   cookie = set.map(c => c.split(';')[0]).join('; ');
@@ -287,4 +290,7 @@ async function main() {
   ['demo.admin', 'demo.principal', 'demo.accountant', 'demo.office', 'demo.teacher', 'demo.parent', 'demo.student'].forEach(u => console.log('  ' + u));
 }
 
-main().then(() => closePool()).catch(async e => { console.error('SEED FAILED:', e.message, e.cause ? '(cause: ' + (e.cause.code || e.cause.message || e.cause) + ')' : ''); try { await closePool(); } catch (x) {} process.exit(1); });
+const _run = main();
+export const finished = globalThis.__demoFetch
+  ? _run
+  : _run.then(() => closePool()).catch(async e => { console.error('SEED FAILED:', e.message, e.cause ? '(cause: ' + (e.cause.code || e.cause.message || e.cause) + ')' : ''); try { await closePool(); } catch (x) {} process.exit(1); });

@@ -5155,10 +5155,21 @@ if (DEMO_MODE) {
   let seeding = false, lastNightly = '';
   const runDemoSeed = () => {
     if (seeding) return; seeding = true;
-    import('node:child_process').then(({ spawn }) => {
-      const p = spawn(process.execPath, ['demo/seed-demo.mjs', `--base=http://127.0.0.1:${PORT}`], { stdio: 'inherit', env: { ...process.env, NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost', NODE_USE_ENV_PROXY: '0' } });
-      p.on('exit', code => { seeding = false; console.log('Demo seed finished with code', code); });
-    }).catch(e => { seeding = false; console.error('Demo seed failed to start:', e); });
+    // Run the seed inside this process, calling the app directly (no network):
+    // the hosting sandbox refuses a connection from the app to its own port (EACCES).
+    import('light-my-request').then(async ({ default: inject }) => {
+      globalThis.__demoFetch = async (url, opts = {}) => {
+        const u = new URL(url);
+        const r = await inject(app, { method: opts.method || 'GET', url: u.pathname + u.search, headers: opts.headers || {}, payload: opts.body });
+        const h = new Headers();
+        for (const [k, v] of Object.entries(r.headers)) { if (Array.isArray(v)) v.forEach(x => h.append(k, x)); else if (v !== undefined) h.set(k, String(v)); }
+        return new Response([204, 304].includes(r.statusCode) ? null : r.payload, { status: r.statusCode, headers: h });
+      };
+      const mod = await import('./demo/seed-demo.mjs?run=' + Date.now());
+      await mod.finished;
+      console.log('Demo seed finished OK');
+    }).catch(e => console.error('SEED FAILED:', e && e.message, e && e.cause ? '(cause: ' + (e.cause.code || e.cause.message) + ')' : ''))
+      .finally(() => { seeding = false; delete globalThis.__demoFetch; });
   };
   setTimeout(async () => {
     try {

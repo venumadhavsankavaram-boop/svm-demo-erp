@@ -1,5 +1,5 @@
 {
-  "name": "svm-demo-erp-server",
+  "name": "raghavan-erp-server",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -13,9 +13,10 @@
     "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "mysql2": "^3.11.0",
     "bcryptjs": "^2.4.3",
+    "express": "^4.19.2",
+    "light-my-request": "^5.14.0",
+    "mysql2": "^3.11.0",
     "web-push": "^3.6.7"
   }
 }
