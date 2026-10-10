@@ -9,7 +9,7 @@
         account, or cash / online / cheque).
      2. Admin's refunds are approved on the spot. Anyone else with the
         "Approve" permission (Principal by default) can approve up to the
-        policy limit (Refunds tab → Policy); above that only Admin can.
+        policy limit (Configuration → Refund Policy); above that only Admin can.
         Requesters without approve rights wait in the queue.
      3. On approval: credit refunds raise the student's account credit (no cash
         moves); cash/online/cheque refunds also post a "Fee Refund" expense
@@ -231,38 +231,45 @@ function renderRefundCreate(body){
       <button class="btn btn-ghost btn-sm" onclick="backToRefundList()">← Back</button>
       <h3 style="margin:0;font-family:'Baloo 2',cursive;color:var(--navy);">New Fee Refund</h3>
     </div>
-    <div class="f-field full">
-      <label>Search Student <span class="required-star">*</span></label>
-      <div class="search-wrap" style="max-width:none;">
-        <input class="input" id="rfSearch" placeholder="Search by name or admission no..." style="width:100%;" autocomplete="off" oninput="rfOnSearchInput()" onblur="setTimeout(rfHideSuggestions,150)" onfocus="rfOnSearchInput()">
-        <div class="search-suggestions" id="rfSuggestions"></div>
+    <div class="form-grid">
+      <div class="f-field full" style="grid-column:1/-1;">
+        <label>Search Student <span class="required-star">*</span></label>
+        <input class="input" id="rfSearch" placeholder="Type a name or admission no..." style="width:100%;" autocomplete="off" oninput="rfOnSearchInput()">
       </div>
+      <div class="f-field"><label>Class</label>
+        <select id="rfClassSel" onchange="rfRenderStudentList()"><option value="">All classes</option>${CLASS_LEVELS.map(c => `<option value="${c}">${c}</option>`).join('')}</select></div>
+      <div class="f-field"><label>Section</label>
+        <select id="rfSectionSel" onchange="rfRenderStudentList()"><option value="">All sections</option>${SECTIONS.map(x => `<option value="${x}">Section ${x}</option>`).join('')}</select></div>
     </div>
+    <div id="rfStudentList" style="margin-top:12px;"></div>
     <div id="rfStudentBox" style="margin-top:18px;"></div>
   </div>`;
+  rfRenderStudentList();
   if(rfCreateSid) rfPickStudent(rfCreateSid);
 }
 function rfOnSearchInput(){
   clearTimeout(rfSearchTimer);
-  rfSearchTimer = setTimeout(() => {
-    const box = document.getElementById('rfSuggestions'); const inp = document.getElementById('rfSearch');
-    if(!box || !inp) return;
-    const q = inp.value.trim().toLowerCase();
-    if(q.length < 2){ box.classList.remove('open'); box.innerHTML = ''; return; }
-    const ms = students.filter(s => ((s.firstName || '') + ' ' + (s.lastName || '') + ' ' + (s.name || '')).toLowerCase().includes(q) || (s.admissionNo || '').toLowerCase().includes(q)).slice(0, 8);
-    box.innerHTML = ms.length ? ms.map(s => `<div class="sg-item" onmousedown="rfPickStudent('${s.id}')">
-      <div class="sg-avatar">${s.photo ? `<img src="${s.photo}">` : (typeof initials === 'function' ? initials(s) : '')}</div>
-      <div><div class="sg-name">${escapeHtml(rfStudentName(s.id))}</div><div class="sg-meta">${escapeHtml(s.admissionNo || '')} · ${escapeHtml(s.className || '')} — Section ${escapeHtml(s.section || '')}</div></div>
-    </div>`).join('') : `<div class="sg-empty">No students match "${escapeHtml(inp.value.trim())}"</div>`;
-    box.classList.add('open');
-  }, 150);
+  rfSearchTimer = setTimeout(rfRenderStudentList, 150);
 }
-function rfHideSuggestions(){ const b = document.getElementById('rfSuggestions'); if(b){ b.classList.remove('open'); } }
+function rfRenderStudentList(){
+  const box = document.getElementById('rfStudentList'); if(!box) return;
+  const q = (document.getElementById('rfSearch').value || '').trim().toLowerCase();
+  const cls = document.getElementById('rfClassSel').value;
+  const sec = document.getElementById('rfSectionSel').value;
+  if(!q && !cls && !sec){ box.innerHTML = `<p style="font-size:.85rem;color:var(--ink-soft);margin:0;">Pick a class (and section), or type a name, to list students.</p>`; return; }
+  let list = students.filter(s => (typeof isActive !== 'function' || isActive(s)) && (!cls || s.className === cls) && (!sec || String(s.section) === String(sec)) &&
+    (!q || (((s.firstName || '') + ' ' + (s.lastName || '') + ' ' + (s.name || '')).toLowerCase().includes(q) || (s.admissionNo || '').toLowerCase().includes(q))));
+  list.sort((a, b) => rfStudentName(a.id).localeCompare(rfStudentName(b.id)));
+  const total = list.length; list = list.slice(0, 60);
+  if(!total){ box.innerHTML = `<div class="empty-state"><b>No students match</b>Try a different name, class or section.</div>`; return; }
+  box.innerHTML = `<div class="table-wrap" style="max-height:300px;overflow:auto;"><table><thead><tr><th>Student</th><th>Adm. no</th><th>Class</th><th></th></tr></thead><tbody>
+    ${list.map(s => `<tr${s.id === rfCreateSid ? ' style="background:rgba(122,46,143,.08);"' : ''}><td><b>${escapeHtml(rfStudentName(s.id))}</b></td><td>${escapeHtml(s.admissionNo || '')}</td><td>${escapeHtml(s.className || '')} — ${escapeHtml(s.section || '')}</td><td>${sfBtn('soft', 'check', s.id === rfCreateSid ? 'Selected' : 'Select', `rfPickStudent('${s.id}')`)}</td></tr>`).join('')}
+    </tbody></table></div>${total > 60 ? `<small>Showing 60 of ${total} — narrow the search to see the rest.</small>` : ''}`;
+}
 async function rfPickStudent(sid){
-  rfHideSuggestions();
   rfCreateSid = sid;
-  const inp = document.getElementById('rfSearch'); if(inp) inp.value = '';
   await rfEnsureAll();
+  rfRenderStudentList();
   const s = students.find(x => x.id === sid);
   const box = document.getElementById('rfStudentBox'); if(!box || !s) return;
   const group = payments.filter(x => x.studentId === sid && !x.voided && (Number(x.amount) || 0) > 0)
@@ -621,17 +628,7 @@ async function renderRefundsTab(body){
     ${Object.keys(reasonMap).length ? `<div class="dash-section-title"><div><h3>Refunds by reason</h3></div></div>
       <div class="table-wrap" style="margin-bottom:24px;"><table><thead><tr><th>Reason</th><th>Count</th><th>Amount</th></tr></thead><tbody>
       ${Object.keys(reasonMap).sort((a, b) => reasonMap[b].amt - reasonMap[a].amt).map(k => `<tr><td>${escapeHtml(k)}</td><td>${reasonMap[k].n}</td><td>${fmtMoney(reasonMap[k].amt)}</td></tr>`).join('')}
-      </tbody></table></div>` : ''}
-    <div class="dash-section-title"><div><h3>Refund policy</h3></div></div>
-    <div class="sf-kpi sf-kpi--plain" style="padding:16px;margin-bottom:24px;">
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
-        <label class="sf-field"><span>Principal can approve up to (₹)</span><input type="number" min="0" id="rfPolLimit" value="${rfApproverLimit('Principal')}" ${isAdmin ? '' : 'disabled'}></label>
-        <label class="sf-field"><span>Default return method</span><select id="rfPolMethod" ${isAdmin ? '' : 'disabled'}>${Object.keys(RF_METHODS).map(k => `<option value="${k}" ${refundPolicy.defaultMethod === k ? 'selected' : ''}>${RF_METHODS[k]}</option>`).join('')}</select></label>
-        <label class="sf-field"><span>Non-refundable heads (words, comma-separated)</span><input id="rfPolNon" value="${escapeHtml(refundPolicy.nonRefundable || '')}" ${isAdmin ? '' : 'disabled'}></label>
-      </div>
-      <p style="font-size:.82rem;margin:10px 0 0;opacity:.8;">Admin approves any amount, and an Admin's own refunds need no second approval. Who may request / approve / cancel / print is set per role in <b>Roles &amp; Permissions → Manage Fee → Fee Refunds</b>.</p>
-      ${isAdmin ? `<div style="margin-top:12px;">${sfBtn('primary', 'check', 'Save policy', 'saveRefundPolicy()')}</div>` : ''}
-    </div>`;
+      </tbody></table></div>` : ''}`;
 }
 async function saveRefundPolicy(){
   if(currentUser.role !== 'Admin'){ showToast('Only Admin can change the refund policy.'); return; }
@@ -643,5 +640,22 @@ async function saveRefundPolicy(){
   };
   await storageSet(REFUND_POLICY_KEY, refundPolicy);
   showToast('Refund policy saved.', 'burst');
-  renderRefundsTab(document.getElementById('feeBody'));
+  initRefundPolicyPage();
+}
+
+/* ---------- Refund Policy (Configuration → Refund Policy) ---------- */
+async function initRefundPolicyPage(){
+  const body = document.getElementById('refundPolicyBody'); if(!body) return;
+  await rfEnsureAll();
+  const isAdmin = currentUser.role === 'Admin';
+  body.innerHTML = `${isAdmin ? '' : '<p class="note" style="margin-bottom:12px;">View only — only Admin can change the refund policy.</p>'}    
+    <div class="sf-card" style="padding:20px;margin-bottom:24px;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+        <label class="sf-field"><span>Principal can approve up to (₹)</span><input type="number" min="0" id="rfPolLimit" value="${rfApproverLimit('Principal')}" ${isAdmin ? '' : 'disabled'}></label>
+        <label class="sf-field"><span>Default return method</span><select id="rfPolMethod" ${isAdmin ? '' : 'disabled'}>${Object.keys(RF_METHODS).map(k => `<option value="${k}" ${refundPolicy.defaultMethod === k ? 'selected' : ''}>${RF_METHODS[k]}</option>`).join('')}</select></label>
+        <label class="sf-field"><span>Non-refundable heads (words, comma-separated)</span><input id="rfPolNon" value="${escapeHtml(refundPolicy.nonRefundable || '')}" ${isAdmin ? '' : 'disabled'}></label>
+      </div>
+      <p style="font-size:.82rem;margin:10px 0 0;opacity:.8;">Admin approves any amount, and an Admin's own refunds need no second approval. Refunds are started from <em>Manage Fee → Refunds → New Refund</em>. Who may request / approve / cancel / print is set per role in <em>Roles &amp; Permissions → Manage Fee → Fee Refunds</em>.</p>
+      ${isAdmin ? `<div style="margin-top:12px;">${sfBtn('primary', 'check', 'Save policy', 'saveRefundPolicy()')}</div>` : ''}
+    </div>`;
 }

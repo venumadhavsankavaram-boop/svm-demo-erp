@@ -124,6 +124,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     { key:'setup_academicyear',  label:'Academic Year',   icon:'📅', category:'Configuration', isNew:true },
     { key:'setup_feestructure',  label:'Fee Structure',   icon:'💳', category:'Configuration', isNew:true },
     { key:'setup_promotions',    label:'Promotions Setup', icon:'⬆️', category:'Configuration', isNew:true },
+    { key:'setup_refundpolicy',  label:'Refund Policy (view only — only Admin can change)', icon:'💸', category:'Configuration', isNew:true },
   ];
 
   const PERMISSION_ACTIONS = ['view','create','edit','delete','print','approve'];
@@ -319,7 +320,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
   function getResultTabAccess(role, moduleKey, action){ return getSubModuleAccess(role, moduleKey, 'result', action); }
   const STAFF_SUBPAGE_KEYS = ['staff_depts','staff_idcards','staff_payroll'];
   function getStaffSubpageAccess(role, moduleKey, action){ return getSubModuleAccess(role, moduleKey, 'staff', action); }
-  const SETUP_SUBMODULE_KEYS = ['setup_schoolprofile','setup_classes','setup_academicyear','setup_feestructure','setup_promotions'];
+  const SETUP_SUBMODULE_KEYS = ['setup_schoolprofile','setup_classes','setup_academicyear','setup_feestructure','setup_promotions','setup_refundpolicy'];
   function getSetupTabAccess(role, moduleKey, action){ return getSubModuleAccess(role, moduleKey, 'setup', action); }
   // Newly added sub-module groups (each mirrors that module's own tabs/buttons
   // one-for-one) — same fallback-to-parent behavior throughout.
@@ -839,6 +840,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     document.getElementById('navAcademicYear').style.display = getSetupTabAccess(currentUser.role, 'setup_academicyear') ? 'flex' : 'none';
     document.getElementById('navFeeStructureSetup').style.display = getSetupTabAccess(currentUser.role, 'setup_feestructure') ? 'flex' : 'none';
     document.getElementById('navPromotions').style.display = getSetupTabAccess(currentUser.role, 'setup_promotions') ? 'flex' : 'none';
+    document.getElementById('navRefundPolicy').style.display = getSetupTabAccess(currentUser.role, 'setup_refundpolicy') ? 'flex' : 'none';
     document.getElementById('navUsersRoles').style.display = currentUser.role === 'Admin' ? 'flex' : 'none';
     document.getElementById('navStudentParentLogins').style.display = currentUser.role === 'Admin' ? 'flex' : 'none';
     document.getElementById('navRolesPermissions').style.display = currentUser.role === 'Admin' ? 'flex' : 'none';
