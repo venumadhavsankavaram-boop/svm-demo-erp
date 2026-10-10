@@ -261,7 +261,7 @@ async function ensureSchema() {
   // deletion_requests is, rather than trusting the client to set its own
   // status.
   await sql`CREATE TABLE IF NOT EXISTS staff_leave_requests (
-    id VARCHAR(191) PRIMARY KEY, staff_id TEXT, staff_name TEXT,
+    id VARCHAR(191) PRIMARY KEY, staff_id VARCHAR(191), staff_name TEXT,
     from_date VARCHAR(32), to_date VARCHAR(32), session VARCHAR(20), reason TEXT,
     status VARCHAR(20) NOT NULL DEFAULT ('Pending'),
     requested_by TEXT, requested_by_name TEXT, requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1610,9 +1610,10 @@ async function findRecentDuplicate(table, guard, body) {
   const conds = [], params = [];
   guard.match.forEach(([col, app], i) => {
     let v = body[app];
-    if (v === undefined || v === '') v = null;
-    conds.push(`${col} <=> $${i + 1}`);
-    params.push(v);
+    if (v === undefined || v === null) v = '';
+    // Blank and NULL are the same thing here (the form sends '' and the DB may hold either).
+    if (col === 'amount' || col === 'discount') { conds.push(`COALESCE(${col}, 0) = $${i + 1}`); params.push(Number(v) || 0); }
+    else { conds.push(`COALESCE(${col}, '') = $${i + 1}`); params.push(String(v)); }
   });
   const rows = await sql.query(
     `SELECT * FROM ${table} WHERE ${conds.join(' AND ')} AND COALESCE(voided, 0) = 0 AND created_at > (NOW() - INTERVAL 120 SECOND) LIMIT 1`,

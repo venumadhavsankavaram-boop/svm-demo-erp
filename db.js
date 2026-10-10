@@ -226,7 +226,28 @@ export async function createIndexIfMissing(indexName, table, columnsExpr) {
   try {
     await pool.query(`CREATE INDEX ${indexName} ON ${table} (${columnsExpr})`);
   } catch (err) {
-    if (err.code !== 'ER_DUP_KEYNAME') throw err;
+    if (err.code === 'ER_DUP_KEYNAME') return;
+    // MySQL refuses to index a TEXT/BLOB column without a length (MariaDB adds one silently).
+    // Retry once with a 191-character prefix on just the text columns.
+    if (err.code === 'ER_BLOB_KEY_WITHOUT_LENGTH') {
+      try {
+        const [cols] = await pool.query(
+          `SELECT COLUMN_NAME AS n, DATA_TYPE AS t FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`, [table]);
+        const isText = new Map(cols.map(c => [c.n, /text|blob|json/i.test(c.t)]));
+        const expr = columnsExpr.split(',').map(part => {
+          const m = part.trim().match(/^(\w+)(.*)$/);
+          return m && isText.get(m[1]) ? `${m[1]}(191)${m[2]}` : part.trim();
+        }).join(', ');
+        await pool.query(`CREATE INDEX ${indexName} ON ${table} (${expr})`);
+        return;
+      } catch (err2) {
+        if (err2.code === 'ER_DUP_KEYNAME') return;
+        console.warn(`Index ${indexName} not created (${err2.code || err2.message}) — continuing without it.`);
+        return;
+      }
+    }
+    // An index is only a speed-up: never let one stop the whole startup.
+    console.warn(`Index ${indexName} not created (${err.code || err.message}) — continuing without it.`);
   }
 }
 
