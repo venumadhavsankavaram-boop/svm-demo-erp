@@ -1449,6 +1449,9 @@ const KV_KEY_TO_MODULE = {
   // Per-fee-head remittance schedule (Yearly / Terms / Monthly) per academic year.
   'fee-schedule': ['managefee'],
   'receipt-settings': ['managefee'],
+  // Fee refund requests (request → approval → credit note) and the refund policy.
+  'fee-refunds': ['managefee'],
+  'refund-policy': ['managefee'],
   'grading-scale': ['exams', 'result'],
   'grading-schemes': ['exams', 'result'],
   'exam-types': ['exams', 'result'],

@@ -419,16 +419,17 @@ function renderStudentLedger(body){
     </tbody></table></div>` : '';
 
   const historyHtml = `
+    ${rfCreditBannerHtml(s.id)}
     <div class="dash-section-title"><div><h3>Payment History</h3></div></div>
     <div class="table-wrap" style="overflow-x:auto;"><table><thead><tr><th>Date</th><th>Category</th><th>Instalment</th><th>Mode</th><th>Amount</th><th>Discount</th><th>Status</th><th></th></tr></thead><tbody>
       ${studentPayments.length ? studentPayments.map(p => {
         const statusHtml = p.voided
           ? `<span class="balance-tag due" title="${(p.voidReason || '').replace(/"/g, '&quot;')}">${p.voidType === 'refund' ? 'REFUNDED' : 'VOIDED'}</span>`
-          : `<span class="pill">Recorded</span>`;
+          : rfStatusBadge(p);
         const actions = [];
         if(!p.voided && canSub('managefee_collection', 'managefee', 'print')) actions.push(sfBtn('link', 'receipt', 'Print Receipt', `printReceipt('${p.id}')`));
         if(!p.voided && canSub('managefee_collection', 'managefee', 'delete')) actions.push(sfBtn('danger', '', 'Void', `voidPayment('${p.id}')`));
-        if(!p.voided && canSub('managefee_collection', 'managefee', 'delete')) actions.push(sfBtn('danger', '', 'Refund', `openRefundPaymentModal('${p.id}')`));
+        if(!p.voided && refundPerm('create') && payRefundable(p) > 0) actions.push(sfBtn('danger', '', 'Refund', `openRefundRequest('${p.id}')`));
         return `<tr${p.voided ? ' style="opacity:.6;"' : ''}><td>${p.date || '—'}</td><td><span class="pill">${feeLabelFor(p)}</span></td><td>${escapeHtml(p.instalment || '—')}</td><td>${p.mode || '—'}</td><td>${p.voided ? `<s>${fmtMoney(p.amount)}</s>` : fmtMoney(p.amount)}</td><td>${fmtMoney(p.discount)}</td><td>${statusHtml}</td><td class="sf-actions">${actions.join('')}</td></tr>`;
       }).join('') : `<tr><td colspan="8"><div class="empty-state"><b>No payments yet</b></div></td></tr>`}
     </tbody></table></div>`;
