@@ -6,7 +6,7 @@
     if(!info || !info.demo) return;
     const bar = document.createElement('div');
     bar.id = 'demoRibbon';
-    bar.textContent = 'DEMO — sample data only. Nothing here is real, and no messages or payments are sent.';
+    bar.textContent = 'DEMO — sample data only. Nothing here is real, and no messages or payments are sent.  ·  © SVM EdTech. For evaluation only; copying not permitted.';
     bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#7a2e8f;color:#fff;text-align:center;font:600 12px system-ui,sans-serif;padding:6px 10px;';
     document.body.appendChild(bar);
     document.title = 'DEMO — ' + document.title;

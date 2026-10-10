@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 // Express server for Render — serves the ERP's static files AND handles
 // every /api/* request, using the exact same tested resource-handling logic
 // that ran on Vercel. Only the "wrapper" around it changed: Vercel routed

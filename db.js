@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 // db.js — MySQL-backed drop-in replacement for @neondatabase/serverless's `sql`.
 //
 // This exists so the 200+ `await sql\`...\`` / `await sql.query(text, params)`
