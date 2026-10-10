@@ -1,0 +1,5176 @@
+// Express server for Render — serves the ERP's static files AND handles
+// every /api/* request, using the exact same tested resource-handling logic
+// that ran on Vercel. Only the "wrapper" around it changed: Vercel routed
+// dynamically via api/[resource].js; here, Express does the same job via
+// an explicit route parameter (req.params.resource instead of
+// req.query.resource) — every SIMPLE_RESOURCES / HYBRID_RESOURCES config
+// and every custom handler function below is unchanged from what was
+// already tested and confirmed working.
+
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import crypto from 'crypto';
+import zlib from 'zlib';
+import bcrypt from 'bcryptjs';
+import { sql, nextDocSeq, reserveDocSeqRange, insertNotificationEventIfNew, addColumnIfMissing, createIndexIfMissing } from './db.js';
+import webpush from 'web-push';
+// Fleet reporting + support-login — see ../reporting-client/ for the
+// canonical copies and full wiring docs (also README.md, "Reporting
+// Client"). Both are opt-in and fail silent: with VENDOR_DASHBOARD_URL /
+// VENDOR_SCHOOL_ID / VENDOR_API_KEY unset (the default for a school not
+// yet added to the vendor dashboard), this does nothing at all.
+import { startVendorReporting, reportVendorError, isAccessSuspended, getModuleAccess } from './vendor-reporting.js';
+import { handleVendorSupportLogin } from './vendor-support-login.js';
+startVendorReporting();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+// Default body-size limit (100kb) is far too small the moment any record
+// carries a photo or document as a base64 data URL (website gallery photos,
+// student/staff photos, ID card photos, admit-card signatures, admin
+// downloads) — those routinely run several hundred KB to a few MB once
+// base64-encoded. Under the old default, a POST/PUT carrying one of those
+// was rejected by this middleware with 413 Payload Too Large before it ever
+// reached a route handler; the client didn't check the response status (see
+// the matching index.html fix), so it looked like a normal save while
+// nothing was actually written to the database.
+//
+// One route needs the opposite treatment: /api/admission-inquiries is the
+// only endpoint the public school website can POST to with zero login of
+// any kind (see WEBSITE_CORS_RULES below) — it's a plain text form (a
+// name, an email, a phone number, a note), so it never needs anything
+// close to 25mb. Registering a small-limit JSON parser for that one path
+// first means it — and only it — gets capped at 20kb; body-parser marks
+// the body as already-parsed, so the 25mb parser below skips it and still
+// applies normally to every other route. This keeps a stray or malicious
+// caller from using the one unauthenticated write endpoint in the app to
+// stuff giant payloads into the database.
+app.use('/api/admission-inquiries', express.json({ limit: '20kb' }));
+app.use(express.json({ limit: '25mb' }));
+
+// The public school website (a separate static site, on its own domain) talks to
+// this ERP straight over the network for a handful of resources — it isn't hosted
+// on the same origin, so the browser needs an explicit CORS allowance for each one.
+// Listed per-resource (not the whole /api/*) so the rest of the API — which
+// includes things like user records — stays inaccessible to any other site's
+// frontend code. Methods are scoped to what the website actually does with each:
+// it only submits inquiries (POST), and only reads everything else (GET).
+// Per-deployment value — set the WEBSITE_ORIGIN environment variable to this
+// school's public website URL (e.g. https://<school>-website.onrender.com).
+// Deliberately env-driven rather than hardcoded: this file is the shared ERP
+// template every school's Render service runs unmodified, so nothing here
+// should need a code edit per school. Left unset, these four endpoints simply
+// get no CORS header — the website's calls to them will fail closed (safe
+// default) until WEBSITE_ORIGIN is configured, rather than silently allowing
+// the wrong (or no) origin.
+const WEBSITE_ORIGIN = process.env.WEBSITE_ORIGIN || '';
+const WEBSITE_CORS_RULES = {
+  '/api/admission-inquiries': 'POST, OPTIONS',
+  '/api/comms-messages': 'GET, OPTIONS',
+  '/api/website-gallery': 'GET, OPTIONS',
+  '/api/school-info': 'GET, OPTIONS',
+};
+// WEBSITE_ORIGIN may list several origins separated by commas, and the bare
+// and "www." forms of each are always treated as the same site, so a visitor
+// who types www.<school>.com gets the same live notices as one on <school>.com.
+const WEBSITE_ORIGINS = (() => {
+  const set = new Set();
+  String(WEBSITE_ORIGIN).split(',').map(x => x.trim().replace(/\/+$/, '')).filter(Boolean).forEach(o => {
+    set.add(o);
+    const m = o.match(/^(https?:\/\/)(www\.)?(.+)$/i);
+    if (m) { set.add(m[1] + m[3]); set.add(m[1] + 'www.' + m[3]); }
+  });
+  return set;
+})();
+app.use((req, res, next) => {
+  const allowedMethods = WEBSITE_CORS_RULES[req.path];
+  const origin = req.headers.origin;
+  if (allowedMethods && origin && WEBSITE_ORIGINS.has(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+    res.header('Access-Control-Allow-Methods', allowedMethods);
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Express sets an ETag on every JSON response by default. Without an explicit
+// Cache-Control telling it otherwise, a browser (mobile Safari/Chrome in
+// particular, and any page restored from the back/forward cache) can treat
+// that ETag as licence to reuse a previously-cached /api/* response instead
+// of hitting the network — which is exactly the "refreshed many times, still
+// shows old numbers" symptom. ERP data must always be live, so every API
+// response is marked non-cacheable; this runs before any route handler, so
+// it applies uniformly without touching each one individually.
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
+// sql (tagged-template and sql.query(text, params) forms) now comes from
+// ./db.js, a MySQL-backed shim written for the GoDaddy hosting migration —
+// see that file's header comment for what it does and doesn't paper over.
+
+// A request header value that came from decodeURIComponent-encoded text
+// (see the client's actorHeaders() helper) — falls back to the raw value
+// if it isn't actually encoded, so this never throws on a header some
+// other caller (e.g. a script, not this app's own UI) sent unencoded.
+function decodeHeaderValue(v) {
+  if (!v) return '';
+  try { return decodeURIComponent(String(v)); } catch (e) { return String(v); }
+}
+
+// ---------- Schema bootstrap ----------
+// Every table this app needs, created only if missing. This means standing the
+// whole ERP up against a brand-new, completely empty Postgres database (a
+// fresh Neon project, for a future re-install) is just: set DATABASE_URL and
+// start the server — no separate schema.sql to run by hand, no migration
+// step to remember. It's a no-op against the current live database (every
+// one of these tables already exists there), so this changes nothing about
+// how the app behaves today; it only matters the day this ever needs to be
+// stood up again from scratch. Column types are the ones this app's own
+// read/write code already expects (JSONB where the code does `::jsonb`
+// casts and reads the result back as a real array/object; TEXT — not DATE —
+// for date-shaped fields, since a couple of them are legitimately sent as an
+// empty string before they're filled in, e.g. a discount's approval date
+// before it's approved).
+// ---------- MySQL migration notes ----------
+// Converted from the original Postgres/Neon schema for the GoDaddy MySQL
+// migration: TEXT id/foreign-key-ish columns that are a PRIMARY KEY, part of
+// a UNIQUE constraint, or indexed below became VARCHAR(191) (MySQL can't key
+// a plain TEXT column without an explicit prefix length; 191 is the standard
+// safe max under utf8mb4's 767-byte default index-key limit) — every other
+// TEXT column (free text, base64 photos/attachments, etc.) is untouched.
+// JSONB -> JSON, TIMESTAMPTZ -> DATETIME, NUMERIC -> DECIMAL(14,2),
+// BIGSERIAL -> BIGINT AUTO_INCREMENT, now() -> CURRENT_TIMESTAMP. MySQL has
+// no `IF NOT EXISTS` for ADD COLUMN / CREATE INDEX it's safe to rely on
+// across versions, so those went through addColumnIfMissing()/
+// createIndexIfMissing() (see db.js) instead, which swallow the
+// "already exists" error the same IF NOT EXISTS was there to avoid.
+// A TEXT/BLOB/JSON column also can't take a plain literal DEFAULT on real
+// MySQL (unlike MariaDB, which allows it as an extension — this passed
+// local MariaDB testing and only surfaced once deployed against actual
+// MySQL) — MySQL 8.0.13+ requires it be written as an *expression* default
+// instead, which just means wrapping the literal in parentheses:
+// `DEFAULT ('value')`. Every TEXT/JSON column below that needs a default
+// uses that form (see purge_reason, status x2, and every `JSON ... DEFAULT
+// ('{}'/'[]')` column) for exactly this reason.
+async function ensureSchema() {
+  await sql`CREATE TABLE IF NOT EXISTS users (
+    id VARCHAR(191) PRIMARY KEY, name TEXT, username VARCHAR(191), password TEXT, role TEXT,
+    linked_student_id TEXT, recovery_code TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Soft delete: a deleted user's row stays put with deleted_at set, instead
+  // of being erased outright. This closes two real gaps found after an
+  // actual incident — a hard DELETE gave no way back if it was a mistake,
+  // and deleting your own logged-in account left that session looking
+  // "still logged in" until it naturally expired, since nothing previously
+  // re-checked the user still existed mid-session. See handleUsers below
+  // for the restore path, the self-delete/last-admin guards, and the
+  // immediate session wipe that now comes with every delete.
+  await addColumnIfMissing('users', 'deleted_at DATETIME');
+  // Who actually pulled the trigger on the soft delete, for the audit trail
+  // shown in Recently Deleted and carried into purge_log if it's ever
+  // permanently removed (see purgeExpiredTrash / the PUT ?purge=1 branch
+  // below). Null for rows soft-deleted before this column existed.
+  await addColumnIfMissing('users', 'deleted_by TEXT');
+  await addColumnIfMissing('users', 'deleted_by_name TEXT');
+  // A user's own "My Account" profile photo (base64 data URL, capped at 2MB
+  // client-side — see PHOTO_UPLOAD_MAX_BYTES in index.html, well under this
+  // server's 25mb JSON body limit). This column didn't exist before, so the
+  // photo was silently accepted by the PUT /api/users write and then
+  // silently dropped — SIMPLE_RESOURCES.users.fields didn't know about it
+  // either, so it was never even in the SQL column list — meaning it never
+  // persisted and vanished on the very next login/page load.
+  await addColumnIfMissing('users', 'photo LONGTEXT');
+  await sql`CREATE TABLE IF NOT EXISTS payments (
+    id VARCHAR(191) PRIMARY KEY, receipt_no TEXT, student_id VARCHAR(191), student_name TEXT, category TEXT, mode TEXT,
+    amount DECIMAL(14,2) DEFAULT 0, discount DECIMAL(14,2) DEFAULT 0, instalment TEXT, date VARCHAR(32), note TEXT,
+    class_at_payment TEXT, extra_fee_name TEXT, extra_fee_id TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Void/refund columns didn't exist when this table was first created —
+  // same gap as the 'users.photo' column above: the frontend's voidPayment()
+  // and openRefundPaymentModal() have always set p.voided/voidType/voidReason/
+  // voidedBy/voidedAt on the in-memory record and PUT it to /api/payments,
+  // but with no matching column AND no matching entry in
+  // SIMPLE_RESOURCES.payments.fields below, the generic PUT handler's column
+  // whitelist silently dropped every one of those fields — the write
+  // returned 200 OK, the UI looked like it worked, and the very next GET
+  // (or the next page load) came back with the payment still unvoided. Void
+  // and Refund have therefore never actually persisted, in any environment.
+  await addColumnIfMissing('payments', 'voided BOOLEAN DEFAULT false');
+  await addColumnIfMissing('payments', 'void_type TEXT');
+  await addColumnIfMissing('payments', 'void_reason TEXT');
+  await addColumnIfMissing('payments', 'voided_by TEXT');
+  // TEXT, not DATETIME: the frontend always sends a full ISO timestamp
+  // string (new Date().toISOString()), and simpleToAppShape() below only
+  // reformats an actual Date instance (truncating it to a bare date) — a
+  // DATETIME column would come back from the driver as a Date object and
+  // silently lose the time-of-day on every read. approved_date/requested_date
+  // on student_discounts use the same TEXT-for-timestamp-strings approach.
+  await addColumnIfMissing('payments', 'voided_at TEXT');
+  await sql`CREATE TABLE IF NOT EXISTS student_discounts (
+    id VARCHAR(191) PRIMARY KEY, batch_id VARCHAR(191), student_id VARCHAR(191), type TEXT, applies_to TEXT, mode TEXT,
+    value DECIMAL(14,2) DEFAULT 0, note TEXT, status TEXT, requested_by TEXT, requested_role TEXT, requested_date TEXT,
+    approver_id TEXT, approver_name TEXT, approved_by TEXT, approved_date TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS student_extra_fees (
+    id VARCHAR(191) PRIMARY KEY, student_id VARCHAR(191), name TEXT, amount DECIMAL(14,2) DEFAULT 0, paid BOOLEAN DEFAULT false,
+    paid_amount DECIMAL(14,2) DEFAULT 0, date TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS attendance_records (
+    id VARCHAR(191) PRIMARY KEY, student_id VARCHAR(191), date VARCHAR(32), status TEXT,
+    session VARCHAR(20), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS holidays (
+    id VARCHAR(191) PRIMARY KEY, date TEXT, name TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS exam_results (
+    id VARCHAR(191) PRIMARY KEY, exam_id VARCHAR(191), student_id VARCHAR(191), subject TEXT, marks DECIMAL(10,2), absent BOOLEAN DEFAULT false,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Written / Internal split of `marks` (marks stays the TOTAL, so every report keeps working).
+  await addColumnIfMissing('exam_results', 'written_marks DECIMAL(10,2) NULL');
+  await addColumnIfMissing('exam_results', 'internal_marks DECIMAL(10,2) NULL');
+  await sql`CREATE TABLE IF NOT EXISTS staff_attendance_records (
+    id VARCHAR(191) PRIMARY KEY, staff_id VARCHAR(191), date VARCHAR(32), status TEXT,
+    session VARCHAR(20), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Raw log of every punch the on-site biometric bridge has ever forwarded
+  // (see the "Biometric attendance" section below) — kept even for
+  // unmatched device user IDs so the Admin's Biometric Sync tab can show
+  // them and prompt a mapping fix, and even for matched ones that didn't
+  // end up changing staff_attendance_records (e.g. a second punch the same
+  // day). id is deterministic (device serial + device user id + timestamp)
+  // so the bridge can safely resend the same punch without double-logging.
+  await sql`CREATE TABLE IF NOT EXISTS biometric_punches (
+    id VARCHAR(191) PRIMARY KEY, device_serial TEXT, device_user_id TEXT, punched_at DATETIME,
+    staff_id TEXT, staff_name TEXT, matched BOOLEAN DEFAULT false, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Staff leave applications. A request covers either a full-day date range
+  // (from_date..to_date, session NULL) or a single half-day (from_date ==
+  // to_date, session = 'Morning'/'Afternoon') — see handleStaffLeaveRequests
+  // below for how each shape is written into staff_attendance_records once
+  // approved. Deliberately its own table (not another kv_store blob) so it
+  // can be role-filtered and approved server-side the same safe way
+  // deletion_requests is, rather than trusting the client to set its own
+  // status.
+  await sql`CREATE TABLE IF NOT EXISTS staff_leave_requests (
+    id VARCHAR(191) PRIMARY KEY, staff_id TEXT, staff_name TEXT,
+    from_date VARCHAR(32), to_date VARCHAR(32), session VARCHAR(20), reason TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT ('Pending'),
+    requested_by TEXT, requested_by_name TEXT, requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    decided_by TEXT, decided_by_name TEXT, decided_at DATETIME, decision_note TEXT
+  )`;
+  await createIndexIfMissing('idx_staff_leave_requests_staff_id', 'staff_leave_requests', 'staff_id');
+  await createIndexIfMissing('idx_staff_leave_requests_status', 'staff_leave_requests', 'status');
+  await sql`CREATE TABLE IF NOT EXISTS admission_inquiries (
+    id VARCHAR(191) PRIMARY KEY, parent_name TEXT, parent_email TEXT, parent_phone TEXT, student_name TEXT,
+    applying_grade TEXT, notes TEXT, submitted_date TEXT, status VARCHAR(191), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS website_gallery (
+    id VARCHAR(191) PRIMARY KEY, data_url LONGTEXT, category VARCHAR(191), caption TEXT, uploaded_date TEXT, uploaded_by TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS students (
+    id VARCHAR(191) PRIMARY KEY, first_name TEXT, last_name TEXT, class_name TEXT, section TEXT, status TEXT,
+    admission_no TEXT, extra JSON NOT NULL DEFAULT ('{}'), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Same soft-delete treatment as users — see the ALTER TABLE users comment
+  // above and HYBRID_RESOURCES.students' softDelete flag below.
+  await addColumnIfMissing('students', 'deleted_at DATETIME');
+  // Same audit-trail columns as users above — recorded by
+  // handleDeletionRequests' final-approval branch (the only place
+  // deleted_at is ever set on a student), so Recently Deleted can show who
+  // actually gave that final approval, and purge_log can carry it forward.
+  await addColumnIfMissing('students', 'deleted_by TEXT');
+  await addColumnIfMissing('students', 'deleted_by_name TEXT');
+  // Twice-daily (morning/afternoon) attendance — added on an already-live
+  // database via addColumnIfMissing rather than the CREATE TABLE above, which
+  // only applies to a fresh install. NULL/'' on an existing row means it was
+  // marked before this feature shipped; every stats function in the app
+  // (computeAttendanceStats, computeStaffAttendanceStats,
+  // monthlyAttendanceTrend, staffAttendanceCountInMonth) treats a sessionless
+  // row as a full day (weight 2, matching one row per session) so historical
+  // attendance % is unaffected by this migration — see attSessionWeight() in
+  // index.html.
+  await addColumnIfMissing('attendance_records', 'session VARCHAR(20)');
+  await addColumnIfMissing('staff_attendance_records', 'session VARCHAR(20)');
+  // A student record is never deleted on a single click — see
+  // HYBRID_RESOURCES.students' deleteViaApprovalOnly flag and
+  // handleDeletionRequests below. Getting from "requested" to "actually
+  // deleted" takes THREE different people's say-so: whoever files the
+  // request, then a first Admin/Principal approval, then a second
+  // Admin/Principal approval — no one may fill more than one of those
+  // three roles for the same request, Admin included. Nothing here is
+  // erased until both approvals land — the actual removal still lands on
+  // the same reversible deleted_at soft-delete above, never a hard DELETE.
+  await sql`CREATE TABLE IF NOT EXISTS deletion_requests (
+    id VARCHAR(191) PRIMARY KEY, resource TEXT NOT NULL, record_id TEXT NOT NULL, record_label TEXT, reason TEXT,
+    requested_by TEXT, requested_by_name TEXT, requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(191) NOT NULL DEFAULT 'Pending',
+    first_approved_by TEXT, first_approved_by_name TEXT, first_approved_at DATETIME,
+    decided_by TEXT, decided_by_name TEXT, decided_at DATETIME, decision_note TEXT
+  )`;
+  await createIndexIfMissing('idx_deletion_requests_status', 'deletion_requests', 'status');
+  // Certificate register — every Study/Transfer Certificate issued is logged
+  // here with a snapshot of the student's details at the moment of issue
+  // (so a later data correction never rewrites what an already-printed
+  // certificate said) and a sequential per-type, per-year serial number.
+  // This is what makes "we can still prove what we issued and when" true
+  // even long after a student has left — see handleCertificates below.
+  await sql`CREATE TABLE IF NOT EXISTS certificates_issued (
+    id VARCHAR(191) PRIMARY KEY, type TEXT NOT NULL, serial_no TEXT NOT NULL,
+    resource VARCHAR(191) NOT NULL, record_id VARCHAR(191) NOT NULL, snapshot JSON NOT NULL DEFAULT ('{}'),
+    conduct TEXT, purpose TEXT, academic_year TEXT,
+    issued_by TEXT, issued_by_name TEXT, issued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // details: a free-form JSONB bag for fields specific to newer certificate
+  // types (Transfer's date-of-leaving/reason/promotion/working-days/dues,
+  // Character's remarks, Migration's destination board, etc.) — added this
+  // way rather than a dedicated column per field so a future certificate
+  // type never needs its own migration.
+  await addColumnIfMissing('certificates_issued', "details JSON NOT NULL DEFAULT ('{}')");
+  await createIndexIfMissing('idx_certificates_issued_record', 'certificates_issued', 'resource, record_id');
+  // Recycle-bin retention: a soft-deleted row (students/users — see
+  // PURGEABLE_RESOURCES below) doesn't sit in Recently Deleted forever.
+  // purgeExpiredTrash() removes it for good once it's older than
+  // TRASH_RETENTION_DAYS, and an Admin/Principal can also remove it sooner
+  // by hand from Recently Deleted ("Delete Permanently"). Either way, since
+  // the row itself is about to be gone for good, this is the only lasting
+  // record that it ever existed and was deleted — who deleted it, who (if
+  // anyone) purged it early, and when. Mirrors how Salesforce's Recycle
+  // Bin / Google Workspace's deleted-user retention / GitHub's deleted-repo
+  // window all work: soft-delete now, hard-delete later on a timer, with a
+  // paper trail either way.
+  await sql`CREATE TABLE IF NOT EXISTS purge_log (
+    id VARCHAR(191) PRIMARY KEY, resource VARCHAR(191) NOT NULL, record_id VARCHAR(191) NOT NULL, record_label TEXT,
+    deleted_at DATETIME, deleted_by_name TEXT,
+    purge_reason TEXT NOT NULL DEFAULT ('manual'),
+    purged_by TEXT, purged_by_name TEXT, purged_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await createIndexIfMissing('idx_purge_log_resource', 'purge_log', 'resource, record_id');
+  // One row per "Reset School Data" hard wipe (see WIPE_TABLES / the
+  // /api/vendor/wipe-data route far below) — this table is itself never
+  // wiped, so the fact that a wipe happened, when, by whom, and how many
+  // rows of each kind it removed survives forever, even though the wiped
+  // data itself doesn't. Deliberately stores only counts, never the
+  // records themselves (those exist only in the one-time backup handed
+  // back to the vendor dashboard at wipe time).
+  await sql`CREATE TABLE IF NOT EXISTS wipe_log (
+    id VARCHAR(191) PRIMARY KEY, wiped_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    vendor_admin_name TEXT, counts JSON NOT NULL DEFAULT ('{}')
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS staff (
+    id VARCHAR(191) PRIMARY KEY, first_name TEXT, last_name TEXT, department TEXT, designation TEXT, status TEXT,
+    staff_id TEXT, extra JSON NOT NULL DEFAULT ('{}'), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS staff_payroll (
+    id VARCHAR(191) PRIMARY KEY, staff_id VARCHAR(191), month TEXT, status TEXT,
+    extra JSON NOT NULL DEFAULT ('{}'), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS comms_messages (
+    id VARCHAR(191) PRIMARY KEY, extra JSON NOT NULL DEFAULT ('{}'), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS rooms (
+    id VARCHAR(191) PRIMARY KEY, extra JSON NOT NULL DEFAULT ('{}'), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS exam_hall_tickets (
+    id VARCHAR(191) PRIMARY KEY, extra JSON NOT NULL DEFAULT ('{}'), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS exam_room_config (
+    id VARCHAR(191) PRIMARY KEY, extra JSON NOT NULL DEFAULT ('{}'), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS subjects (
+    id VARCHAR(191) PRIMARY KEY, name TEXT, code TEXT, class_name TEXT,
+    sections JSON NOT NULL DEFAULT ('[]'), section_staff JSON NOT NULL DEFAULT ('{}'),
+    staff_ids JSON NOT NULL DEFAULT ('[]'), countable BOOLEAN DEFAULT true, elective BOOLEAN DEFAULT false,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS exam_defs (
+    id VARCHAR(191) PRIMARY KEY, name TEXT, exam_type TEXT, start_date TEXT, end_date TEXT,
+    class_subjects JSON NOT NULL DEFAULT ('{}'), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS custom_roles (
+    id VARCHAR(191) PRIMARY KEY, name TEXT, permissions JSON NOT NULL DEFAULT ('{}'),
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS fee_structure (
+    class_name VARCHAR(191) PRIMARY KEY, admission DECIMAL(14,2) DEFAULT 0, fee DECIMAL(14,2) DEFAULT 0,
+    bus DECIMAL(14,2) DEFAULT 0, stock DECIMAL(14,2) DEFAULT 0
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS attendance_settings (
+    id INT PRIMARY KEY, threshold DECIMAL(6,2) DEFAULT 75, working_days JSON NOT NULL DEFAULT ('[1,2,3,4,5,6]')
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS school_info (
+    id INT PRIMARY KEY, data JSON NOT NULL DEFAULT ('{}')
+  )`;
+  // One row per numbering series per period (e.g. series='income_voucher',
+  // period='26-27') — see the "Document numbering" section below for how
+  // this is used. Deliberately its own tiny table (not a kv_store entry):
+  // issuing a number is a single atomic operation against one row here
+  // (see db.js's nextDocSeq — a MySQL LAST_INSERT_ID(expr) trick replacing
+  // Postgres's UPDATE...RETURNING, since MySQL has no RETURNING), which
+  // serializes correctly under concurrent requests. kv_store's whole-value
+  // PUT (see handleKv below) has no such guarantee — two staff saving a
+  // voucher at the same moment could both compute the same "next" number
+  // and silently overwrite each other, which is exactly the bug this table
+  // exists to close.
+  await sql`CREATE TABLE IF NOT EXISTS doc_counters (
+    series VARCHAR(191) NOT NULL, period VARCHAR(191) NOT NULL, next_seq INT NOT NULL DEFAULT 1,
+    PRIMARY KEY (series, period)
+  )`;
+  // Accounting: Income (Receipt) and Payment vouchers. These used to live as
+  // a single JSON blob per school in kv_store (acct-income / acct-expenses)
+  // — every save round-tripped the ENTIRE list, so two staff saving around
+  // the same moment could each overwrite the other's entry with no error or
+  // warning. Real tables + voucher_no UNIQUE fix both that and the
+  // duplicate-numbering problem at once. migrateAccountingFromKv() below
+  // copies over anything already recorded the old way, once, at boot.
+  // cost_center is a SEPARATE dimension from category: category is the
+  // account head (Salaries, Donation, ...); cost_center is the segment this
+  // money belongs to (Transport, Inventory, Hostel, School Fees/General) —
+  // so income and expenditure can be compared segment-by-segment (e.g. "is
+  // running the bus profitable") independently of what account head it's
+  // filed under.
+  await sql`CREATE TABLE IF NOT EXISTS acct_income (
+    id VARCHAR(191) PRIMARY KEY, voucher_no VARCHAR(191) UNIQUE, date VARCHAR(32), category TEXT, cost_center TEXT, amount DECIMAL(14,2) DEFAULT 0,
+    party TEXT, mode TEXT, reference_no TEXT, description TEXT, added_by TEXT,
+    voided BOOLEAN NOT NULL DEFAULT false, void_reason TEXT, voided_by TEXT, voided_at DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS acct_expenses (
+    id VARCHAR(191) PRIMARY KEY, voucher_no VARCHAR(191) UNIQUE, date VARCHAR(32), category TEXT, cost_center TEXT, amount DECIMAL(14,2) DEFAULT 0,
+    party TEXT, mode TEXT, reference_no TEXT, description TEXT, added_by TEXT,
+    voided BOOLEAN NOT NULL DEFAULT false, void_reason TEXT, voided_by TEXT, voided_at DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // A Student/Parent login reaching out to their Class Teacher, a specific
+  // Subject Teacher, or Management (Admin/Principal) with a concern.
+  // recipient_staff_id is the resolved staff.id for class_teacher/
+  // subject_teacher (resolved client-side, the same way the rest of the app
+  // already looks up a class/subject teacher — see classTeacherClass and
+  // subjectStaffForSection in index.html); it's left null for management,
+  // since that's a whole role rather than one specific person. subject_name
+  // is only meaningful for subject_teacher (a student may have several). A
+  // concern gets at most one reply — reply_* stays null until a staff member
+  // answers, at which point status flips from 'open' to 'resolved'.
+  await sql`CREATE TABLE IF NOT EXISTS student_concerns (
+    id VARCHAR(191) PRIMARY KEY, student_id VARCHAR(191), student_name TEXT, class_name TEXT, section TEXT,
+    recipient_type VARCHAR(191), recipient_staff_id VARCHAR(191), recipient_name TEXT, subject_name TEXT,
+    message TEXT, status TEXT NOT NULL DEFAULT ('open'),
+    reply_message TEXT, replied_by TEXT, replied_at DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Whether a concern is actually solved is a separate decision from
+  // whether it's been replied to — a teacher might reply "will check and get
+  // back" without the matter being resolved yet, or resolve something over a
+  // phone call with no reply logged at all. resolved_at/resolved_by are
+  // reset to null on reopening rather than kept as history, so the badge
+  // shown always reflects the current solved state, not every past toggle.
+  // Uses addColumnIfMissing since student_concerns already existed in
+  // production before this pair of columns was added.
+  await addColumnIfMissing('student_concerns', 'resolved_at DATETIME');
+  await addColumnIfMissing('student_concerns', 'resolved_by TEXT');
+  // A Student/Parent login submitting completed homework or holiday work to
+  // their Class Teacher, a Subject Teacher, or Management. homework_id is an
+  // optional link back to an existing kv_store homeworkItems entry (see
+  // index.html's HOMEWORK_KEY) — left blank for holiday/other work that was
+  // never listed as a homework item in the first place. attachment is an
+  // optional base64 data URL, same convention as every other file upload in
+  // this app (no separate object storage). status starts 'submitted' and
+  // becomes 'reviewed' once a staff member leaves feedback.
+  await sql`CREATE TABLE IF NOT EXISTS student_submissions (
+    id VARCHAR(191) PRIMARY KEY, student_id VARCHAR(191), student_name TEXT, class_name TEXT, section TEXT,
+    recipient_type VARCHAR(191), recipient_staff_id VARCHAR(191), recipient_name TEXT, subject_name TEXT,
+    homework_id TEXT, title TEXT, description TEXT, attachment LONGTEXT,
+    status TEXT NOT NULL DEFAULT ('submitted'),
+    feedback TEXT, reviewed_by TEXT, reviewed_at DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Widened from a single `attachment` to a JSONB array of {name, dataUrl}
+  // so a submission can carry more than one file (a scan of several
+  // worksheet pages, or a worksheet plus a cover note) — same base64
+  // data-URL convention as every other upload in this app, just several of
+  // them per row instead of one. `attachment` (singular) stays on the table
+  // for any row saved before this existed; the app reads `attachments` first
+  // and falls back to wrapping `attachment` for those older rows.
+  await addColumnIfMissing('student_submissions', "attachments JSON NOT NULL DEFAULT ('[]')");
+  // Free-text so a teacher can enter "8/10", "A", "18/20" etc. rather than
+  // being forced into one grading scale — this is a lightweight per-item
+  // note, not the school's real gradebook (that's Exams & Marks). status
+  // gains a third value, 'resubmit', alongside the existing 'submitted' and
+  // 'reviewed' — set by the same PUT .../review endpoint, just with
+  // { status: 'resubmit' } instead of leaving it to default to 'reviewed'.
+  await addColumnIfMissing('student_submissions', 'marks TEXT');
+  // Homework/holiday-work items assigned by a teacher — migrated off the
+  // kv_store whole-blob (index.html's old HOMEWORK_KEY under
+  // OBJECT_BACKED_KEYS) to a real table, the same move Accounting and this
+  // submissions table already made, for the same reason: a real row per item
+  // is what lets it carry file attachments and drive a notify-on-assign push
+  // (see notifyHomeworkAssigned below), neither of which a shared JSON blob
+  // can do safely. attachments is the same {name, dataUrl} JSON-array
+  // convention as student_submissions.attachments above. section blank means
+  // "every section of that class" (see index.html's Assign Homework modal).
+  await sql`CREATE TABLE IF NOT EXISTS homework_items (
+    id VARCHAR(191) PRIMARY KEY, class_name TEXT, section TEXT, subject TEXT, title TEXT, description TEXT,
+    assigned_date TEXT, due_date TEXT, staff_id VARCHAR(191), attachments JSON NOT NULL DEFAULT ('[]'),
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME
+  )`;
+  await createIndexIfMissing('idx_homework_items_created_at', 'homework_items', 'created_at');
+  // The generic key/value table backs every module that doesn't need its own
+  // dedicated table with real columns — Inventory, Timetable, Library, Transport,
+  // Hostel, Accounting, Fee/Exam sub-settings, Report Template signatures, Class
+  // & Section setup, Pending Approvals, and a few others (see index.html's
+  // OBJECT_BACKED_KEYS registrations for the full list). Each round-trips its
+  // whole current value as JSON, keyed by the same string the module already
+  // uses as its storage key, rather than needing one more hand-built table.
+  await sql`CREATE TABLE IF NOT EXISTS kv_store (
+    \`key\` VARCHAR(191) PRIMARY KEY, value JSON NOT NULL DEFAULT ('{}'), updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Who changed what, when. One row per successful write (POST/PUT/DELETE)
+  // to any /api/:resource endpoint, written centrally by the main dispatcher
+  // rather than by each individual handler — see the comment there. Actor
+  // fields are self-reported by the browser (no server-side sessions exist
+  // yet to read them from authoritatively), so treat this as "what the app
+  // told us happened," same trust level as everything else here today —
+  // still genuinely useful for spotting an accidental bulk-delete or
+  // tracking down when a record last changed.
+  await sql`CREATE TABLE IF NOT EXISTS audit_log (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY, actor_name TEXT, actor_role TEXT, method TEXT, resource VARCHAR(191),
+    record_id TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+
+  // One row per signed-in browser session. `id` is a SHA-256 hash of the
+  // random token actually sent to the browser (in an httpOnly cookie) —
+  // never the raw token itself — so reading this table (a backup export, a
+  // database console, a leaked dump) can't be turned into a working login
+  // cookie for anyone. See the "Session-based authentication" section below
+  // for how this is created, checked, and expired.
+  await sql`CREATE TABLE IF NOT EXISTS sessions (
+    id VARCHAR(191) PRIMARY KEY, user_id VARCHAR(191), role TEXT, name TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL
+  )`;
+
+  // One row per browser/device a Parent or Student login has granted Web
+  // Push permission on (a login can have several — phone + laptop, say).
+  // endpoint is the unique push service URL the browser handed back from
+  // pushManager.subscribe(); p256dh/auth are that subscription's own
+  // encryption keys, both required to encrypt a push payload for it. See
+  // the "Notifications: Web Push + WhatsApp" section below for how these
+  // are written (POST /api/push/subscribe) and used (sendPushToUser).
+  // endpoint is VARCHAR(700) rather than TEXT so it can carry a UNIQUE
+  // constraint directly (MySQL can't key a plain TEXT/BLOB column) — push
+  // service endpoint URLs run well under that in practice.
+  await sql`CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(191) NOT NULL, endpoint VARCHAR(700) NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL, auth TEXT NOT NULL, user_agent TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`;
+  // Every notification this app ever raises (fee due, exam schedule, a
+  // circular, homework assigned, attendance, a leave decision, an approval
+  // waiting on Admin/Principal...) gets a row here for the specific login(s)
+  // it's for, regardless of whether Web Push is even configured — this is
+  // what makes the in-app bell always work, where before every notify*
+  // function silently did nothing at all once webPushConfigured() was
+  // false (see the old comment on that function). Web Push, when
+  // configured, is now just a second delivery channel on top of this, not
+  // the only one. `url` is where clicking the notification should go (a
+  // view name switchView() already understands, e.g. '/?view=noticeboard');
+  // `type` is a short tag ('fee_due','exam_schedule','circular','homework',
+  // 'attendance','leave_decision','approval',...) the bell UI groups/icons by.
+  await sql`CREATE TABLE IF NOT EXISTS user_notifications (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(191) NOT NULL, type VARCHAR(64) NOT NULL DEFAULT ('general'),
+    title TEXT, body TEXT, url TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at DATETIME
+  )`;
+  await createIndexIfMissing('idx_user_notifications_user_id', 'user_notifications', 'user_id, created_at');
+
+  // Idempotency log for notifications that a repeated check could otherwise
+  // send more than once — right now just the fee-due reminders (the daily
+  // scheduler re-evaluates every active student every run) and "results
+  // published" (every individual mark save re-checks whether the student's
+  // full subject set is now complete). A payment or an attendance mark is
+  // its own one-off event and never re-fires, so those aren't logged here.
+  // (student_id, kind, ref_key) is unique so a second attempt at the same
+  // notification is a no-op (see db.js's insertNotificationEventIfNew,
+  // MySQL's INSERT IGNORE standing in for Postgres's ON CONFLICT DO NOTHING),
+  // not a duplicate row.
+  await sql`CREATE TABLE IF NOT EXISTS notification_events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY, student_id VARCHAR(191) NOT NULL, kind VARCHAR(191) NOT NULL, ref_key VARCHAR(191) NOT NULL,
+    sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (student_id, kind, ref_key)
+  )`;
+
+  // ---------- Indexes ----------
+  // The tables above are all read by student_id / staff_id / username / date
+  // lookups constantly (a student's fee history, a staff member's payroll
+  // months, attendance for one student across a year, the login lookup on
+  // every sign-in) — without an index the database has to scan the whole
+  // table for each of those. createIndexIfMissing() makes this idempotent
+  // and safe to run on every boot, same as the CREATE TABLE statements
+  // above. Non-unique on purpose: this is a performance fix, not a
+  // data-integrity change — adding a UNIQUE constraint on username here
+  // could fail outright (or silently change behavior) if any duplicate
+  // usernames already exist in the live data, which is a separate decision
+  // from "make lookups fast."
+  // Postgres's original index was on LOWER(username) (a functional index) to
+  // speed up the case-insensitive login lookup below. MySQL 8.0.13+ supports
+  // that same functional-index syntax, but MariaDB (used for local testing
+  // here) does not, and GoDaddy's exact MySQL version isn't guaranteed — so
+  // this indexes the plain column instead. The login query still wraps both
+  // sides in LOWER(...) and works correctly either way; a plain index on a
+  // modest-sized users table costs nothing meaningful in practice.
+  await createIndexIfMissing('idx_users_username', 'users', 'username');
+  await createIndexIfMissing('idx_push_subscriptions_user_id', 'push_subscriptions', 'user_id');
+  await createIndexIfMissing('idx_payments_student_id', 'payments', 'student_id');
+  await createIndexIfMissing('idx_payments_date', 'payments', 'date');
+  await createIndexIfMissing('idx_student_discounts_student_id', 'student_discounts', 'student_id');
+  await createIndexIfMissing('idx_student_discounts_batch_id', 'student_discounts', 'batch_id');
+  await createIndexIfMissing('idx_student_extra_fees_student_id', 'student_extra_fees', 'student_id');
+  await createIndexIfMissing('idx_attendance_records_student_id', 'attendance_records', 'student_id');
+  await createIndexIfMissing('idx_attendance_records_date', 'attendance_records', 'date');
+  await createIndexIfMissing('idx_exam_results_exam_id', 'exam_results', 'exam_id');
+  await createIndexIfMissing('idx_exam_results_student_id', 'exam_results', 'student_id');
+  await createIndexIfMissing('idx_staff_attendance_records_staff_id', 'staff_attendance_records', 'staff_id');
+  await createIndexIfMissing('idx_staff_attendance_records_date', 'staff_attendance_records', 'date');
+  await createIndexIfMissing('idx_biometric_punches_punched_at', 'biometric_punches', 'punched_at DESC');
+  await createIndexIfMissing('idx_staff_payroll_staff_id', 'staff_payroll', 'staff_id');
+  await createIndexIfMissing('idx_admission_inquiries_status', 'admission_inquiries', 'status');
+  await createIndexIfMissing('idx_website_gallery_category', 'website_gallery', 'category');
+  // handleHybrid's GET does `SELECT * FROM <table> ORDER BY created_at ASC`
+  // for every HYBRID_RESOURCES table — fine for small rows, but staff and
+  // students each carry a photo/signature as base64 text inside their
+  // `extra` JSON column, and without an index MySQL has to filesort the
+  // ENTIRE result set (images included) to satisfy that ORDER BY. On
+  // GoDaddy's shared MySQL that overflows the sort buffer outright
+  // (ER_OUT_OF_SORTMEMORY, errno 1038) once enough staff/students have a
+  // photo attached — confirmed live via the app logs on 2026-09-25, which
+  // silently broke the Staff Directory for every user. An index here lets
+  // MySQL read rows already in order instead of sorting them in memory, so
+  // this can never happen regardless of how large `extra` gets.
+  await createIndexIfMissing('idx_staff_created_at', 'staff', 'created_at');
+  await createIndexIfMissing('idx_students_created_at', 'students', 'created_at');
+  await createIndexIfMissing('idx_audit_log_created_at', 'audit_log', 'created_at DESC');
+  await createIndexIfMissing('idx_audit_log_resource', 'audit_log', 'resource');
+  await createIndexIfMissing('idx_sessions_expires_at', 'sessions', 'expires_at');
+  await createIndexIfMissing('idx_sessions_user_id', 'sessions', 'user_id');
+  await createIndexIfMissing('idx_users_deleted_at', 'users', 'deleted_at');
+  await createIndexIfMissing('idx_students_deleted_at', 'students', 'deleted_at');
+  await createIndexIfMissing('idx_acct_income_date', 'acct_income', 'date');
+  await createIndexIfMissing('idx_acct_expenses_date', 'acct_expenses', 'date');
+  await createIndexIfMissing('idx_student_concerns_student_id', 'student_concerns', 'student_id');
+  await createIndexIfMissing('idx_student_concerns_recipient_staff_id', 'student_concerns', 'recipient_staff_id');
+  await createIndexIfMissing('idx_student_concerns_recipient_type', 'student_concerns', 'recipient_type');
+  await createIndexIfMissing('idx_student_submissions_student_id', 'student_submissions', 'student_id');
+  await createIndexIfMissing('idx_student_submissions_recipient_staff_id', 'student_submissions', 'recipient_staff_id');
+  await createIndexIfMissing('idx_student_submissions_recipient_type', 'student_submissions', 'recipient_type');
+
+  // Sweep: every other table that gets `ORDER BY created_at` anywhere in this
+  // file (handleSimple/handleUsers/handleHybrid's generic paths, plus a few
+  // bespoke handlers) but had no supporting index — same latent
+  // ER_OUT_OF_SORTMEMORY risk that just took down Staff Directory, waiting to
+  // happen again as each of these tables accumulates rows. Two are genuinely
+  // high-risk today, not hypothetical: `website_gallery.data_url` and
+  // `users.photo` both hold base64 image data, same as staff/students' extra
+  // JSON did. The rest are lower-risk today (small text/numeric rows) but
+  // will hit the same wall eventually as payments/attendance/exam history
+  // pile up over school years — indexing now is free and idempotent, so
+  // there's no reason to wait for each one to crash in production first.
+  await createIndexIfMissing('idx_website_gallery_created_at', 'website_gallery', 'created_at');
+  await createIndexIfMissing('idx_users_created_at', 'users', 'created_at');
+  await createIndexIfMissing('idx_student_submissions_created_at', 'student_submissions', 'created_at');
+  await createIndexIfMissing('idx_payments_created_at', 'payments', 'created_at');
+  await createIndexIfMissing('idx_student_discounts_created_at', 'student_discounts', 'created_at');
+  await createIndexIfMissing('idx_student_extra_fees_created_at', 'student_extra_fees', 'created_at');
+  await createIndexIfMissing('idx_attendance_records_created_at', 'attendance_records', 'created_at');
+  await createIndexIfMissing('idx_holidays_created_at', 'holidays', 'created_at');
+  await createIndexIfMissing('idx_exam_results_created_at', 'exam_results', 'created_at');
+  await createIndexIfMissing('idx_staff_attendance_records_created_at', 'staff_attendance_records', 'created_at');
+  await createIndexIfMissing('idx_admission_inquiries_created_at', 'admission_inquiries', 'created_at DESC');
+  await createIndexIfMissing('idx_acct_income_created_at', 'acct_income', 'created_at');
+  await createIndexIfMissing('idx_acct_expenses_created_at', 'acct_expenses', 'created_at');
+  await createIndexIfMissing('idx_subjects_created_at', 'subjects', 'created_at');
+  await createIndexIfMissing('idx_exam_defs_created_at', 'exam_defs', 'created_at');
+  await createIndexIfMissing('idx_custom_roles_created_at', 'custom_roles', 'created_at');
+  await createIndexIfMissing('idx_student_concerns_created_at', 'student_concerns', 'created_at');
+  await createIndexIfMissing('idx_staff_payroll_created_at', 'staff_payroll', 'created_at');
+  await createIndexIfMissing('idx_comms_messages_created_at', 'comms_messages', 'created_at');
+  await createIndexIfMissing('idx_rooms_created_at', 'rooms', 'created_at');
+  await createIndexIfMissing('idx_exam_hall_tickets_created_at', 'exam_hall_tickets', 'created_at');
+  await createIndexIfMissing('idx_exam_room_config_created_at', 'exam_room_config', 'created_at');
+}
+// NOTE: intentionally NOT `await`ed at module scope (see initDb() below,
+// defined after migrateAccountingFromKv/migratePlaintextPasswords/
+// seedDefaultAdminIfEmpty) — this and the other startup DB tasks run in the
+// background so a slow/unreachable database can't block app.listen() at the
+// bottom of this file from ever running. A hosting platform's readiness
+// check generally just waits for the port to open; if a database call here
+// hangs (bad host, DNS, SSL mismatch, firewall) while this was still a
+// blocking top-level await, the port never opened, the platform's build
+// logged a generic "Process readiness timed out" with zero application
+// output, and there was no way to tell what was actually wrong. Now the
+// server starts regardless, and any database problem shows up as a logged
+// error below instead of a silent hang.
+// The actual boot-time/daily sweep call is placed further down, right after
+// purgeExpiredTrash() and PURGEABLE_RESOURCES are defined (search "Sweep once
+// at boot") — calling it up here, before that const exists yet, threw
+// `ReferenceError: Cannot access 'PURGEABLE_RESOURCES' before initialization`
+// on every single startup (caught by the .catch() below, so it never stopped
+// the server, but it silently disabled the trash-purge sweep for that boot
+// and logged a confusing, unrelated-looking error).
+
+// ---------- One-time accounting migration: kv_store blobs -> real tables ----------
+// Runs once per table (skips if acct_income / acct_expenses already has rows,
+// so a restart doesn't re-copy anything). Old entries may already carry a
+// duplicate or missing voucherNo (that's the very bug being fixed here), so
+// anything that can't keep its original number safely gets a LEGACY- number
+// instead of being silently dropped or crashing the migration on the new
+// UNIQUE constraint.
+async function migrateAccountingFromKv() {
+  async function migrateOne(kvKey, table) {
+    const [{ c }] = await sql.query(`SELECT COUNT(*)::int AS c FROM ${table}`);
+    if (c > 0) return;
+    const kvRows = await sql`SELECT value FROM kv_store WHERE \`key\` = ${kvKey}`;
+    const items = kvRows.length && Array.isArray(kvRows[0].value) ? kvRows[0].value : [];
+    if (!items.length) return;
+    const seen = new Set();
+    let migrated = 0;
+    for (const item of items) {
+      if (!item || !item.id) continue;
+      let voucherNo = item.voucherNo || null;
+      if (!voucherNo || seen.has(voucherNo)) voucherNo = 'LEGACY-' + item.id;
+      seen.add(voucherNo);
+      // table is always one of our own two hardcoded literals ('acct_income' /
+      // 'acct_expenses') passed in by migrateOne's caller below — never user
+      // input — so building it into the query text is safe. It has to be done
+      // this way (sql.query with $-placeholders) rather than the usual
+      // sql`...` tagged template: this driver (@neondatabase/serverless) only
+      // allows sql to be called as a tagged template, so the postgres.js-style
+      // sql(table) dynamic-identifier helper used here originally doesn't
+      // exist and throws at runtime — this is what broke the Sept 4 deploy.
+      await sql.query(
+        `INSERT IGNORE INTO ${table} (id, voucher_no, date, category, cost_center, amount, party, mode, reference_no, description, added_by, voided, void_reason, voided_by, voided_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        [item.id, voucherNo, item.date || null, item.category || null, item.costCenter || null, Number(item.amount) || 0,
+         item.party || null, item.mode || null, item.referenceNo || null, item.description || null,
+         item.addedBy || null, !!item.voided, item.voidReason || null, item.voidedBy || null, item.voidedAt || null]
+      );
+      migrated++;
+    }
+    if (migrated) console.log(`Migrated ${migrated} legacy record(s) from kv_store["${kvKey}"] into ${table}.`);
+  }
+  await migrateOne('acct-income', 'acct_income');
+  await migrateOne('acct-expenses', 'acct_expenses');
+}
+
+// ---------- One-time homework migration: kv_store blob -> homework_items table ----------
+// Same shape as migrateAccountingFromKv above (skips if homework_items
+// already has rows, so a restart never re-copies) — a school that already
+// has homework assigned under the old HOMEWORK_KEY kv_store blob keeps every
+// item after this deploy instead of the tab silently going empty.
+async function migrateHomeworkFromKv() {
+  const [{ c }] = await sql.query(`SELECT COUNT(*)::int AS c FROM homework_items`);
+  if (c > 0) return;
+  const kvRows = await sql`SELECT value FROM kv_store WHERE \`key\` = 'homework-items'`;
+  const items = kvRows.length && Array.isArray(kvRows[0].value) ? kvRows[0].value : [];
+  if (!items.length) return;
+  let migrated = 0;
+  for (const item of items) {
+    if (!item || !item.id) continue;
+    // created_at is deliberately left out (same as migrateAccountingFromKv
+    // above) so the column's own DEFAULT CURRENT_TIMESTAMP applies — the kv
+    // blob's original createdAt isn't preserved, but every item still sorts
+    // and displays correctly either way.
+    await sql`
+      INSERT IGNORE INTO homework_items (id, class_name, section, subject, title, description, assigned_date, due_date, staff_id, attachments)
+      VALUES (${item.id}, ${item.className || ''}, ${item.section || ''}, ${item.subject || ''}, ${item.title || ''}, ${item.description || ''},
+              ${item.assignedDate || null}, ${item.dueDate || null}, ${item.staffId || null},
+              ${JSON.stringify(Array.isArray(item.attachments) ? item.attachments : [])}::jsonb)
+    `;
+    migrated++;
+  }
+  if (migrated) console.log(`Migrated ${migrated} legacy homework item(s) from kv_store["homework-items"] into homework_items.`);
+}
+
+// ---------- One-time password migration ----------
+// Every password in the `users` table has been plain text since this app's
+// first version — readable by anyone who could call GET /api/users, which
+// (with no server-side login check on any route yet — see the security
+// review) meant anyone who could reach this server at all. This hashes any
+// password that isn't already a bcrypt hash (those always start with
+// "$2") in place, once, right here at startup, before the server accepts
+// its first request — so this school's existing live accounts end up hashed
+// with no separate manual step. (A fresh install's seeded admin account is
+// inserted already hashed — see seedDefaultAdminIfEmpty below.) Running this
+// again on a later restart
+// finds every row already hashed and does nothing, so it's safe to leave
+// in place permanently rather than removing it after the first deploy.
+async function migratePlaintextPasswords() {
+  const rows = await sql`SELECT id, password FROM users WHERE password IS NOT NULL AND password NOT LIKE '$2%'`;
+  for (const row of rows) {
+    const hash = await bcrypt.hash(String(row.password), 10);
+    await sql`UPDATE users SET password = ${hash} WHERE id = ${row.id}`;
+  }
+  if (rows.length) console.log(`Migrated ${rows.length} plaintext password(s) to bcrypt hashes.`);
+}
+
+// ---------- Seed a default admin only when the users table is completely empty ----------
+// The client used to seed a hardcoded admin/admin123 account itself, and the login
+// screen displayed that literal credential to every visitor, permanently — anyone
+// who opened the browser's view-source could read the password straight out of the
+// shipped JavaScript, and anyone who simply loaded the login page saw it printed on
+// screen, whether or not an admin had ever changed it. This does the seeding here
+// instead: it runs once, only when no user rows exist yet, generates a random
+// password, hashes it before it ever reaches the database, and prints the plaintext
+// exactly once to this server's own console (visible only in the hosting dashboard's
+// logs — never sent to any client, never stored anywhere in plaintext).
+async function seedDefaultAdminIfEmpty() {
+  const rows = await sql`SELECT id FROM users LIMIT 1`;
+  if (rows.length) return;
+  const rawPassword = crypto.randomBytes(9).toString('base64url');
+  const hash = await bcrypt.hash(rawPassword, 10);
+  const recoveryCode = crypto.randomBytes(6).toString('hex').toUpperCase();
+  await sql`
+    INSERT INTO users (id, name, username, password, role, linked_student_id, recovery_code)
+    VALUES ('u_admin', 'Administrator', 'admin', ${hash}, 'Admin', '', ${recoveryCode})
+  `;
+  console.log('============================================================');
+  console.log('First run: created the default admin account.');
+  console.log('  Username: admin');
+  console.log(`  Password: ${rawPassword}`);
+  console.log('Sign in with this once, then change the password immediately');
+  console.log('(Initial Setup -> Users & Roles). Printed only this one time —');
+  console.log('it is not stored anywhere in plaintext and will not be shown again.');
+  console.log('============================================================');
+}
+
+// Runs the startup DB work (schema creation/migration, one-time data
+// migrations, admin seeding) in order, same as before, but as a background
+// task rather than a blocking top-level await — see the comment above the
+// purgeExpiredTrash sweep for why: this lets the HTTP server start and bind
+// its port immediately even if the database is slow to respond or
+// unreachable, instead of the whole process hanging silently before
+// app.listen() is ever reached. Any failure here is caught and logged
+// instead of crashing the process or blocking startup; routes that need the
+// database will simply error (visibly, in the request/response) until this
+// resolves, which is far more debuggable than a platform-level "process
+// never became ready" with no application logs at all.
+async function initDb() {
+  console.log('Connecting to database and ensuring schema...');
+  await ensureSchema();
+  console.log('Schema ready.');
+  await migrateAccountingFromKv();
+  await migrateHomeworkFromKv();
+  await migratePlaintextPasswords();
+  await seedDefaultAdminIfEmpty();
+  console.log('Database initialization complete.');
+}
+initDb().catch(err => {
+  console.error('Database initialization failed — the server will still accept connections, but requests that touch the database will error until this is fixed. Cause:', err);
+});
+
+// ---------- Session-based authentication ----------
+// Until now, nothing on the server checked whether a caller was logged in
+// before answering an /api/* request — the login screen was purely a
+// client-side gate, and a request made straight to the API (curl, a
+// script, anything other than this app's own login-gated UI) went through
+// unchecked. This closes that gap: /api/login now hands back a random
+// session token in an httpOnly cookie, and every /api/* route except the
+// short public allowlist below requires a valid, unexpired one.
+//
+// No new dependency: cookies are parsed by hand (a request has at most a
+// handful of small key=value pairs — not worth adding a library for), and
+// the session store is one more table in the same Postgres database this
+// app already has open, rather than a separate service to run and monitor.
+//
+// The token in the cookie and the token stored server-side are not the
+// same string: the cookie holds a random value the browser presents on
+// every request, and only that value's SHA-256 hash is kept in the
+// `sessions` table (see ensureSchema above) — so a leak of the database
+// (a backup file, a console query, anything read-only) can't be replayed
+// as a working login the way a stored raw token could be.
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const cookies = {};
+  if (!header) return cookies;
+  header.split(';').forEach(pair => {
+    const idx = pair.indexOf('=');
+    if (idx === -1) return;
+    const key = pair.slice(0, idx).trim();
+    const val = pair.slice(idx + 1).trim();
+    if (key) cookies[key] = decodeURIComponent(val);
+  });
+  return cookies;
+}
+function hashSessionToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+// Render terminates TLS at its edge and forwards to this process over
+// plain HTTP, so req.secure is never true here on its own; the standard
+// signal a proxy leaves behind is this header (same reasoning as the
+// x-forwarded-for read already used for login rate-limiting below).
+function isHttpsRequest(req) {
+  return req.secure || req.headers['x-forwarded-proto'] === 'https';
+}
+
+// A session is good for 30 minutes of inactivity (sliding — each
+// authenticated request pushes it back out), up to a hard cap of 12 hours
+// from login regardless of activity, so a cookie left open on a shared
+// front-office computer can't stay valid indefinitely.
+const SESSION_IDLE_MS = 30 * 60 * 1000;
+const SESSION_ABSOLUTE_MAX_MS = 12 * 60 * 60 * 1000;
+
+async function createSession(req, res, user) {
+  // One active session per account — logging in on a new device/browser
+  // signs that account out everywhere else, rather than allowing several
+  // concurrent logins with the same credentials. Deliberately "new login
+  // wins" rather than blocking the new one: the latter can permanently lock
+  // someone out of their own account if an old session (say, a browser tab
+  // left open on a shared office computer) never gets explicitly logged out
+  // — this way there's no such dead end, just a one-line note the previous
+  // device will see on its next request ("Signed in elsewhere" via the
+  // ordinary "session expired" 401 path, since the row is simply gone).
+  await sql`DELETE FROM sessions WHERE user_id = ${user.id}`;
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + SESSION_IDLE_MS);
+  await sql`
+    INSERT INTO sessions (id, user_id, role, name, expires_at)
+    VALUES (${hashSessionToken(token)}, ${user.id}, ${user.role}, ${user.name}, ${expiresAt.toISOString()})
+  `;
+  const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly${secureFlag}; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_ABSOLUTE_MAX_MS / 1000)}`);
+}
+async function destroySession(req, res) {
+  const cookies = parseCookies(req);
+  if (cookies.sid) {
+    await sql`DELETE FROM sessions WHERE id = ${hashSessionToken(cookies.sid)}`.catch(() => {});
+  }
+  res.setHeader('Set-Cookie', 'sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+}
+
+// Routes (and only these methods on them) that must keep working with no
+// login at all: the public school website submits an inquiry and reads a
+// few read-only resources from its own separate domain (see
+// WEBSITE_CORS_RULES above — this list is deliberately the same set), plus
+// logging in and out are themselves how a session is created or cleared.
+const PUBLIC_API_ROUTES = [
+  { path: '/api/login', methods: ['POST'] },
+  { path: '/api/demo-info', methods: ['GET'] },
+  { path: '/api/logout', methods: ['POST'] },
+  { path: '/api/vendor-support-login', methods: ['GET'] },
+  { path: '/api/vendor/admission-inquiries', methods: ['GET'] },
+  // Same reasoning as /api/vendor/admission-inquiries just above — this is
+  // the vendor dashboard's server-to-server hard-wipe call (see the route
+  // itself far below), authenticated purely by its own VENDOR_API_KEY
+  // header check, never by a logged-in school Admin's session. Missing
+  // from this list, every call to it was rejected right here with "Not
+  // logged in." before the route ever got a chance to check that header.
+  { path: '/api/vendor/wipe-data', methods: ['POST'] },
+  // Same reasoning again — the vendor dashboard's daily automatic-backup
+  // read (see the route itself far below), authenticated purely by its own
+  // VENDOR_API_KEY header, never by a logged-in school Admin's session.
+  { path: '/api/vendor/backup-snapshot', methods: ['GET'] },
+  { path: '/api/admission-inquiries', methods: ['POST'] },
+  { path: '/api/comms-messages', methods: ['GET'] },
+  { path: '/api/website-gallery', methods: ['GET'] },
+  { path: '/api/school-info', methods: ['GET'] },
+  // Called by the on-site biometric bridge (a machine, not a logged-in
+  // person) — authenticated by its own BIOMETRIC_API_KEY header check
+  // inside the route, same pattern as /api/vendor/admission-inquiries above.
+  { path: '/api/biometric/punches', methods: ['POST'] },
+];
+function isPublicApiRoute(req) {
+  return PUBLIC_API_ROUTES.some(r => r.path === req.path && r.methods.includes(req.method));
+}
+
+app.use(async (req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next(); // static files / the app shell itself stay open
+  if (req.method === 'OPTIONS' || isPublicApiRoute(req)) return next();
+  try {
+    const token = parseCookies(req).sid;
+    if (!token) return res.status(401).json({ error: 'Not logged in.' });
+    const idHash = hashSessionToken(token);
+    const rows = await sql`SELECT * FROM sessions WHERE id = ${idHash}`;
+    if (!rows.length) return res.status(401).json({ error: 'Session expired. Please log in again.' });
+    const session = rows[0];
+    const now = Date.now();
+    const createdAt = new Date(session.created_at).getTime();
+    if (new Date(session.expires_at).getTime() < now || now - createdAt > SESSION_ABSOLUTE_MAX_MS) {
+      await sql`DELETE FROM sessions WHERE id = ${idHash}`.catch(() => {});
+      return res.status(401).json({ error: 'Session expired. Please log in again.' });
+    }
+    // Sliding renewal, capped at the absolute 12-hour ceiling from login —
+    // fire-and-forget so a slow write here never delays the actual request.
+    const newExpires = new Date(Math.min(now + SESSION_IDLE_MS, createdAt + SESSION_ABSOLUTE_MAX_MS));
+    sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()}, last_seen_at = now() WHERE id = ${idHash}`.catch(() => {});
+    req.authUser = { id: session.user_id, role: session.role, name: session.name };
+    next();
+  } catch (err) {
+    console.error('auth check error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+async function handleKv(req, res, key) {
+  if (!key) return res.status(400).json({ error: 'Missing key.' });
+  if (ADMIN_ONLY_KV_KEYS.includes(key) && (!req.authUser || req.authUser.role !== 'Admin')) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+  // See PARENT_SHARED_REFERENCE_KV_KEYS above — same reasoning as the main
+  // dispatcher's PARENT_SHARED_REFERENCE_RESOURCES: a Student/Parent login
+  // reading shared reference data (right now, the late-fee policy) needs no
+  // staff module permission — there's nothing per-student here to leak.
+  const parentSharedKvBypass = req.method === 'GET' && req.authUser && PARENT_LOGIN_ROLES.includes(req.authUser.role) && PARENT_SHARED_REFERENCE_KV_KEYS.includes(key);
+  if (KV_KEY_TO_MODULE[key]) {
+    // Plan gating applies regardless of role (including Admin, and the
+    // parent/student shared-reference bypass below) — it's about what the
+    // school paid for, not who's asking.
+    const planOk = await checkPlanModuleAccess(req, res, KV_KEY_TO_MODULE[key]);
+    if (!planOk) return;
+  }
+  if (KV_KEY_TO_MODULE[key] && !parentSharedKvBypass) {
+    const allowed = await checkModuleAccess(req, res, KV_KEY_TO_MODULE[key]);
+    if (!allowed) return; // checkModuleAccess already sent the 403
+  }
+  if (req.method === 'GET') {
+    const rows = await sql`SELECT value FROM kv_store WHERE \`key\` = ${key}`;
+    return res.status(200).json(rows.length ? rows[0].value : {});
+  }
+  if (req.method === 'PUT') {
+    const value = req.body;
+    const json = JSON.stringify(value === undefined ? {} : value);
+    await sql`
+      INSERT INTO kv_store (\`key\`, value, updated_at) VALUES (${key}, ${json}::jsonb, now())
+      ON DUPLICATE KEY UPDATE value = ${json}::jsonb, updated_at = now()
+    `;
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+// Sign-in speed: loading the app used to fire ~45 separate /api/kv/:key requests, each
+// queued behind the others. This returns many settings keys in ONE response, applying the
+// very same per-key rules as handleKv (Admin-only keys, module permission, plan gating):
+// a key the caller isn't allowed to read is simply left out, and the client then falls
+// back to the normal per-key request (which answers 403 exactly as before).
+app.get('/api/kv-batch', async (req, res) => {
+  try {
+    const keys = Array.from(new Set(String(req.query.keys || '').split(',').map(k => k.trim()).filter(Boolean))).slice(0, 80);
+    const quiet = { denied: false, status() { return this; }, json() { this.denied = true; return this; }, setHeader() {} };
+    const allowed = [];
+    for (const key of keys) {
+      if (ADMIN_ONLY_KV_KEYS.includes(key) && (!req.authUser || req.authUser.role !== 'Admin')) continue;
+      const parentShared = req.authUser && PARENT_LOGIN_ROLES.includes(req.authUser.role) && PARENT_SHARED_REFERENCE_KV_KEYS.includes(key);
+      if (KV_KEY_TO_MODULE[key]) {
+        if (!(await checkPlanModuleAccess(req, quiet, KV_KEY_TO_MODULE[key]))) continue;
+        if (!parentShared && !(await checkModuleAccess(req, quiet, KV_KEY_TO_MODULE[key]))) continue;
+      }
+      allowed.push(key);
+    }
+    const out = {};
+    if (allowed.length) {
+      const rows = await sql`SELECT \`key\` AS k, value FROM kv_store WHERE \`key\` IN (${allowed})`;
+      const byKey = {};
+      rows.forEach(r => { byKey[r.k] = r.value; });
+      allowed.forEach(k => { out[k] = (k in byKey) ? byKey[k] : {}; });
+    }
+    return res.status(200).json(out);
+  } catch (err) {
+    console.error('kv-batch error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+app.all('/api/kv/:key', async (req, res) => {
+  try {
+    return await handleKv(req, res, req.params.key);
+  } catch (err) {
+    console.error(`kv API error (${req.params.key}):`, err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// ---------- Document numbering (Income/Payment vouchers, and any future series) ----------
+// Indian schools run their financial year April -> March; a receipt/payment
+// voucher series conventionally restarts at 1 each financial year rather
+// than counting up forever. "26-27" means FY starting April 2026.
+function currentFinancialYear() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const startY = now.getMonth() + 1 >= 4 ? y : y - 1; // Jan-Mar still belongs to the FY that started the previous April
+  return String(startY % 100).padStart(2, '0') + '-' + String((startY + 1) % 100).padStart(2, '0');
+}
+// Add a series here (and give it a prefix) any time a new numbered-document
+// type needs the same guarantee — e.g. Fee Receipts or Inventory bills later —
+// nothing else about this endpoint needs to change.
+const DOC_SERIES_PREFIX = {
+  income_voucher: 'RV',   // Receipt Voucher — money coming in, other than a fee payment
+  payment_voucher: 'PV',  // Payment Voucher — money going out
+};
+app.post('/api/next-doc-number', async (req, res) => {
+  try {
+    const series = req.body && req.body.series;
+    const prefix = DOC_SERIES_PREFIX[series];
+    if (!prefix) return res.status(400).json({ error: 'Unknown numbering series: ' + series });
+    const period = currentFinancialYear();
+    // Single atomic statement: locks the (series, period) row for the
+    // duration of this update (via nextDocSeq's LAST_INSERT_ID idiom — see
+    // db.js), so two requests arriving at the same instant are still
+    // serialized into 1 and 2, never both getting the same number — this is
+    // the guarantee kv_store's whole-blob PUT couldn't give.
+    const seq = await nextDocSeq(series, period);
+    const docNumber = `${prefix}/${period}/${String(seq).padStart(6, '0')}`;
+    return res.status(200).json({ docNumber });
+  } catch (err) {
+    console.error('next-doc-number error:', err);
+    return res.status(500).json({ error: 'Could not issue a document number.' });
+  }
+});
+
+// Fee receipt numbers. The browser used to work the next number out from how many payments
+// IT had loaded, so two clerks collecting at the same time (or one with a stale page) could
+// print the same number. Now the browser asks here, and every number is handed out once,
+// in order, from a counter shared by everyone. The counter starts above the highest number
+// already on record for that prefix, and only moves forward.
+app.post('/api/receipt-numbers', async (req, res) => {
+  try {
+    if (!req.authUser || PARENT_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not allowed.' });
+    }
+    const b = req.body || {};
+    const prefix = String(b.prefix || '');
+    if (!/^[A-Za-z0-9-]{2,20}$/.test(prefix)) return res.status(400).json({ error: 'Invalid receipt prefix.' });
+    const count = Math.max(1, Math.min(parseInt(b.count, 10) || 1, 20));
+    const start = Math.max(1, parseInt(b.start, 10) || 1);
+    let minNext = start;
+    const existing = await sql.query('SELECT next_seq FROM doc_counters WHERE series = $1 AND period = $2', ['fee_receipt', prefix]);
+    if (!existing.length) {
+      const rows = await sql.query('SELECT receipt_no FROM payments WHERE receipt_no LIKE $1', [prefix + '%']);
+      let max = 0;
+      rows.forEach(r => {
+        const m = /(\d+)$/.exec(String(r.receipt_no || ''));
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+      });
+      minNext = Math.max(start, max + 1);
+    }
+    const first = await reserveDocSeqRange('fee_receipt', prefix, count, minNext);
+    const numbers = Array.from({ length: count }, (_, i) => prefix + String(first + i).padStart(6, '0'));
+    return res.status(200).json({ numbers });
+  } catch (err) {
+    console.error('receipt-numbers error:', err);
+    return res.status(500).json({ error: 'Could not issue receipt numbers.' });
+  }
+});
+
+// ---------- Resource configuration (unchanged from the tested version) ----------
+const SIMPLE_RESOURCES = {
+  users: {
+    table: 'users',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'name', col: 'name' }, { app: 'username', col: 'username' },
+      { app: 'password', col: 'password' }, { app: 'role', col: 'role' },
+      { app: 'linkedStudentId', col: 'linked_student_id' },
+      { app: 'recoveryCode', col: 'recovery_code' },
+      { app: 'photo', col: 'photo' },
+    ],
+  },
+  payments: {
+    table: 'payments',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'receiptNo', col: 'receipt_no' }, { app: 'studentId', col: 'student_id' },
+      { app: 'studentName', col: 'student_name' }, { app: 'category', col: 'category' }, { app: 'mode', col: 'mode' },
+      { app: 'amount', col: 'amount', numeric: true }, { app: 'discount', col: 'discount', numeric: true }, { app: 'instalment', col: 'instalment' },
+      { app: 'date', col: 'date' }, { app: 'note', col: 'note' }, { app: 'classAtPayment', col: 'class_at_payment' },
+      { app: 'extraFeeName', col: 'extra_fee_name' }, { app: 'extraFeeId', col: 'extra_fee_id' },
+      { app: 'voided', col: 'voided' }, { app: 'voidType', col: 'void_type' }, { app: 'voidReason', col: 'void_reason' },
+      { app: 'voidedBy', col: 'voided_by' }, { app: 'voidedAt', col: 'voided_at' },
+    ],
+  },
+  discounts: {
+    table: 'student_discounts',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'batchId', col: 'batch_id' }, { app: 'studentId', col: 'student_id' },
+      { app: 'type', col: 'type' }, { app: 'appliesTo', col: 'applies_to' }, { app: 'mode', col: 'mode' },
+      { app: 'value', col: 'value', numeric: true }, { app: 'note', col: 'note' }, { app: 'status', col: 'status' },
+      { app: 'requestedBy', col: 'requested_by' }, { app: 'requestedRole', col: 'requested_role' },
+      { app: 'requestedDate', col: 'requested_date' }, { app: 'approverId', col: 'approver_id' },
+      { app: 'approverName', col: 'approver_name' }, { app: 'approvedBy', col: 'approved_by' },
+      { app: 'approvedDate', col: 'approved_date' },
+    ],
+  },
+  'extra-fees': {
+    table: 'student_extra_fees',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'studentId', col: 'student_id' }, { app: 'name', col: 'name' },
+      { app: 'amount', col: 'amount', numeric: true }, { app: 'paid', col: 'paid' }, { app: 'paidAmount', col: 'paid_amount', numeric: true },
+      { app: 'date', col: 'date' },
+    ],
+  },
+  attendance: {
+    table: 'attendance_records',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'studentId', col: 'student_id' }, { app: 'date', col: 'date' },
+      { app: 'status', col: 'status' }, { app: 'session', col: 'session' },
+    ],
+  },
+  holidays: {
+    table: 'holidays',
+    fields: [{ app: 'id', col: 'id' }, { app: 'date', col: 'date' }, { app: 'name', col: 'name' }],
+  },
+  'exam-results': {
+    table: 'exam_results',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'examId', col: 'exam_id' }, { app: 'studentId', col: 'student_id' },
+      { app: 'subject', col: 'subject' }, { app: 'marks', col: 'marks', numeric: true }, { app: 'absent', col: 'absent' },
+      { app: 'written', col: 'written_marks', numeric: true }, { app: 'internal', col: 'internal_marks', numeric: true },
+    ],
+  },
+  'staff-attendance': {
+    table: 'staff_attendance_records',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'staffId', col: 'staff_id' }, { app: 'date', col: 'date' },
+      { app: 'status', col: 'status' }, { app: 'session', col: 'session' },
+    ],
+  },
+  'admission-inquiries': {
+    table: 'admission_inquiries',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'parentName', col: 'parent_name' }, { app: 'parentEmail', col: 'parent_email' },
+      { app: 'parentPhone', col: 'parent_phone' }, { app: 'studentName', col: 'student_name' },
+      { app: 'applyingGrade', col: 'applying_grade' }, { app: 'notes', col: 'notes' },
+      { app: 'submittedDate', col: 'submitted_date' }, { app: 'status', col: 'status' },
+    ],
+  },
+  'website-gallery': {
+    table: 'website_gallery',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'dataUrl', col: 'data_url' }, { app: 'category', col: 'category' },
+      { app: 'caption', col: 'caption' }, { app: 'uploadedDate', col: 'uploaded_date' },
+      { app: 'uploadedBy', col: 'uploaded_by' },
+    ],
+  },
+  'acct-income': {
+    table: 'acct_income',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'voucherNo', col: 'voucher_no' }, { app: 'date', col: 'date' },
+      { app: 'category', col: 'category' }, { app: 'costCenter', col: 'cost_center' },
+      { app: 'amount', col: 'amount', numeric: true }, { app: 'party', col: 'party' }, { app: 'mode', col: 'mode' },
+      { app: 'referenceNo', col: 'reference_no' }, { app: 'description', col: 'description' }, { app: 'addedBy', col: 'added_by' },
+      { app: 'voided', col: 'voided' }, { app: 'voidReason', col: 'void_reason' },
+      { app: 'voidedBy', col: 'voided_by' }, { app: 'voidedAt', col: 'voided_at' },
+    ],
+  },
+  'acct-expenses': {
+    table: 'acct_expenses',
+    fields: [
+      { app: 'id', col: 'id' }, { app: 'voucherNo', col: 'voucher_no' }, { app: 'date', col: 'date' },
+      { app: 'category', col: 'category' }, { app: 'costCenter', col: 'cost_center' },
+      { app: 'amount', col: 'amount', numeric: true }, { app: 'party', col: 'party' }, { app: 'mode', col: 'mode' },
+      { app: 'referenceNo', col: 'reference_no' }, { app: 'description', col: 'description' }, { app: 'addedBy', col: 'added_by' },
+      { app: 'voided', col: 'voided' }, { app: 'voidReason', col: 'void_reason' },
+      { app: 'voidedBy', col: 'voided_by' }, { app: 'voidedAt', col: 'voided_at' },
+    ],
+  },
+};
+
+const HYBRID_RESOURCES = {
+  students: {
+    table: 'students',
+    // Opts this one resource into handleHybrid's soft-delete path (see
+    // below) — every other hybrid resource keeps its existing hard DELETE
+    // unchanged, since this fix is scoped to the two record types a real
+    // incident actually happened to (students, and users just below).
+    softDelete: true,
+    // A direct DELETE to /api/students is refused unconditionally (see the
+    // DELETE branch of handleHybrid below) — even for Admin. The only way
+    // deleted_at ever gets set on a student is handleDeletionRequests
+    // approving a pending request from a second person. This is separate
+    // from softDelete above: softDelete governs what a successful deletion
+    // *does* (soft, reversible); this governs who may *trigger* one at all.
+    deleteViaApprovalOnly: true,
+    core: [
+      { app: 'id', col: 'id' }, { app: 'firstName', col: 'first_name' }, { app: 'lastName', col: 'last_name' },
+      { app: 'className', col: 'class_name' }, { app: 'section', col: 'section' }, { app: 'status', col: 'status' },
+      { app: 'admissionNo', col: 'admission_no' },
+    ],
+  },
+  staff: {
+    table: 'staff',
+    core: [
+      { app: 'id', col: 'id' }, { app: 'firstName', col: 'first_name' }, { app: 'lastName', col: 'last_name' },
+      { app: 'department', col: 'department' }, { app: 'designation', col: 'designation' },
+      { app: 'status', col: 'status' }, { app: 'staffId', col: 'staff_id' },
+    ],
+  },
+  'staff-payroll': {
+    table: 'staff_payroll',
+    core: [
+      { app: 'id', col: 'id' }, { app: 'staffId', col: 'staff_id' }, { app: 'month', col: 'month' },
+      { app: 'status', col: 'status' },
+    ],
+  },
+  // Notice Board / Communications messages — shape varies quite a bit record to
+  // record (a "channels" array, an optional "boardRemoved" flag, etc.), so only
+  // "id" is a real column; everything else rides in "extra" like the fields above.
+  'comms-messages': {
+    table: 'comms_messages',
+    core: [{ app: 'id', col: 'id' }],
+  },
+  // Exam room master list (name/capacity) and per-student hall ticket numbers —
+  // both are small, free-form records, so only "id" is a real column.
+  rooms: {
+    table: 'rooms',
+    core: [{ app: 'id', col: 'id' }],
+  },
+  'exam-hall-tickets': {
+    table: 'exam_hall_tickets',
+    core: [{ app: 'id', col: 'id' }],
+  },
+  // Per-exam Room Allotment settings (which classes are in scope, print
+  // orientation/page size) — one small record per exam, keyed by examId.
+  'exam-room-config': {
+    table: 'exam_room_config',
+    core: [{ app: 'id', col: 'id' }],
+  },
+};
+
+// ---------- Server-side enforcement of Roles & Permissions ----------
+// Until now, the Roles & Permissions matrix (index.html: PERMISSION_MODULES /
+// ROLE_VIEWS / custom_roles) only ever controlled what the BROWSER shows —
+// hiding a sidebar button never stopped that same role from calling the API
+// underneath it directly. This closes that gap.
+//
+// Deliberately scoped, to keep this safe to ship on a live school database:
+//  - Enforcement happens only at the TOP-LEVEL module granularity that
+//    ROLE_VIEWS/the sidebar itself uses — never the finer per-action
+//    (view/create/edit/delete/print/approve) checks or the bespoke
+//    sub-module fallback helpers (getAccountingTabAccess, getResultTabAccess,
+//    etc.) the admin UI also exposes. A resource that really belongs to a
+//    sub-module is checked against that sub-module's PARENT module instead —
+//    the same coarse fallback those client helpers already use when no
+//    explicit override exists for the sub-module itself. Where one resource
+//    legitimately feeds more than one module's screen (e.g. exam-results
+//    backs both Manage Exams and Result), access to EITHER is enough.
+//  - A role with NO saved custom_roles override behaves EXACTLY as it does
+//    today (SERVER_ROLE_VIEWS defaults below, copied from ROLE_VIEWS) —
+//    enforcement only ever *tightens* access, and only once an admin has
+//    explicitly customized that role in Roles & Permissions. No school that
+//    hasn't touched that screen sees any behavior change.
+//  - "Fail open": a resource or kv key with no explicit entry in
+//    RESOURCE_TO_MODULE/KV_KEY_TO_MODULE below is left completely
+//    unrestricted, exactly as before this change, rather than guessed at.
+//  - 'users' and 'roles' are hard-locked to the built-in Admin role,
+//    unconditionally — mirroring LOCKED_ADMIN_ONLY_PAGES on the client,
+//    since these control who can log in and the permission system itself
+//    and must never be delegable through any override.
+
+// Mirrors ROLE_VIEWS in index.html — keep the two in sync. This is the
+// fallback used whenever a role has no saved override for a given module.
+const SERVER_ROLE_VIEWS = {
+  Admin: ['dashboard','admissions','managefee','attendance','exams','subjects','promotransfer','result','staff','accounting','announcements','inbox','noticeboard','websiteinquiries','websitegallery','contactvendor','reports','inventory','timetable','syllabus','transport','library','hostel','setup'],
+  Principal: ['dashboard','admissions','managefee','attendance','exams','subjects','promotransfer','result','staff','accounting','announcements','inbox','noticeboard','websiteinquiries','websitegallery','contactvendor','reports','inventory','timetable','syllabus','transport','library','hostel','setup'],
+  Accountant: ['dashboard','admissions','managefee','accounting','reports','inventory','transport'],
+  'Office Assistant': ['admissions'],
+  Teacher: ['admissions','attendance','exams','subjects','result','timetable','syllabus','library','announcements','inbox'],
+  Staff: ['admissions','attendance','inbox'],
+  Student: ['myprofile'],
+  Parent: ['myprofile'],
+};
+
+// A role's saved override permissions object, straight from custom_roles —
+// undefined if none saved. Student/Parent never participate in overrides
+// (mirrors findRoleOverride() in index.html: their "My Portal" access isn't
+// expressible as a module grant, so a custom override never widens or
+// narrows it).
+async function getRoleOverride(role) {
+  if (role === 'Student' || role === 'Parent') return undefined;
+  const rows = await sql`SELECT permissions FROM custom_roles WHERE name = ${role} LIMIT 1`;
+  return rows.length ? rows[0].permissions : undefined;
+}
+
+// Every resource name (SIMPLE_RESOURCES / HYBRID_RESOURCES / the custom
+// handlers below) mapped to the top-level PERMISSION_MODULES key(s) that
+// gate it. Resources not listed here are unrestricted (fail open).
+const RESOURCE_TO_MODULE = {
+  // Finance
+  payments: ['managefee'],
+  discounts: ['managefee'],
+  'extra-fees': ['managefee'],
+  'fee-structure': ['managefee'],
+  'acct-income': ['accounting'],
+  'acct-expenses': ['accounting'],
+  // Academics
+  attendance: ['attendance'],
+  holidays: ['attendance'],
+  'attendance-settings': ['attendance'],
+  'staff-attendance': ['staff', 'attendance'],
+  'exam-results': ['exams', 'result'],
+  'exam-defs': ['exams'],
+  subjects: ['subjects'],
+  'homework-items': ['syllabus'],
+  rooms: ['result'],
+  'exam-hall-tickets': ['result'],
+  'exam-room-config': ['result'],
+  // People
+  students: ['admissions'],
+  'deletion-requests': ['admissions'],
+  certificates: ['admissions'],
+  // Admission inquiries are the public website's "Admissions Inquiry Form"
+  // submissions, reviewed under Website Inquiries in the sidebar (see
+  // canDo('websiteinquiries', ...) in renderAdmissionInquiries) — NOT the
+  // Manage Student module, despite the resource's name.
+  'admission-inquiries': ['websiteinquiries'],
+  staff: ['staff'],
+  'staff-payroll': ['staff'],
+  // Communication
+  'comms-messages': ['announcements'],
+  'website-gallery': ['websitegallery'],
+  // Setup
+  'school-info': ['setup'],
+};
+
+// Same idea, for the generic /api/kv/:key store — every kv_store key that's
+// actually a school-data settings blob (as opposed to internal plumbing),
+// mapped to the module(s) whose screen reads/writes it.
+const KV_KEY_TO_MODULE = {
+  'finance-settings': ['managefee'],
+  'fee-types': ['managefee'],
+  'discount-types': ['managefee'],
+  'extra-fee-defs': ['managefee'],
+  'late-fee-settings': ['managefee'],
+  // Per-fee-head remittance schedule (Yearly / Terms / Monthly) per academic year.
+  'fee-schedule': ['managefee'],
+  'receipt-settings': ['managefee'],
+  'grading-scale': ['exams', 'result'],
+  'grading-schemes': ['exams', 'result'],
+  'exam-types': ['exams', 'result'],
+  'exam-groups': ['exams', 'result'],
+  'consolidation-scale': ['exams', 'result'],
+  'exam-holidays': ['exams', 'result'],
+  'report-templates': ['exams', 'result'],
+  'staff-departments': ['staff'],
+  'staff-designations': ['staff'],
+  'staff-job-types': ['staff'],
+  'inventory-items': ['inventory'],
+  'inventory-sales': ['inventory'],
+  'inventory-returns': ['inventory'],
+  'inventory-vendor-returns': ['inventory'],
+  'timetable-entries': ['timetable'],
+  'timetable-periods': ['timetable'],
+  'timetable-days': ['timetable'],
+  'syllabus-topics': ['syllabus'],
+  // 'homework-items' removed — it's now a real resource (see
+  // RESOURCE_TO_MODULE above) served from its own table, not this generic
+  // kv_store blob.
+  'transport-routes': ['transport'],
+  'library-books': ['library'],
+  'library-issues': ['library'],
+  'library-settings': ['library'],
+  'hostel-rooms': ['hostel'],
+  'acct-expense-categories': ['accounting'],
+  'acct-income-categories': ['accounting'],
+  'acct-cost-centers': ['accounting'],
+  'notice-types': ['announcements'],
+  'academic-years': ['setup'],
+  'current-academic-year': ['setup'],
+  'class-levels': ['setup'],
+  'section-levels': ['setup'],
+  'class-section-overrides': ['setup'],
+  // Feeds both the Inventory "Approvals" tab and Promotion & Transfer's
+  // "Approve Requests" tab — either module's access is enough.
+  'pending-approvals': ['inventory', 'promotransfer'],
+  // 'admin-downloads' is deliberately absent here — that screen is
+  // hard-locked to Admin only (see adminOnlyPages/'admintools2' on the
+  // client), enforced directly in handleKv below, not through this table.
+};
+const ADMIN_ONLY_KV_KEYS = ['admin-downloads'];
+
+// Does `role` have "view" access to ANY of `moduleKeys`? Mirrors
+// getRoleViews()'s per-module test in index.html: an explicit saved choice
+// for that module wins, otherwise fall back to the role's built-in default.
+// Sends the 403 itself on failure so call sites can just `if (!ok) return;`.
+async function checkModuleAccess(req, res, moduleKeys) {
+  if (!req.authUser) return true; // unauthenticated (public) routes have nothing to check
+  if (req.authUser.role === 'Admin') return true; // Admin is always the ceiling — never restricted
+  const override = await getRoleOverride(req.authUser.role);
+  const defaults = SERVER_ROLE_VIEWS[req.authUser.role] || [];
+  const ok = moduleKeys.some(key => (override && override[key] !== undefined) ? !!override[key].view : defaults.includes(key));
+  if (!ok) res.status(403).json({ error: 'You do not have permission to access this.' });
+  return ok;
+}
+
+// ---------- Plan/Modules gating (billing-driven — separate from Roles & Permissions above) ----------
+// The vendor dashboard's "Plan" field (Schools tab → edit a school → Plan)
+// lets the vendor sell a school only some modules — see vendor-reporting.js's
+// getModuleAccess() for how that's mapped down from the dashboard's 4
+// billing buckets to this ERP's own module keys. Only these 6 keys are ever
+// part of a Plan; anything else (dashboard, admissions, staff, accounting,
+// setup, announcements, etc.) is core and never gated by Plan, regardless of
+// which modules a school picked.
+const PLAN_GATED_MODULE_KEYS = ['managefee', 'attendance', 'exams', 'result', 'transport', 'library'];
+
+// Same call-site shape as checkModuleAccess (sends its own 403 and returns a
+// boolean) but a completely separate axis: this checks what the SCHOOL paid
+// for, not what the ROLE is allowed to see, so — unlike checkModuleAccess —
+// it applies to every role, Admin included (a school that didn't pay for
+// Exams doesn't get it back just because the person asking is the school's
+// own Admin). The one exception is a Vendor Support session (see
+// vendor-support-login.js) — that's the vendor's own troubleshooting login,
+// never the school's, and must never be blocked by the school's own plan.
+async function checkPlanModuleAccess(req, res, moduleKeys) {
+  if (!req.authUser || req.authUser.id === 'vendor-support') return true;
+  const gatedKeys = moduleKeys.filter(k => PLAN_GATED_MODULE_KEYS.includes(k));
+  if (!gatedKeys.length) return true; // not part of any Plan bucket — always included
+  const access = getModuleAccess();
+  if (!access.restricted) return true; // no Plan set, an "All Modules" Plan, or not yet confirmed by a heartbeat — fail open
+  const ok = gatedKeys.some(k => access.enabledKeys.includes(k));
+  if (!ok) {
+    res.status(403).json({
+      error: "This module isn't included in your school's current plan. Please contact SVM EdTech to add it.",
+      planRestricted: true,
+    });
+  }
+  return ok;
+}
+
+// ---------- Generic helpers for "simple" resources ----------
+// Postgres NUMERIC columns come back from this driver as strings, not JS
+// numbers — arbitrary-precision decimals can't always be represented as a
+// float, so the driver plays it safe and hands back text (this is also why
+// handleFeeStructure and handleAttendanceSettings below already wrap their
+// NUMERIC columns in Number()). Every field marked `numeric: true` here
+// gets the same treatment, so a caller doing `total += row.amount` gets a
+// real sum instead of silently concatenating strings — exactly what was
+// happening to exam marks totals in report cards before this. Null stays
+// null (a real "not entered yet"/absent marker) rather than becoming 0.
+function simpleToAppShape(row, fields) {
+  const out = {};
+  fields.forEach(f => {
+    let v = row[f.col];
+    if (v && typeof v === 'object' && v instanceof Date) v = v.toISOString().slice(0, 10);
+    else if (f.numeric && v !== null && v !== undefined) v = Number(v);
+    out[f.app] = v;
+  });
+  return out;
+}
+// Fire-and-forget dispatch to the notify* functions defined in the
+// "Notifications" section further down (hoisted function declarations, so
+// the definition order here doesn't matter — these only ever actually run
+// once a real request comes in, long after the whole module has loaded).
+// Deliberately not awaited by any caller: a slow or failing push/WhatsApp
+// send must never add latency to — or fail — the write itself.
+function notifyAfterResourceWrite(resourceName, body, method) {
+  if (resourceName === 'payments') {
+    notifyFeePayment({ studentId: body.studentId, amount: body.amount, mode: body.mode, receiptNo: body.receiptNo })
+      .catch(err => console.error('fee payment notification failed:', err));
+  } else if (resourceName === 'attendance') {
+    notifyAttendanceEvent({ studentId: body.studentId, date: body.date, status: body.status })
+      .catch(err => console.error('attendance notification failed:', err));
+  } else if (resourceName === 'exam-results') {
+    notifyMarksIfComplete({ examId: body.examId, studentId: body.studentId })
+      .catch(err => console.error('marks notification failed:', err));
+  } else if (resourceName === 'discounts' && method === 'POST' && body.status === 'Pending') {
+    // Only on the initial request, never on the later PUT that records the
+    // approve/reject decision — otherwise every decision would re-alert
+    // Admin about the request it had just finished acting on.
+    notifyPendingDiscountRequest({ studentId: body.studentId, requestedBy: body.requestedBy })
+      .catch(err => console.error('discount request notification failed:', err));
+  }
+}
+// ---- Duplicate-save protection for money records ----------------------------
+// A double-click / held Enter / retry used to create the same payment or
+// voucher again under a new number. These tables get a server-side check:
+// an identical, non-voided entry in the last 2 minutes is refused (409).
+const _keyLocks = new Map();
+async function withKeyLock(key, fn) {
+  const prev = _keyLocks.get(key) || Promise.resolve();
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const tail = prev.then(() => gate);
+  _keyLocks.set(key, tail);
+  await prev.catch(() => {});
+  try { return await fn(); }
+  finally { release(); if (_keyLocks.get(key) === tail) _keyLocks.delete(key); }
+}
+const DUP_GUARDS = {
+  payments: { noCol: 'receipt_no', lockBy: 'studentId',
+    match: [['student_id','studentId'],['category','category'],['extra_fee_id','extraFeeId'],['instalment','instalment'],['amount','amount'],['discount','discount'],['mode','mode'],['date','date'],['note','note']] },
+  acct_income: { noCol: 'voucher_no', lockBy: null,
+    match: [['date','date'],['category','category'],['cost_center','costCenter'],['amount','amount'],['party','party'],['mode','mode'],['reference_no','referenceNo'],['description','description'],['added_by','addedBy']] },
+  acct_expenses: { noCol: 'voucher_no', lockBy: null,
+    match: [['date','date'],['category','category'],['cost_center','costCenter'],['amount','amount'],['party','party'],['mode','mode'],['reference_no','referenceNo'],['description','description'],['added_by','addedBy']] },
+};
+async function findRecentDuplicate(table, guard, body) {
+  const conds = [], params = [];
+  guard.match.forEach(([col, app], i) => {
+    let v = body[app];
+    if (v === undefined || v === '') v = null;
+    conds.push(`${col} <=> $${i + 1}`);
+    params.push(v);
+  });
+  const rows = await sql.query(
+    `SELECT * FROM ${table} WHERE ${conds.join(' AND ')} AND COALESCE(voided, 0) = 0 AND created_at > (NOW() - INTERVAL 120 SECOND) LIMIT 1`,
+    params);
+  return rows[0] || null;
+}
+
+async function handleSimple(req, res, config, resourceName) {
+  const { table, fields } = config;
+  if (req.method === 'GET') {
+    // FORCE INDEX: an index on created_at existing is not enough — for an
+    // unfiltered SELECT * across the whole table, MySQL's optimizer will
+    // often choose a full table scan + filesort over walking the secondary
+    // index (it estimates that's cheaper when reading ~all rows), silently
+    // ignoring the index entirely. That filesort has to buffer full row
+    // width, which is what actually overflows the sort buffer on wide rows
+    // (base64 photos etc.) — confirmed live: the idx_*_created_at indexes
+    // added above did NOT stop ER_OUT_OF_SORTMEMORY on their own. Forcing
+    // the index makes MySQL read rows already in created_at order straight
+    // off the index, so no filesort — and no sort buffer — is ever needed.
+    const rows = await sql.query(`SELECT * FROM ${table} FORCE INDEX (idx_${table}_created_at) ORDER BY created_at ASC`);
+    return res.status(200).json(rows.map(r => simpleToAppShape(r, fields)));
+  }
+  if (req.method === 'POST' || req.method === 'PUT') {
+    const body = req.body || {};
+    if (!body.id) return res.status(400).json({ error: 'Missing id.' });
+    const cols = fields.map(f => f.col);
+    const vals = fields.map(f => (body[f.app] === undefined ? null : body[f.app]));
+    if (req.method === 'POST') {
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      const guard = DUP_GUARDS[table];
+      const doInsert = async () => {
+        // Idempotent: the same record id arriving twice (retry, double-send) is one record.
+        const same = await sql.query(`SELECT id FROM ${table} WHERE id = $1`, [body.id]);
+        if (same.length) return res.status(200).json({ ok: true, alreadySaved: true });
+        if (guard) {
+          const dup = await findRecentDuplicate(table, guard, body);
+          if (dup) {
+            return res.status(409).json({
+              error: 'An identical entry was already saved a moment ago (' + (dup[guard.noCol] || 'no number') + '). The extra copy was not saved.',
+              code: 'DUPLICATE', existing: { number: dup[guard.noCol] || '' },
+            });
+          }
+        }
+        await sql.query(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`, vals);
+        notifyAfterResourceWrite(resourceName, body, 'POST');
+        return res.status(201).json({ ok: true });
+      };
+      // Serialise writes per student (payments) / per table (vouchers) so two
+      // simultaneous identical requests cannot both pass the check.
+      if (guard) return withKeyLock(table + ':' + (guard.lockBy ? (body[guard.lockBy] || '') : ''), doInsert);
+      return doInsert();
+    } else {
+      const setClause = cols.filter(c => c !== 'id').map((c, i) => `${c} = $${i + 2}`).join(', ');
+      const updateVals = [body.id, ...fields.filter(f => f.col !== 'id').map(f => (body[f.app] === undefined ? null : body[f.app]))];
+      await sql.query(`UPDATE ${table} SET ${setClause} WHERE id = $1`, updateVals);
+      notifyAfterResourceWrite(resourceName, body, 'PUT');
+      return res.status(200).json({ ok: true });
+    }
+  }
+  if (req.method === 'DELETE') {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    await sql.query(`DELETE FROM ${table} WHERE id = $1`, [id]);
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+// The `users` resource needs its own version of the above rather than going
+// through the generic handleSimple(): it's the one resource with a password
+// field, which has two rules nothing else needs — GET must never send it
+// back (hashed or not, the browser has no legitimate use for it), and a
+// PUT that doesn't include a new one must leave the existing hash alone
+// instead of overwriting it with null the way handleSimple's generic
+// "missing field → null" behavior would (every edit to a user's name,
+// role, etc. goes through the same PUT the client already used before this
+// change, and the client can no longer echo back a password it was never
+// given in the first place).
+async function handleUsers(req, res) {
+  const config = SIMPLE_RESOURCES.users;
+  const { table, fields } = config;
+  if (req.method === 'GET') {
+    // ?trash=1 lists soft-deleted accounts for the Recently Deleted view
+    // instead of the normal active roster — Admin-only, same as this whole
+    // resource already is (see the resource==='users' gate further up).
+    const trashMode = req.query.trash === '1';
+    if (trashMode && (!req.authUser || req.authUser.role !== 'Admin')) {
+      return res.status(403).json({ error: 'Admin access required.' });
+    }
+    if (trashMode) await purgeExpiredTrash();
+    // FORCE INDEX — see the comment in handleSimple's GET above: an index
+    // existing doesn't stop MySQL's optimizer from ignoring it for a
+    // near-full-table scan, which is exactly what left `users.photo` (base64
+    // image data, same shape as the staff bug) still at risk after just
+    // adding the index.
+    const rows = await sql.query(
+      `SELECT * FROM ${table} FORCE INDEX (idx_${table}_created_at) WHERE deleted_at IS ${trashMode ? 'NOT NULL' : 'NULL'} ORDER BY created_at ASC`
+    );
+    return res.status(200).json(rows.map(r => {
+      const shaped = simpleToAppShape(r, fields);
+      delete shaped.password;
+      // Recently Deleted needs to show when this was deleted and when it
+      // will auto-purge — see TRASH_RETENTION_DAYS/purgeExpiredTrash above.
+      if (trashMode) {
+        shaped.deletedAt = r.deleted_at;
+        shaped.deletedByName = r.deleted_by_name;
+        shaped.purgesAt = r.deleted_at ? new Date(new Date(r.deleted_at).getTime() + TRASH_RETENTION_DAYS * 86400000).toISOString() : null;
+      }
+      return shaped;
+    }));
+  }
+  if (req.method === 'POST' || req.method === 'PUT') {
+    // A restore is a bodyless PUT carrying ?restore=1 — the mirror image of
+    // the soft delete below, just clearing deleted_at back to NULL.
+    if (req.method === 'PUT' && req.query.restore === '1') {
+      if (!req.authUser || req.authUser.role !== 'Admin') {
+        return res.status(403).json({ error: 'Admin access required.' });
+      }
+      const { id } = req.query;
+      if (!id) return res.status(400).json({ error: 'Missing id.' });
+      await sql`UPDATE users SET deleted_at = NULL, deleted_by = NULL, deleted_by_name = NULL WHERE id = ${id}`;
+      return res.status(200).json({ ok: true });
+    }
+    // "Delete Permanently" from Recently Deleted — see purgeOneRecord above.
+    if (req.method === 'PUT' && req.query.purge === '1') {
+      if (!req.authUser || req.authUser.role !== 'Admin') {
+        return res.status(403).json({ error: 'Admin access required.' });
+      }
+      return await purgeOneRecord(req, res, 'users');
+    }
+    const body = { ...(req.body || {}) };
+    if (!body.id) return res.status(400).json({ error: 'Missing id.' });
+    if (req.method === 'POST') {
+      if (!body.password) return res.status(400).json({ error: 'Password is required for a new user.' });
+      body.password = await bcrypt.hash(String(body.password), 10);
+    } else if (body.password) {
+      body.password = await bcrypt.hash(String(body.password), 10);
+    } else {
+      const existing = await sql`SELECT password FROM users WHERE id = ${body.id}`;
+      body.password = existing.length ? existing[0].password : null;
+    }
+    const cols = fields.map(f => f.col);
+    const vals = fields.map(f => (body[f.app] === undefined ? null : body[f.app]));
+    if (req.method === 'POST') {
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      await sql.query(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`, vals);
+      return res.status(201).json({ ok: true });
+    } else {
+      const setClause = cols.filter(c => c !== 'id').map((c, i) => `${c} = $${i + 2}`).join(', ');
+      const updateVals = [body.id, ...fields.filter(f => f.col !== 'id').map(f => (body[f.app] === undefined ? null : body[f.app]))];
+      await sql.query(`UPDATE ${table} SET ${setClause} WHERE id = $1`, updateVals);
+      return res.status(200).json({ ok: true });
+    }
+  }
+  if (req.method === 'DELETE') {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    // Three guards added after a real incident: deleting your own
+    // currently-logged-in account left that session looking "still logged
+    // in" until it expired on its own (nothing previously re-checked the
+    // user still existed mid-session); deleting the last remaining Admin
+    // would lock everyone out with no way back in; and a hard DELETE gave
+    // no way to undo either mistake. Soft delete plus an immediate session
+    // wipe closes all three at once.
+    if (req.authUser && String(req.authUser.id) === String(id)) {
+      return res.status(400).json({ error: "You can't delete your own account while logged in as it. Log in as a different Admin first." });
+    }
+    const target = await sql`SELECT role FROM users WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!target.length) return res.status(404).json({ error: 'User not found.' });
+    if (target[0].role === 'Admin') {
+      const activeAdmins = await sql`SELECT count(*)::int AS c FROM users WHERE role = 'Admin' AND deleted_at IS NULL`;
+      if (activeAdmins[0].c <= 1) {
+        return res.status(400).json({ error: "You can't delete the last remaining Admin account — create another Admin first." });
+      }
+    }
+    await sql`UPDATE users SET deleted_at = now(), deleted_by = ${req.authUser ? req.authUser.id : null}, deleted_by_name = ${req.authUser ? req.authUser.name : null} WHERE id = ${id}`;
+    // Whatever session(s) this account is signed in on, elsewhere or right
+    // now, stop working on their very next request instead of coasting on
+    // a stale cookie until it naturally times out.
+    await sql`DELETE FROM sessions WHERE user_id = ${id}`;
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+// ---------- Generic helpers for "hybrid" (core + JSONB extra) resources ----------
+function hybridToAppShape(row, core) {
+  const out = {};
+  core.forEach(f => { out[f.app] = row[f.col]; });
+  return { ...out, ...(row.extra || {}) };
+}
+function splitCoreExtra(body, core) {
+  const coreAppKeys = core.map(f => f.app);
+  const extra = {};
+  Object.keys(body).forEach(k => { if (!coreAppKeys.includes(k)) extra[k] = body[k]; });
+  const coreVals = {};
+  core.forEach(f => { coreVals[f.app] = body[f.app] !== undefined ? body[f.app] : (f.app === 'status' ? 'Active' : ''); });
+  return { coreVals, extra };
+}
+// ---------- Staff photos / signatures: served as images, not inline ----------
+// A staff record's photo and signature are stored as base64 data URLs inside the
+// record itself. Sent inline, 30-odd staff came to ~6 MB for the Staff list that every
+// login loads - the single biggest cause of slow sign-in. The list now carries a short
+// URL for each image instead (cacheable by the browser), and the image itself comes from
+// GET /api/staff-media/:id/:field. Saving a record that still holds one of these URLs
+// keeps the stored image untouched (see staffMediaKeepStored).
+const STAFF_MEDIA_FIELDS = ['photo', 'signature'];
+function staffMediaVersion(v) {
+  return crypto.createHash('md5').update(v).digest('hex').slice(0, 10);
+}
+function staffMediaLight(shaped) {
+  if (!shaped || !shaped.id) return shaped;
+  STAFF_MEDIA_FIELDS.forEach(f => {
+    const v = shaped[f];
+    if (typeof v === 'string' && v.startsWith('data:')) {
+      shaped[f] = `/api/staff-media/${encodeURIComponent(shaped.id)}/${f}?v=${staffMediaVersion(v)}`;
+    }
+  });
+  return shaped;
+}
+async function staffMediaKeepStored(body) {
+  const needs = STAFF_MEDIA_FIELDS.filter(f => typeof body[f] === 'string' && body[f].includes('/api/staff-media/'));
+  if (!needs.length) return;
+  const rows = await sql.query('SELECT extra FROM staff WHERE id = $1', [body.id]);
+  let extra = rows.length ? rows[0].extra : {};
+  if (typeof extra === 'string') { try { extra = JSON.parse(extra); } catch (e) { extra = {}; } }
+  extra = extra || {};
+  needs.forEach(f => { body[f] = extra[f] || ''; });
+}
+app.get('/api/staff-media/:id/:field', async (req, res) => {
+  try {
+    const { id, field } = req.params;
+    if (!STAFF_MEDIA_FIELDS.includes(field)) return res.status(404).end();
+    const rows = await sql.query('SELECT extra FROM staff WHERE id = $1', [id]);
+    if (!rows.length) return res.status(404).end();
+    let extra = rows[0].extra;
+    if (typeof extra === 'string') { try { extra = JSON.parse(extra); } catch (e) { extra = {}; } }
+    extra = extra || {};
+    const role = req.authUser && req.authUser.role;
+    const own = extra.linkedUserId && req.authUser && extra.linkedUserId === req.authUser.id;
+    let allowed = MANAGEMENT_ROLES.includes(role) || own;
+    if (!allowed && req.authUser && !PARENT_LOGIN_ROLES.includes(role)) {
+      const override = await getRoleOverride(role);
+      const defaults = SERVER_ROLE_VIEWS[role] || [];
+      allowed = (override && override.staff !== undefined) ? !!override.staff.view : defaults.includes('staff');
+    }
+    if (!allowed) return res.status(403).end();
+    const v = extra[field];
+    const m = typeof v === 'string' ? /^data:([^;,]+)(;base64)?,(.*)$/s.exec(v) : null;
+    if (!m) return res.status(404).end();
+    const buf = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]));
+    const etag = '"' + staffMediaVersion(v) + '"';
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    if (req.headers['if-none-match'] === etag) return res.status(304).end();
+    res.setHeader('Content-Type', m[1] || 'image/jpeg');
+    return res.status(200).send(buf);
+  } catch (err) {
+    console.error('staff-media error:', err);
+    return res.status(500).end();
+  }
+});
+
+// ---------- Student photos: served as images, not inline ----------
+// Same idea as staff media above. Every student's photo is a full-size base64 data URL
+// stored in the record (~190 KB each); ~500 students came to ~70-95 MB for the Students
+// list that every login loads. The list now carries a short URL per photo instead, and
+// the image comes from GET /api/student-media/:id (browser-cached). Saving a record that
+// still holds the URL keeps the stored photo untouched.
+function studentMediaLight(shaped) {
+  if (!shaped || !shaped.id) return shaped;
+  const v = shaped.photo;
+  if (typeof v === 'string' && v.startsWith('data:')) {
+    shaped.photo = `/api/student-media/${encodeURIComponent(shaped.id)}?v=${staffMediaVersion(v)}`;
+  }
+  return shaped;
+}
+async function studentMediaKeepStored(body) {
+  if (typeof body.photo !== 'string' || !body.photo.includes('/api/student-media/')) return;
+  const rows = await sql.query('SELECT extra FROM students WHERE id = $1', [body.id]);
+  let extra = rows.length ? rows[0].extra : {};
+  if (typeof extra === 'string') { try { extra = JSON.parse(extra); } catch (e) { extra = {}; } }
+  body.photo = (extra && extra.photo) || '';
+}
+app.get('/api/student-media/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!req.authUser) return res.status(401).end();
+    const role = req.authUser.role;
+    let allowed = MANAGEMENT_ROLES.includes(role) || role === 'Teacher';
+    if (!allowed && PARENT_LOGIN_ROLES.includes(role)) {
+      const st = await getLinkedStudent(req.authUser.id);
+      allowed = !!(st && String(st.id) === String(id));
+    } else if (!allowed) {
+      const override = await getRoleOverride(role);
+      const defaults = SERVER_ROLE_VIEWS[role] || [];
+      allowed = (override && override.admissions !== undefined) ? !!override.admissions.view : defaults.includes('admissions');
+      if (!allowed) allowed = defaults.includes('fees') || defaults.includes('attendance');
+    }
+    if (!allowed) return res.status(403).end();
+    const rows = await sql.query('SELECT extra FROM students WHERE id = $1', [id]);
+    if (!rows.length) return res.status(404).end();
+    let extra = rows[0].extra;
+    if (typeof extra === 'string') { try { extra = JSON.parse(extra); } catch (e) { extra = {}; } }
+    const v = extra && extra.photo;
+    const m = typeof v === 'string' ? /^data:([^;,]+)(;base64)?,(.*)$/s.exec(v) : null;
+    if (!m) return res.status(404).end();
+    const buf = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]));
+    const etag = '"' + staffMediaVersion(v) + '"';
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    if (req.headers['if-none-match'] === etag) return res.status(304).end();
+    res.setHeader('Content-Type', m[1] || 'image/jpeg');
+    return res.status(200).send(buf);
+  } catch (err) {
+    console.error('student-media error:', err);
+    return res.status(500).end();
+  }
+});
+
+async function handleHybrid(req, res, config) {
+  const { table, core, softDelete, deleteViaApprovalOnly } = config;
+  if (req.method === 'GET') {
+    // ?trash=1 (Admin/Principal only) lists soft-deleted records for the
+    // Recently Deleted view — only meaningful for a resource that opted
+    // into softDelete (see HYBRID_RESOURCES.students above); every other
+    // hybrid resource ignores the query param entirely, unchanged.
+    const trashMode = softDelete && req.query.trash === '1';
+    if (trashMode && (!req.authUser || !MANAGEMENT_ROLES.includes(req.authUser.role))) {
+      return res.status(403).json({ error: 'Admin or Principal access required to view deleted records.' });
+    }
+    if (trashMode) await purgeExpiredTrash();
+    const whereClause = softDelete ? `WHERE deleted_at IS ${trashMode ? 'NOT NULL' : 'NULL'}` : '';
+    // FORCE INDEX — this is the exact query that crashed Staff Directory
+    // (ER_OUT_OF_SORTMEMORY). Adding idx_<table>_created_at alone did not
+    // fix it: MySQL's optimizer still chose a full table scan + filesort
+    // over the index for this near-unfiltered SELECT *, so the filesort
+    // still had to buffer full rows (base64 photos included) and blew the
+    // sort buffer exactly as before. Forcing the index makes MySQL walk it
+    // directly in created_at order — no filesort, no sort buffer, ever.
+    const rows = await sql.query(`SELECT * FROM ${table} FORCE INDEX (idx_${table}_created_at) ${whereClause} ORDER BY created_at ASC`);
+    return res.status(200).json(rows.map(r => {
+      const shaped = hybridToAppShape(r, core);
+      // Recently Deleted needs to show when this was deleted and when it
+      // will auto-purge — see TRASH_RETENTION_DAYS/purgeExpiredTrash above.
+      if (trashMode) {
+        shaped.deletedAt = r.deleted_at;
+        shaped.deletedByName = r.deleted_by_name;
+        shaped.purgesAt = r.deleted_at ? new Date(new Date(r.deleted_at).getTime() + TRASH_RETENTION_DAYS * 86400000).toISOString() : null;
+      }
+      return table === 'staff' ? staffMediaLight(shaped) : (table === 'students' ? studentMediaLight(shaped) : shaped);
+    }));
+  }
+  if (req.method === 'POST' || req.method === 'PUT') {
+    // A restore is a bodyless PUT carrying ?restore=1 — mirrors handleUsers.
+    if (softDelete && req.method === 'PUT' && req.query.restore === '1') {
+      if (!req.authUser || !MANAGEMENT_ROLES.includes(req.authUser.role)) {
+        return res.status(403).json({ error: 'Admin or Principal access required to restore a deleted record.' });
+      }
+      const { id } = req.query;
+      if (!id) return res.status(400).json({ error: 'Missing id.' });
+      await sql.query(`UPDATE ${table} SET deleted_at = NULL, deleted_by = NULL, deleted_by_name = NULL WHERE id = $1`, [id]);
+      return res.status(200).json({ ok: true });
+    }
+    // "Delete Permanently" from Recently Deleted — see purgeOneRecord above.
+    // table doubles as the PURGEABLE_RESOURCES key (both are 'students').
+    if (softDelete && req.method === 'PUT' && req.query.purge === '1') {
+      if (!req.authUser || !MANAGEMENT_ROLES.includes(req.authUser.role)) {
+        return res.status(403).json({ error: 'Admin or Principal access required to permanently delete a record.' });
+      }
+      return await purgeOneRecord(req, res, table);
+    }
+    const body = req.body || {};
+    if (!body.id) return res.status(400).json({ error: 'Missing id.' });
+    if (table === 'staff') await staffMediaKeepStored(body);
+    if (table === 'students') await studentMediaKeepStored(body);
+    const { coreVals, extra } = splitCoreExtra(body, core);
+    const cols = core.map(f => f.col);
+    const vals = core.map(f => coreVals[f.app]);
+    if (req.method === 'POST') {
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      await sql.query(
+        `INSERT INTO ${table} (${cols.join(', ')}, extra) VALUES (${placeholders}, $${cols.length + 1}::jsonb)`,
+        [...vals, JSON.stringify(extra)]
+      );
+      return res.status(201).json({ ok: true });
+    } else {
+      const setClause = cols.filter(c => c !== 'id').map((c, i) => `${c} = $${i + 2}`).join(', ');
+      const nonIdVals = core.filter(f => f.col !== 'id').map(f => coreVals[f.app]);
+      await sql.query(
+        `UPDATE ${table} SET ${setClause}, extra = $${nonIdVals.length + 2}::jsonb WHERE id = $1`,
+        [body.id, ...nonIdVals, JSON.stringify(extra)]
+      );
+      return res.status(200).json({ ok: true });
+    }
+  }
+  if (req.method === 'DELETE') {
+    // See HYBRID_RESOURCES.students' deleteViaApprovalOnly comment — this
+    // path is refused unconditionally, Admin included, no matter who or
+    // what is calling it (the UI's own request-a-deletion flow, an old
+    // cached client, or a direct API call). The only way in is
+    // handleDeletionRequests recording two separate Admin/Principal
+    // approvals on a pending request, which updates deleted_at itself and
+    // never routes back through here.
+    if (deleteViaApprovalOnly) {
+      return res.status(403).json({ error: 'This record can only be deleted through a deletion request approved twice, by two different Admins/Principals — see Recently Deleted / Pending Deletion Requests.' });
+    }
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    if (softDelete) {
+      await sql.query(`UPDATE ${table} SET deleted_at = now() WHERE id = $1`, [id]);
+    } else {
+      await sql.query(`DELETE FROM ${table} WHERE id = $1`, [id]);
+    }
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+// ---------- Recycle bin retention & permanent purge ----------
+// A soft-deleted row (students, users) sits in Recently Deleted so a
+// mistake can be undone, but it doesn't sit there forever — every major
+// system with a recycle bin (Salesforce, Google Workspace, Microsoft 365,
+// GitHub) purges it for good after a fixed window. TRASH_RETENTION_DAYS is
+// that window; purgeExpiredTrash() is the sweep that enforces it, called
+// opportunistically whenever Recently Deleted is opened (see the ?trash=1
+// branches in handleUsers/handleHybrid) and on a standing timer (see
+// setInterval near the bottom of this file) so it still runs even if no
+// one opens that screen for a while. An Admin/Principal can also jump the
+// queue and purge a specific record immediately — see the PUT ?purge=1
+// branches below — but either way, once a row is actually gone, purge_log
+// is the only remaining trace that it ever existed and was removed.
+const TRASH_RETENTION_DAYS = 60;
+const PURGEABLE_RESOURCES = {
+  students: {
+    table: 'students',
+    label: row => `${row.first_name || ''} ${row.last_name || ''}`.trim() + (row.admission_no ? ` (Adm# ${row.admission_no})` : ''),
+    // What an admin must type into the "Delete Permanently" confirmation
+    // to prove they mean this specific record, not just any record.
+    confirmField: 'admission_no', confirmLabel: 'Admission No',
+  },
+  users: {
+    table: 'users',
+    label: row => row.name || row.username || row.id,
+    confirmField: 'username', confirmLabel: 'Username',
+  },
+};
+async function purgeExpiredTrash() {
+  for (const [resource, cfg] of Object.entries(PURGEABLE_RESOURCES)) {
+    const expired = await sql.query(
+      `SELECT * FROM ${cfg.table} WHERE deleted_at IS NOT NULL AND deleted_at < DATE_SUB(NOW(), INTERVAL $1 DAY)`,
+      [TRASH_RETENTION_DAYS]
+    );
+    for (const row of expired) {
+      await sql`
+        INSERT INTO purge_log (id, resource, record_id, record_label, deleted_at, deleted_by_name, purge_reason, purged_by, purged_by_name)
+        VALUES (${crypto.randomUUID()}, ${resource}, ${row.id}, ${cfg.label(row)}, ${row.deleted_at}, ${row.deleted_by_name || null}, 'auto', NULL, NULL)
+      `;
+      await sql.query(`DELETE FROM ${cfg.table} WHERE id = $1`, [row.id]);
+    }
+  }
+}
+// Sweep once at boot (covers rows that aged past TRASH_RETENTION_DAYS while
+// the server was down or never had anyone open Recently Deleted) and then
+// once a day thereafter. Must stay below the PURGEABLE_RESOURCES/
+// purgeExpiredTrash definitions above it — see the note near the top of this
+// file (search "Cannot access 'PURGEABLE_RESOURCES'") for why this used to
+// live up there and broke on every boot.
+purgeExpiredTrash().catch(err => console.error('purgeExpiredTrash (startup) failed:', err));
+setInterval(() => { purgeExpiredTrash().catch(err => console.error('purgeExpiredTrash (interval) failed:', err)); }, 24 * 60 * 60 * 1000);
+// Shared by both handleUsers' and handleHybrid's PUT ?purge=1 branches: an
+// Admin/Principal jumping the retention queue to remove one specific
+// already-soft-deleted record right now, instead of waiting out
+// TRASH_RETENTION_DAYS. Unlike the two-person approval needed to soft-
+// delete a student in the first place, this doesn't need a second
+// approver — that decision was already made (twice, for students) to get
+// the record into the bin; this step is just disposal, so it's guarded
+// the way GitHub guards deleting a repo: type the record's own identifier
+// to prove you mean it, restricted to Admin/Principal, and logged.
+async function purgeOneRecord(req, res, resource) {
+  const cfg = PURGEABLE_RESOURCES[resource];
+  const { id } = req.query;
+  if (!id) return res.status(400).json({ error: 'Missing id.' });
+  const rows = await sql.query(`SELECT * FROM ${cfg.table} WHERE id = $1 AND deleted_at IS NOT NULL`, [id]);
+  if (!rows.length) return res.status(404).json({ error: 'That record is not in Recently Deleted (already restored, purged, or never existed).' });
+  const row = rows[0];
+  const expected = (row[cfg.confirmField] || '').toString().trim().toLowerCase();
+  const given = ((req.body && req.body.confirmText) || '').toString().trim().toLowerCase();
+  if (!given || given !== expected) {
+    return res.status(400).json({ error: `Type the exact ${cfg.confirmLabel} to confirm — this cannot be undone.` });
+  }
+  await sql`
+    INSERT INTO purge_log (id, resource, record_id, record_label, deleted_at, deleted_by_name, purge_reason, purged_by, purged_by_name)
+    VALUES (${crypto.randomUUID()}, ${resource}, ${row.id}, ${cfg.label(row)}, ${row.deleted_at}, ${row.deleted_by_name || null}, 'manual', ${req.authUser.id}, ${req.authUser.name})
+  `;
+  await sql.query(`DELETE FROM ${cfg.table} WHERE id = $1`, [id]);
+  return res.status(200).json({ ok: true });
+}
+
+// ---------- Deletion requests (3-step deletion for deleteViaApprovalOnly resources) ----------
+// A student record is never removed by a single click: it takes three
+// distinct, deliberate steps — request (with a reason), a first
+// confirmation, and a final confirmation that requires typing the record's
+// own identifier back — and only Admin/Principal may act at any stage (see
+// MANAGEMENT_ROLES below). Unlike the original design, the same single
+// Admin/Principal account may complete all three steps themselves in one
+// sitting — this was changed because requiring a second, different person
+// meant handing out Admin/Principal rights just to get past a deletion,
+// which is a bigger risk than the one-person-deletes-alone problem it was
+// solving. If a school DOES have a second trusted Admin/Principal, nothing
+// stops them from doing the 2nd/3rd step instead — the API doesn't care who
+// it is, only that they hold Admin/Principal. Every step is still logged
+// (requested_by/first_approved_by/decided_by, each with its own timestamp)
+// so there is a full audit trail either way. A request moves
+// Pending -> "Pending Final Approval" (after the first confirmation) ->
+// Approved (after the final, typed-confirmation step) or Rejected (at
+// either stage). Approval performs the same reversible soft-delete
+// handleHybrid always did — nothing about *what* a deletion does has
+// changed, only how many steps, and who, may carry it out.
+const DELETION_REQUEST_TARGETS = {
+  students: {
+    table: 'students',
+    label: row => `${row.first_name || ''} ${row.last_name || ''}`.trim() + (row.admission_no ? ` (Adm# ${row.admission_no})` : ''),
+    // The final, irreversible step requires typing this value back — same
+    // "type the identifier to confirm" pattern as Delete Permanently in
+    // Recently Deleted (see PURGEABLE_RESOURCES above), since removing the
+    // different-person requirement means this typed check is now the main
+    // thing standing between one click and an actual deletion.
+    confirmField: 'admission_no', confirmLabel: 'Admission No',
+  },
+};
+function shapeDeletionRequest(r) {
+  return {
+    id: r.id, resource: r.resource, recordId: r.record_id, recordLabel: r.record_label, reason: r.reason,
+    requestedBy: r.requested_by, requestedByName: r.requested_by_name, requestedAt: r.requested_at,
+    status: r.status,
+    firstApprovedBy: r.first_approved_by, firstApprovedByName: r.first_approved_by_name, firstApprovedAt: r.first_approved_at,
+    decidedBy: r.decided_by, decidedByName: r.decided_by_name, decidedAt: r.decided_at,
+    decisionNote: r.decision_note,
+  };
+}
+async function handleDeletionRequests(req, res) {
+  if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+  if (req.method === 'GET') {
+    // Admin/Principal see every request (they're the ones who act on them);
+    // anyone else sees only the requests they personally filed, so they can
+    // check whether theirs was approved/rejected without seeing the rest
+    // of the school's queue.
+    const rows = MANAGEMENT_ROLES.includes(req.authUser.role)
+      ? await sql`SELECT * FROM deletion_requests ORDER BY requested_at DESC LIMIT 200`
+      : await sql`SELECT * FROM deletion_requests WHERE requested_by = ${req.authUser.id} ORDER BY requested_at DESC LIMIT 200`;
+    return res.status(200).json(rows.map(shapeDeletionRequest));
+  }
+  if (req.method === 'POST') {
+    const { resource: targetResource, recordId, reason } = req.body || {};
+    const target = DELETION_REQUEST_TARGETS[targetResource];
+    if (!target) return res.status(400).json({ error: 'Unsupported record type for a deletion request.' });
+    if (!recordId) return res.status(400).json({ error: 'Missing recordId.' });
+    if (!reason || !String(reason).trim()) return res.status(400).json({ error: 'A reason is required.' });
+    const already = await sql`SELECT id FROM deletion_requests WHERE resource = ${targetResource} AND record_id = ${String(recordId)} AND status IN ('Pending', 'Pending Final Approval')`;
+    if (already.length) return res.status(409).json({ error: 'A deletion request for this record is already pending approval.' });
+    const rows = await sql.query(`SELECT * FROM ${target.table} WHERE id = $1 AND deleted_at IS NULL`, [recordId]);
+    if (!rows.length) return res.status(404).json({ error: 'Record not found — it may already be deleted.' });
+    const id = 'delreq_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
+    await sql`
+      INSERT INTO deletion_requests (id, resource, record_id, record_label, reason, requested_by, requested_by_name)
+      VALUES (${id}, ${targetResource}, ${String(recordId)}, ${target.label(rows[0])}, ${String(reason).trim()}, ${req.authUser.id}, ${req.authUser.name})
+    `;
+    // Fire-and-forget, same as every other notify* call — a slow or failing
+    // push must never delay the response to the person who just filed this.
+    notifyUsersByRole(MANAGEMENT_ROLES, {
+      title: 'Deletion request needs approval',
+      body: `${req.authUser.name} asked to delete ${target.label(rows[0])}. Reason: ${String(reason).trim()}`,
+      tag: 'deletion-request', url: '/',
+    }).catch(err => console.error('deletion request notification failed:', err));
+    return res.status(201).json({ ok: true, id });
+  }
+  if (req.method === 'PUT') {
+    if (!MANAGEMENT_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Admin or Principal access required to decide a deletion request.' });
+    }
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    const { decision, note, confirmText } = req.body || {};
+    if (decision !== 'Approve' && decision !== 'Reject') return res.status(400).json({ error: 'decision must be "Approve" or "Reject".' });
+    const rows = await sql`SELECT * FROM deletion_requests WHERE id = ${id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Request not found.' });
+    const reqRow = rows[0];
+    if (reqRow.status === 'Approved' || reqRow.status === 'Rejected') {
+      return res.status(409).json({ error: `This request was already ${reqRow.status.toLowerCase()}.` });
+    }
+    // Any step may be carried out by the same Admin/Principal who did the
+    // previous one, or by a different one — see the comment above
+    // DELETION_REQUEST_TARGETS for why the old different-person requirement
+    // was removed. What replaces it as the real safeguard on the final,
+    // irreversible step is the typed-confirmation check just below.
+    if (decision === 'Reject') {
+      await sql`
+        UPDATE deletion_requests SET status = 'Rejected',
+          decided_by = ${req.authUser.id}, decided_by_name = ${req.authUser.name}, decided_at = now(),
+          decision_note = ${note ? String(note).trim() : null}
+        WHERE id = ${id}
+      `;
+      if (reqRow.requested_by) {
+        sendPushToUser(reqRow.requested_by, {
+          title: 'Deletion request rejected',
+          body: `${req.authUser.name} rejected your request to delete ${reqRow.record_label}${note ? ': ' + String(note).trim() : '.'}`,
+          tag: 'deletion-decision', url: '/',
+        }).catch(err => console.error('deletion decision notification failed:', err));
+      }
+      return res.status(200).json({ ok: true, status: 'Rejected' });
+    }
+    // decision === 'Approve'
+    if (reqRow.status === 'Pending') {
+      // First confirmation only — nothing is deleted yet. A final,
+      // typed-confirmation step (below) must still happen before this
+      // actually deletes anything — by the same admin or a different one.
+      await sql`
+        UPDATE deletion_requests SET status = 'Pending Final Approval',
+          first_approved_by = ${req.authUser.id}, first_approved_by_name = ${req.authUser.name}, first_approved_at = now()
+        WHERE id = ${id}
+      `;
+      return res.status(200).json({ ok: true, status: 'Pending Final Approval' });
+    }
+    // reqRow.status === 'Pending Final Approval' — this is the third and
+    // final step, so this is the only branch that actually deletes. It
+    // requires typing the record's own identifier back first — the same
+    // "type to confirm" pattern as Delete Permanently — since this step no
+    // longer requires a second person to also sign off.
+    const target = DELETION_REQUEST_TARGETS[reqRow.resource];
+    if (target) {
+      const targetRows = await sql.query(`SELECT * FROM ${target.table} WHERE id = $1`, [reqRow.record_id]);
+      if (!targetRows.length) return res.status(404).json({ error: 'The record this request refers to no longer exists.' });
+      const targetRow = targetRows[0];
+      const expected = (targetRow[target.confirmField] || '').toString().trim().toLowerCase();
+      const given = (confirmText || '').toString().trim().toLowerCase();
+      if (!given || given !== expected) {
+        return res.status(400).json({ error: `Type the exact ${target.confirmLabel} to confirm final deletion — this cannot be undone from here (only from Recently Deleted).` });
+      }
+      await sql.query(
+        `UPDATE ${target.table} SET deleted_at = now(), deleted_by = $2, deleted_by_name = $3 WHERE id = $1`,
+        [reqRow.record_id, req.authUser.id, req.authUser.name]
+      );
+    }
+    await sql`
+      UPDATE deletion_requests SET status = 'Approved',
+        decided_by = ${req.authUser.id}, decided_by_name = ${req.authUser.name}, decided_at = now(),
+        decision_note = ${note ? String(note).trim() : null}
+      WHERE id = ${id}
+    `;
+    if (reqRow.requested_by) {
+      sendPushToUser(reqRow.requested_by, {
+        title: 'Deletion request approved',
+        body: `${req.authUser.name} approved your request to delete ${reqRow.record_label}${note ? ': ' + String(note).trim() : '.'}`,
+        tag: 'deletion-decision', url: '/',
+      }).catch(err => console.error('deletion decision notification failed:', err));
+    }
+    return res.status(200).json({ ok: true, status: 'Approved' });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+// ---------- Staff Leave Requests (apply → Admin/Principal approve → attendance auto-marked) ----------
+// A staff member applies for either a full-day range (fromDate..toDate,
+// session null) or a single half-day (fromDate === toDate, session =
+// 'Morning'/'Afternoon' — the same two sessions the Staff Attendance "Mark"
+// screen and biometric sync already use). Only Admin/Principal can decide
+// it, mirroring handleDeletionRequests' role gate, but this is a single-step
+// approve (no second confirmation) since — unlike a permanent deletion — a
+// wrong approval here is trivially reversible: it only overwrites attendance
+// rows, which any Admin/Principal can re-mark by hand afterwards. On
+// approval, every affected (date, session) is written into
+// staff_attendance_records as 'Leave', always overwriting whatever was
+// already marked there (the user's explicit choice — see the design
+// discussion this feature came from). Leave stays one generic status, same
+// as manual marking, so Payroll's existing staffAttendanceCountInMonth(...,
+// ['Leave','Absent']) quota math needs no changes at all.
+function staffLeaveDatesInRange(fromDate, toDate) {
+  // Inclusive day-by-day walk between two 'YYYY-MM-DD' strings. Capped at 366
+  // days as a sanity limit — nobody applies for a year of leave in one go,
+  // and this stops a typo'd date range from looping near-forever.
+  const out = [];
+  let cur = new Date(fromDate + 'T00:00:00Z');
+  const end = new Date(toDate + 'T00:00:00Z');
+  let guard = 0;
+  while (cur.getTime() <= end.getTime() && guard < 366) {
+    out.push(cur.toISOString().slice(0, 10));
+    cur = new Date(cur.getTime() + 86400000);
+    guard++;
+  }
+  return out;
+}
+// Writes one date fully as 'Leave' — used for a full-day leave request. Any
+// existing per-session rows for that staff+date are cleared first (an
+// approved full-day leave always wins over whatever was marked earlier,
+// session-by-session or otherwise), then a single sessionless row is
+// upserted — attSessionWeight() in index.html already treats a sessionless
+// row as a full day (weight 2), exactly matching a full day's worth of
+// Present/Absent/Late it may be replacing.
+async function markFullDayLeave(staffId, dateStr) {
+  await sql`DELETE FROM staff_attendance_records WHERE staff_id = ${staffId} AND date = ${dateStr}`;
+  const attId = 'statt_' + staffId + '_' + dateStr;
+  await sql`
+    INSERT INTO staff_attendance_records (id, staff_id, date, session, status)
+    VALUES (${attId}, ${staffId}, ${dateStr}, NULL, 'Leave')
+    ON DUPLICATE KEY UPDATE session = NULL, status = 'Leave'
+  `;
+}
+// Writes just one session as 'Leave' — used for a half-day leave request.
+// If a sessionless (full-day) row already covers this date, it's split
+// first: deleted, and its status carried over to the *other* session so
+// that session's earlier mark isn't silently lost, before the requested
+// session is overwritten with 'Leave'.
+async function markHalfDayLeave(staffId, dateStr, session) {
+  const other = session === 'Morning' ? 'Afternoon' : 'Morning';
+  const existingFullDay = await sql`SELECT status FROM staff_attendance_records WHERE id = ${'statt_' + staffId + '_' + dateStr}`;
+  if (existingFullDay.length) {
+    await sql`DELETE FROM staff_attendance_records WHERE id = ${'statt_' + staffId + '_' + dateStr}`;
+    const otherId = 'statt_' + staffId + '_' + dateStr + '_' + other;
+    await sql`
+      INSERT INTO staff_attendance_records (id, staff_id, date, session, status)
+      VALUES (${otherId}, ${staffId}, ${dateStr}, ${other}, ${existingFullDay[0].status})
+      ON DUPLICATE KEY UPDATE session = ${other}, status = ${existingFullDay[0].status}
+    `;
+  }
+  const attId = 'statt_' + staffId + '_' + dateStr + '_' + session;
+  await sql`
+    INSERT INTO staff_attendance_records (id, staff_id, date, session, status)
+    VALUES (${attId}, ${staffId}, ${dateStr}, ${session}, 'Leave')
+    ON DUPLICATE KEY UPDATE session = ${session}, status = 'Leave'
+  `;
+}
+async function handleStaffLeaveRequests(req, res) {
+  if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+  if (req.method === 'GET') {
+    // Admin/Principal see the whole queue (they're the ones who act on it);
+    // anyone else sees only requests filed against their own linked staff
+    // record, so a Teacher/Staff login can check their own status without
+    // seeing the rest of the school's leave requests.
+    if (MANAGEMENT_ROLES.includes(req.authUser.role)) {
+      const rows = await sql`SELECT * FROM staff_leave_requests ORDER BY requested_at DESC LIMIT 300`;
+      return res.status(200).json(rows.map(shapeStaffLeaveRequest));
+    }
+    const myStaff = await getMyStaffRow(req.authUser.id);
+    const myStaffId = myStaff ? myStaff.id : null;
+    if (!myStaffId) return res.status(200).json([]); // not linked to a staff record — nothing to show yet
+    const rows = await sql`SELECT * FROM staff_leave_requests WHERE staff_id = ${myStaffId} ORDER BY requested_at DESC LIMIT 300`;
+    return res.status(200).json(rows.map(shapeStaffLeaveRequest));
+  }
+  if (req.method === 'POST') {
+    // Same linkedUserId convention as concerns/submissions (see
+    // getMyStaffRow's own comment) — a Teacher/Staff login is tied to its
+    // staff record via "Enable Login Access" on the Staff Directory page,
+    // not a separate field on the user.
+    const myStaff = await getMyStaffRow(req.authUser.id);
+    const myStaffId = myStaff ? myStaff.id : null;
+    if (!myStaffId) return res.status(400).json({ error: 'Your login isn\'t linked to a staff record yet — ask Admin to enable "Login Access" for you from Staff Directory first.' });
+    const staffRows = await sql`SELECT first_name, last_name FROM staff WHERE id = ${myStaffId}`;
+    if (!staffRows.length) return res.status(404).json({ error: 'Linked staff record not found.' });
+    const staffName = `${staffRows[0].first_name || ''} ${staffRows[0].last_name || ''}`.trim();
+    const { fromDate, toDate, isHalfDay, session, reason } = req.body || {};
+    if (!reason || !String(reason).trim()) return res.status(400).json({ error: 'A reason is required.' });
+    if (!fromDate) return res.status(400).json({ error: 'Missing fromDate.' });
+    let finalToDate, finalSession;
+    if (isHalfDay) {
+      if (!ATT_SESSIONS_SERVER.includes(session)) return res.status(400).json({ error: 'Pick Morning or Afternoon for a half-day request.' });
+      finalToDate = fromDate; // a half-day request is always a single date
+      finalSession = session;
+    } else {
+      finalToDate = toDate || fromDate;
+      finalSession = null;
+      if (finalToDate < fromDate) return res.status(400).json({ error: 'toDate cannot be before fromDate.' });
+    }
+    const id = 'stflv_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
+    await sql`
+      INSERT INTO staff_leave_requests (id, staff_id, staff_name, from_date, to_date, session, reason, requested_by, requested_by_name)
+      VALUES (${id}, ${myStaffId}, ${staffName}, ${fromDate}, ${finalToDate}, ${finalSession}, ${String(reason).trim()}, ${req.authUser.id}, ${req.authUser.name})
+    `;
+    const span = finalSession ? `${fromDate} (${finalSession})` : (fromDate === finalToDate ? fromDate : `${fromDate} to ${finalToDate}`);
+    notifyUsersByRole(MANAGEMENT_ROLES, {
+      title: 'Leave request needs approval',
+      body: `${staffName} applied for leave: ${span}. Reason: ${String(reason).trim()}`,
+      tag: 'staff-leave-request', url: '/',
+    }).catch(err => console.error('staff leave request notification failed:', err));
+    return res.status(201).json({ ok: true, id });
+  }
+  if (req.method === 'PUT') {
+    if (!MANAGEMENT_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Admin or Principal access required to decide a leave request.' });
+    }
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    const { decision, note } = req.body || {};
+    if (decision !== 'Approve' && decision !== 'Reject') return res.status(400).json({ error: 'decision must be "Approve" or "Reject".' });
+    const rows = await sql`SELECT * FROM staff_leave_requests WHERE id = ${id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Request not found.' });
+    const reqRow = rows[0];
+    if (reqRow.status === 'Approved' || reqRow.status === 'Rejected') {
+      return res.status(409).json({ error: `This request was already ${reqRow.status.toLowerCase()}.` });
+    }
+    if (decision === 'Approve') {
+      if (reqRow.session) {
+        await markHalfDayLeave(reqRow.staff_id, reqRow.from_date, reqRow.session);
+      } else {
+        const dates = staffLeaveDatesInRange(reqRow.from_date, reqRow.to_date);
+        for (const d of dates) await markFullDayLeave(reqRow.staff_id, d);
+      }
+    }
+    await sql`
+      UPDATE staff_leave_requests SET status = ${decision === 'Approve' ? 'Approved' : 'Rejected'},
+        decided_by = ${req.authUser.id}, decided_by_name = ${req.authUser.name}, decided_at = now(),
+        decision_note = ${note ? String(note).trim() : null}
+      WHERE id = ${id}
+    `;
+    if (reqRow.requested_by) {
+      sendPushToUser(reqRow.requested_by, {
+        title: `Leave request ${decision === 'Approve' ? 'approved' : 'rejected'}`,
+        body: `${req.authUser.name} ${decision === 'Approve' ? 'approved' : 'rejected'} your leave request${note ? ': ' + String(note).trim() : '.'}`,
+        tag: 'staff-leave-decision', url: '/',
+      }).catch(err => console.error('staff leave decision notification failed:', err));
+    }
+    return res.status(200).json({ ok: true, status: decision === 'Approve' ? 'Approved' : 'Rejected' });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+function shapeStaffLeaveRequest(r) {
+  return {
+    id: r.id, staffId: r.staff_id, staffName: r.staff_name,
+    fromDate: r.from_date, toDate: r.to_date, session: r.session, reason: r.reason,
+    status: r.status, requestedBy: r.requested_by, requestedByName: r.requested_by_name, requestedAt: r.requested_at,
+    decidedBy: r.decided_by, decidedByName: r.decided_by_name, decidedAt: r.decided_at, decisionNote: r.decision_note,
+  };
+}
+
+// ---------- Bulk "Delete Duplicate Students" (one step, duplicates only) ----------
+// The 3-step deletion-request flow above exists so a single click can never
+// remove a student by accident. That's the right amount of friction for an
+// ordinary record, but it turns cleaning up genuine duplicates (the same
+// student entered twice — most often from a bulk import, or two staff
+// admitting the same child on paper) into three separate clicks PER EXTRA
+// RECORD, for what is usually an obviously-correct cleanup. This endpoint
+// is a deliberate, narrow bypass of that safety net: it applies ONLY to
+// records that collide on first+last name — the exact same set the "Find
+// Duplicate Students" view already flags — and never touches anything else.
+// A student who is not part of a same-name group is completely unaffected
+// and can still only ever be removed through handleDeletionRequests above.
+// "The original" is the earliest-created record in each name group (rows
+// are pulled ORDER BY created_at ASC, so group[0] is it) — every other
+// record sharing that name is soft-deleted in the same pass. Gated to
+// MANAGEMENT_ROLES, same as every step of the approval flow it bypasses,
+// and still a soft delete — deleted_at/deleted_by/deleted_by_name are set
+// exactly as an approved deletion request would set them, so every record
+// removed this way is still sitting in Recently Deleted, recoverable for
+// TRASH_RETENTION_DAYS, same as any other student deletion.
+async function handleDeleteDuplicateStudents(req, res) {
+  if (!req.authUser || !MANAGEMENT_ROLES.includes(req.authUser.role)) {
+    return res.status(403).json({ error: 'Admin or Principal access required to delete duplicate students.' });
+  }
+  const rows = await sql`SELECT * FROM students WHERE deleted_at IS NULL ORDER BY created_at ASC`;
+  const groups = {};
+  for (const row of rows) {
+    const key = `${(row.first_name || '').trim()} ${(row.last_name || '').trim()}`.trim().toLowerCase();
+    if (!key) continue;
+    (groups[key] = groups[key] || []).push(row);
+  }
+  // Within each group, rows are already oldest-first (created_at ASC
+  // above) — index 0 is the original to keep; everything after it in the
+  // same group is a duplicate to remove.
+  const toDelete = [];
+  for (const group of Object.values(groups)) {
+    if (group.length < 2) continue;
+    for (let i = 1; i < group.length; i++) toDelete.push(group[i]);
+  }
+  const label = row => `${row.first_name || ''} ${row.last_name || ''}`.trim() + (row.admission_no ? ` (Adm# ${row.admission_no})` : '');
+  for (const row of toDelete) {
+    await sql`UPDATE students SET deleted_at = now(), deleted_by = ${req.authUser.id}, deleted_by_name = ${req.authUser.name} WHERE id = ${row.id}`;
+    // One audit_log row per record removed — the dispatcher's own
+    // res.on('finish') logger (see app.all('/api/:resource') below) only
+    // ever logs a single row per request with a single record_id, which
+    // would hide exactly which records this bulk action touched.
+    await sql`INSERT INTO audit_log (actor_name, actor_role, method, resource, record_id) VALUES (${req.authUser.name}, ${req.authUser.role}, 'DELETE', 'students', ${String(row.id)})`
+      .catch(err => console.error('audit log insert failed (delete-duplicates):', err));
+  }
+  return res.status(200).json({
+    ok: true,
+    deletedCount: toDelete.length,
+    deleted: toDelete.map(row => ({ id: row.id, label: label(row) })),
+  });
+}
+
+// ---------- Certificate register (Study/Bonafide, Transfer, Character, Migration) ----------
+// Every certificate issued for a student is logged here with a snapshot of
+// their details at the moment of issue (so a later correction to the live
+// record never rewrites what an already-printed certificate said) and a
+// sequential, per-type, per-calendar-year serial number. This is what lets
+// the school prove what was issued, to whom, and when — including long
+// after a student has gone Inactive, since Inactive students are never
+// removed from the roster (only an approved deletion request removes a
+// record, and that's a separate, rare, two-approval action).
+const CERTIFICATE_TARGETS = {
+  students: {
+    table: 'students',
+    label: row => `${row.first_name || ''} ${row.last_name || ''}`.trim() + (row.admission_no ? ` (Adm# ${row.admission_no})` : ''),
+    buildSnapshot: row => {
+      const extra = row.extra || {};
+      return {
+        firstName: row.first_name || '', lastName: row.last_name || '', admissionNo: row.admission_no || '',
+        className: row.class_name || '', section: row.section || '', status: row.status || '',
+        fatherName: extra.fatherName || '', motherName: extra.motherName || '',
+        dob: extra.dob || '', admDate: extra.admDate || '', gender: extra.gender || '',
+        // Added for Transfer/Character/Migration certificates, which
+        // (unlike the original Study Certificate) conventionally include
+        // these per CBSE/state TC-format norms. Aadhaar is deliberately
+        // left out of every certificate snapshot — a printed/handed-out
+        // document is the wrong place for it.
+        caste: extra.caste || '', category: extra.category || '', religion: extra.religion || '',
+        nationality: extra.nationality || '',
+        fatherPhone: extra.fatherPhone || '', motherPhone: extra.motherPhone || '',
+      };
+    },
+  },
+};
+function shapeCertificate(r) {
+  return {
+    id: r.id, type: r.type, serialNo: r.serial_no, resource: r.resource, recordId: r.record_id,
+    snapshot: r.snapshot || {}, conduct: r.conduct, purpose: r.purpose, academicYear: r.academic_year,
+    details: r.details || {},
+    issuedBy: r.issued_by, issuedByName: r.issued_by_name, issuedAt: r.issued_at,
+  };
+}
+async function nextCertificateSerial(type) {
+  const year = new Date().getFullYear();
+  const rows = await sql`SELECT COUNT(*)::int AS n FROM certificates_issued WHERE type = ${type} AND EXTRACT(YEAR FROM issued_at) = ${year}`;
+  const seq = (rows[0] && rows[0].n ? rows[0].n : 0) + 1;
+  const prefix = type === 'Transfer' ? 'TC' : type === 'Bonafide' ? 'BC'
+    : type === 'Character' ? 'CC' : type === 'Migration' ? 'MC' : 'SC';
+  return `${prefix}/${year}/${String(seq).padStart(4, '0')}`;
+}
+async function handleCertificates(req, res) {
+  if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+  if (req.method === 'GET') {
+    const { resource: filterResource, recordId: filterRecordId } = req.query;
+    const rows = (filterResource && filterRecordId)
+      ? await sql`SELECT * FROM certificates_issued WHERE resource = ${filterResource} AND record_id = ${String(filterRecordId)} ORDER BY issued_at DESC LIMIT 200`
+      : await sql`SELECT * FROM certificates_issued ORDER BY issued_at DESC LIMIT 200`;
+    return res.status(200).json(rows.map(shapeCertificate));
+  }
+  if (req.method === 'POST') {
+    const { type, resource: targetResource, recordId, conduct, purpose, academicYear, details } = req.body || {};
+    const target = CERTIFICATE_TARGETS[targetResource];
+    if (!target) return res.status(400).json({ error: 'Unsupported record type for a certificate.' });
+    if (!recordId) return res.status(400).json({ error: 'Missing recordId.' });
+    const certType = (type && String(type).trim()) || 'Study';
+    // Deliberately not filtered by deleted_at — a certificate can still be
+    // produced for a record that was later (properly, two-approval) removed,
+    // since the row itself is only ever soft-deleted, never erased.
+    const rows = await sql.query(`SELECT * FROM ${target.table} WHERE id = $1`, [recordId]);
+    if (!rows.length) return res.status(404).json({ error: 'Record not found.' });
+    const row = rows[0];
+    const id = 'cert_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
+    const serialNo = await nextCertificateSerial(certType);
+    const snapshot = target.buildSnapshot(row);
+    // `details` is a free-form bag for fields specific to the certificate
+    // type (Transfer: dateOfLeaving/reasonForLeaving/qualifiedForPromotion/
+    // workingDays/daysPresent/feesPaidUpTo/duesStatus/remarks; Character:
+    // remarks; Migration: eligibleForClass/destinationBoard) — validated
+    // only as "is it an object", since new fields shouldn't need a server
+    // change to start being recorded.
+    const detailsObj = (details && typeof details === 'object' && !Array.isArray(details)) ? details : {};
+    await sql`
+      INSERT INTO certificates_issued (id, type, serial_no, resource, record_id, snapshot, conduct, purpose, academic_year, details, issued_by, issued_by_name)
+      VALUES (${id}, ${certType}, ${serialNo}, ${targetResource}, ${String(recordId)}, ${JSON.stringify(snapshot)}::jsonb, ${conduct ? String(conduct).trim() : null}, ${purpose ? String(purpose).trim() : null}, ${academicYear ? String(academicYear).trim() : null}, ${JSON.stringify(detailsObj)}::jsonb, ${req.authUser.id}, ${req.authUser.name})
+    `;
+    return res.status(201).json({ ok: true, id, serialNo, snapshot, details: detailsObj });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+// ---------- Custom per-resource handlers ----------
+async function handleSubjects(req, res) {
+  if (req.method === 'GET') {
+    const rows = await sql`SELECT * FROM subjects FORCE INDEX (idx_subjects_created_at) ORDER BY created_at ASC`;
+    return res.status(200).json(rows.map(r => ({
+      id: r.id, name: r.name, code: r.code || '', className: r.class_name,
+      sections: r.sections || [], sectionStaff: r.section_staff || {}, staffIds: r.staff_ids || [],
+      countable: r.countable, elective: r.elective,
+    })));
+  }
+  if (req.method === 'POST') {
+    const s = req.body;
+    if (!s.id || !s.name || !s.className) return res.status(400).json({ error: 'Missing required fields.' });
+    await sql`
+      INSERT INTO subjects (id, name, code, class_name, sections, section_staff, staff_ids, countable, elective)
+      VALUES (${s.id}, ${s.name}, ${s.code || ''}, ${s.className}, ${JSON.stringify(s.sections || [])}::jsonb,
+              ${JSON.stringify(s.sectionStaff || {})}::jsonb, ${JSON.stringify(s.staffIds || [])}::jsonb,
+              ${s.countable !== false}, ${!!s.elective})
+    `;
+    return res.status(201).json({ ok: true });
+  }
+  if (req.method === 'PUT') {
+    const s = req.body;
+    if (!s.id) return res.status(400).json({ error: 'Missing id.' });
+    await sql`
+      UPDATE subjects SET name = ${s.name}, code = ${s.code || ''}, class_name = ${s.className},
+        sections = ${JSON.stringify(s.sections || [])}::jsonb, section_staff = ${JSON.stringify(s.sectionStaff || {})}::jsonb,
+        staff_ids = ${JSON.stringify(s.staffIds || [])}::jsonb, countable = ${s.countable !== false}, elective = ${!!s.elective}
+      WHERE id = ${s.id}
+    `;
+    return res.status(200).json({ ok: true });
+  }
+  if (req.method === 'DELETE') {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    await sql`DELETE FROM subjects WHERE id = ${id}`;
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+async function handleExamDefs(req, res) {
+  if (req.method === 'GET') {
+    const rows = await sql`SELECT * FROM exam_defs FORCE INDEX (idx_exam_defs_created_at) ORDER BY created_at ASC`;
+    return res.status(200).json(rows.map(r => ({
+      id: r.id, name: r.name, examType: r.exam_type,
+      // start_date/end_date are TEXT columns (see ensureSchema above), so MySQL
+      // always hands them back as plain strings already — unlike the sessions/
+      // attendance code elsewhere that reads real DATETIME columns and gets a
+      // JS Date back. Calling .toISOString() unconditionally on a string blew
+      // up with "r.start_date.toISOString is not a function" on every GET.
+      // Handle both shapes defensively instead of assuming one.
+      startDate: r.start_date ? (r.start_date instanceof Date ? r.start_date.toISOString().slice(0, 10) : String(r.start_date).slice(0, 10)) : '',
+      endDate: r.end_date ? (r.end_date instanceof Date ? r.end_date.toISOString().slice(0, 10) : String(r.end_date).slice(0, 10)) : '',
+      classSubjects: r.class_subjects || {},
+    })));
+  }
+  if (req.method === 'POST') {
+    const e = req.body;
+    if (!e.id || !e.name) return res.status(400).json({ error: 'Missing required fields.' });
+    await sql`
+      INSERT INTO exam_defs (id, name, exam_type, start_date, end_date, class_subjects)
+      VALUES (${e.id}, ${e.name}, ${e.examType}, ${e.startDate || null}, ${e.endDate || null}, ${JSON.stringify(e.classSubjects || {})}::jsonb)
+    `;
+    notifyExamScheduled(e).catch(err => console.error('exam schedule notification failed:', err));
+    return res.status(201).json({ ok: true });
+  }
+  if (req.method === 'PUT') {
+    const e = req.body;
+    if (!e.id) return res.status(400).json({ error: 'Missing id.' });
+    await sql`
+      UPDATE exam_defs SET name = ${e.name}, exam_type = ${e.examType}, start_date = ${e.startDate || null},
+        end_date = ${e.endDate || null}, class_subjects = ${JSON.stringify(e.classSubjects || {})}::jsonb
+      WHERE id = ${e.id}
+    `;
+    return res.status(200).json({ ok: true });
+  }
+  if (req.method === 'DELETE') {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    await sql`DELETE FROM exam_defs WHERE id = ${id}`;
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+async function handleRoles(req, res) {
+  if (req.method === 'GET') {
+    const rows = await sql`SELECT * FROM custom_roles FORCE INDEX (idx_custom_roles_created_at) ORDER BY created_at ASC`;
+    return res.status(200).json(rows.map(r => ({ id: r.id, name: r.name, permissions: r.permissions })));
+  }
+  if (req.method === 'POST') {
+    const r = req.body;
+    if (!r.id || !r.name) return res.status(400).json({ error: 'Missing required fields.' });
+    await sql`INSERT INTO custom_roles (id, name, permissions) VALUES (${r.id}, ${r.name}, ${JSON.stringify(r.permissions || {})}::jsonb)`;
+    return res.status(201).json({ ok: true });
+  }
+  if (req.method === 'PUT') {
+    const r = req.body;
+    if (!r.id) return res.status(400).json({ error: 'Missing id.' });
+    await sql`UPDATE custom_roles SET name = ${r.name}, permissions = ${JSON.stringify(r.permissions || {})}::jsonb WHERE id = ${r.id}`;
+    return res.status(200).json({ ok: true });
+  }
+  if (req.method === 'DELETE') {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    await sql`DELETE FROM custom_roles WHERE id = ${id}`;
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+async function handleFeeStructure(req, res) {
+  if (req.method === 'GET') {
+    const rows = await sql`SELECT * FROM fee_structure`;
+    const obj = {};
+    rows.forEach(r => { obj[r.class_name] = { admission: Number(r.admission), fee: Number(r.fee), bus: Number(r.bus), stock: Number(r.stock) }; });
+    return res.status(200).json(obj);
+  }
+  if (req.method === 'PUT') {
+    const structure = req.body || {};
+    for (const [className, rates] of Object.entries(structure)) {
+      await sql`
+        INSERT INTO fee_structure (class_name, admission, fee, bus, stock)
+        VALUES (${className}, ${rates.admission || 0}, ${rates.fee || 0}, ${rates.bus || 0}, ${rates.stock || 0})
+        ON DUPLICATE KEY UPDATE admission = ${rates.admission || 0}, fee = ${rates.fee || 0}, bus = ${rates.bus || 0}, stock = ${rates.stock || 0}
+      `;
+    }
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+async function handleSchoolInfo(req, res) {
+  if (req.method === 'GET') {
+    const rows = await sql`SELECT data FROM school_info WHERE id = 1`;
+    if (rows.length === 0) return res.status(200).json({});
+    return res.status(200).json(rows[0].data || {});
+  }
+  if (req.method === 'PUT') {
+    const info = req.body || {};
+    await sql`
+      INSERT INTO school_info (id, data) VALUES (1, ${JSON.stringify(info)}::jsonb)
+      ON DUPLICATE KEY UPDATE data = ${JSON.stringify(info)}::jsonb
+    `;
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+async function handleAttendanceSettings(req, res) {
+  if (req.method === 'GET') {
+    const rows = await sql`SELECT * FROM attendance_settings WHERE id = 1`;
+    if (rows.length === 0) return res.status(200).json({});
+    return res.status(200).json({ threshold: Number(rows[0].threshold), workingDays: rows[0].working_days });
+  }
+  if (req.method === 'PUT') {
+    const s = req.body || {};
+    await sql`
+      INSERT INTO attendance_settings (id, threshold, working_days)
+      VALUES (1, ${s.threshold || 75}, ${JSON.stringify(s.workingDays || [1,2,3,4,5,6])}::jsonb)
+      ON DUPLICATE KEY UPDATE threshold = ${s.threshold || 75}, working_days = ${JSON.stringify(s.workingDays || [1,2,3,4,5,6])}::jsonb
+    `;
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+// ---------- Online fee payment (Razorpay) ----------
+// Two-step flow, standard for Razorpay: the browser asks us to open an "order"
+// for a specific amount, Razorpay's own checkout popup collects the
+// card/UPI/netbanking details directly (this server — and the rest of this
+// codebase — never sees a card number or bank detail), and finally the
+// browser reports back that it succeeded, which we verify ourselves against
+// the signature Razorpay signs before trusting it and recording a payment.
+// Reads RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET from Render's environment —
+// set those in Render → this service → Environment once you have a Razorpay
+// account; until then these routes reply 501 and the "Pay Online" button
+// tells the parent to pay at the office instead.
+// DEMO_MODE=true: a showcase install with sample data. Nothing leaves the server —
+// no WhatsApp, no push notifications, no online payments.
+const DEMO_MODE = process.env.DEMO_MODE === 'true';
+function razorpayConfigured() {
+  if (DEMO_MODE) return false;
+  return !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+}
+app.post('/api/payments/create-order', async (req, res) => {
+  try {
+    if (!razorpayConfigured()) {
+      return res.status(501).json({ error: 'Online payments are not set up yet. Ask your Admin to add a Razorpay account.' });
+    }
+    const amount = Number(req.body?.amount);
+    if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount.' });
+    const auth = Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64');
+    const rzRes = await fetch('https://api.razorpay.com/v1/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Basic ${auth}` },
+      body: JSON.stringify({
+        amount: Math.round(amount * 100), // Razorpay wants paise, not rupees
+        currency: 'INR',
+        receipt: 'fee_' + Date.now(),
+      }),
+    });
+    const order = await rzRes.json();
+    if (!rzRes.ok) {
+      console.error('razorpay create-order failed:', order);
+      return res.status(502).json({ error: order?.error?.description || 'Could not start the payment.' });
+    }
+    return res.status(200).json({ orderId: order.id, amount: order.amount, currency: order.currency, keyId: process.env.RAZORPAY_KEY_ID });
+  } catch (err) {
+    console.error('razorpay create-order error:', err);
+    return res.status(500).json({ error: 'Could not start the payment. Please try again.' });
+  }
+});
+app.post('/api/payments/verify', async (req, res) => {
+  try {
+    if (!razorpayConfigured()) {
+      return res.status(501).json({ error: 'Online payments are not set up yet.' });
+    }
+    const {
+      razorpay_order_id, razorpay_payment_id, razorpay_signature,
+      studentId, studentName, amount, category, classAtPayment, extraFeeName, extraFeeId,
+    } = req.body || {};
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !studentId || !amount) {
+      return res.status(400).json({ error: 'Missing payment details.' });
+    }
+    const expected = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest('hex');
+    if (expected !== razorpay_signature) {
+      return res.status(400).json({ error: 'Payment verification failed — this does not look like a genuine Razorpay confirmation.' });
+    }
+    // Signature checks out against our own secret, so Razorpay itself vouches this
+    // payment happened — safe to record it as a real payment now.
+    const id = 'pay_' + Date.now() + '_' + razorpay_payment_id;
+    await sql`
+      INSERT INTO payments (id, receipt_no, student_id, student_name, category, mode, amount, discount, instalment, date, note, class_at_payment, extra_fee_name, extra_fee_id)
+      VALUES (
+        ${id}, ${razorpay_payment_id}, ${studentId}, ${studentName || ''}, ${category || 'fee'}, 'Online',
+        ${amount}, 0, '', ${new Date().toISOString().slice(0, 10)}, ${'Paid online via Razorpay — ' + razorpay_payment_id},
+        ${classAtPayment || ''}, ${extraFeeName || null}, ${extraFeeId || null}
+      )
+    `;
+    notifyFeePayment({ studentId, amount, category: category || 'fee', mode: 'Online', receiptNo: razorpay_payment_id })
+      .catch(err => console.error('fee payment notification failed:', err));
+    return res.status(200).json({ ok: true, paymentId: id, receiptNo: razorpay_payment_id });
+  } catch (err) {
+    console.error('razorpay verify error:', err);
+    return res.status(500).json({ error: 'Payment succeeded but we could not record it — please contact the school office with your payment ID.' });
+  }
+});
+
+// Whether this school has online fee payment turned on at all — the deploy-
+// time choice this template is built around. A school that doesn't want to
+// offer it (or hasn't signed up for Razorpay yet) is simply never given
+// RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET when this service is set up; every
+// other route above already refuses to work without them, but until now the
+// Student/Parent "Pay Online" button still showed up and only failed once
+// clicked. The Fees tab calls this first so it can hide the button entirely
+// for a school that hasn't integrated the feature, instead of offering a
+// dead end. Deliberately just a boolean — never leaks which keys are set.
+app.get('/api/payments/status', (req, res) => {
+  return res.status(200).json({ enabled: razorpayConfigured() });
+});
+
+// ---------- Notifications: Web Push (on by default) + WhatsApp (opt-in per school) ----------
+// Web Push needs no third-party account — just a VAPID key pair this
+// school generates once (see INSTALL notes) and sets as VAPID_PUBLIC_KEY /
+// VAPID_PRIVATE_KEY / VAPID_SUBJECT on Render → Environment, same pattern
+// as Razorpay above. Until those are set, webPushConfigured() is false and
+// every notify* function below silently no-ops on the push side — nothing
+// breaks, parents just don't get a browser/PWA notification yet.
+function webPushConfigured() {
+  if (DEMO_MODE) return false;
+  return !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY);
+}
+if (webPushConfigured()) {
+  webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT || 'mailto:admin@example.com',
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+}
+// WhatsApp is a separate, explicitly opt-in integration — real money and a
+// real Meta Business + WhatsApp Business Account per school, unlike Web
+// Push. Until WHATSAPP_PHONE_NUMBER_ID / WHATSAPP_ACCESS_TOKEN are set on
+// Render, whatsappConfigured() is false and this school just keeps using
+// the existing manual "click to open WhatsApp" flow (Notify Parents /
+// Notify Below Threshold) — nothing here replaces that, it only adds an
+// automatic send on top once a school actually wants it. Message
+// *content* still has to be a template pre-approved in Meta Business
+// Manager (Meta requires that for any business-initiated message outside
+// a 24-hour customer reply window) — the env vars below let a school point
+// at whatever name they got approved, without a code change.
+function whatsappConfigured() {
+  if (DEMO_MODE) return false;
+  return !!(process.env.WHATSAPP_PHONE_NUMBER_ID && process.env.WHATSAPP_ACCESS_TOKEN);
+}
+const WHATSAPP_DEFAULT_TEMPLATES = {
+  FEE_PAYMENT: 'fee_payment_confirmation',
+  FEE_DUE_BEFORE: 'fee_due_reminder',
+  FEE_DUE_AFTER: 'fee_overdue_reminder',
+  MARKS_PUBLISHED: 'marks_published',
+  ATTENDANCE_ALERT: 'attendance_alert',
+};
+async function sendWhatsAppTemplate(toPhoneDigits, templateKind, params) {
+  if (!whatsappConfigured() || !toPhoneDigits) return;
+  // Meta wants the recipient in international format with no leading "+"
+  // or punctuation. A 10-digit number as stored by this app is assumed
+  // Indian and gets "91" prepended; anything else is trusted as already
+  // including its country code.
+  const to = toPhoneDigits.length === 10 ? '91' + toPhoneDigits : toPhoneDigits;
+  const templateName = process.env['WHATSAPP_TEMPLATE_' + templateKind] || WHATSAPP_DEFAULT_TEMPLATES[templateKind];
+  if (!templateName) return;
+  try {
+    const resp = await fetch(`https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}` },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: process.env.WHATSAPP_TEMPLATE_LANG || 'en' },
+          components: [{ type: 'body', parameters: params.map(p => ({ type: 'text', text: String(p) })) }],
+        },
+      }),
+    });
+    if (!resp.ok) console.error('WhatsApp send failed:', resp.status, await resp.text());
+  } catch (err) {
+    console.error('WhatsApp send error:', err);
+  }
+}
+function fmtMoneyServer(n) {
+  return '₹' + Number(n || 0).toLocaleString('en-IN');
+}
+// A Parent AND a Student login can both be linked to the same child — push
+// every subscription belonging to every login linked to this student, not
+// just one.
+async function getStudentContactUserIds(studentId) {
+  const rows = await sql`SELECT id FROM users WHERE linked_student_id = ${studentId}`;
+  return rows.map(r => r.id);
+}
+// Every Student/Parent login for every active student in a class (optionally
+// narrowed to one section) — used to notify a whole class about something
+// that isn't tied to one student, like homework being assigned or an exam
+// schedule being published. Goes through students → linked_student_id
+// rather than a direct join, same indirection getStudentContactUserIds uses,
+// since more than one login can be linked to the same child.
+async function getClassSectionContactUserIds(className, section) {
+  const studentRows = section
+    ? await sql`SELECT id FROM students WHERE class_name = ${className} AND section = ${section} AND deleted_at IS NULL AND (status IS NULL OR LOWER(status) = 'active')`
+    : await sql`SELECT id FROM students WHERE class_name = ${className} AND deleted_at IS NULL AND (status IS NULL OR LOWER(status) = 'active')`;
+  if (!studentRows.length) return [];
+  const ids = studentRows.map(r => r.id);
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
+  const userRows = await sql.query(`SELECT id FROM users WHERE linked_student_id IN (${placeholders})`, ids);
+  return userRows.map(r => r.id);
+}
+function getStudentParentPhone(student) {
+  const extra = student.extra || {};
+  const raw = extra.fatherPhone || extra.motherPhone || extra.guardianPhone || '';
+  return String(raw).replace(/\D/g, '');
+}
+// Writes the in-app notification row every notify* call ends up creating —
+// this is the one thing that ALWAYS happens, whether or not Web Push is
+// configured for this school, so the bell in the app is never silently
+// empty just because VAPID keys were never set. payload.tag doubles as the
+// bell's category (fee_due, exam_schedule, circular, homework, attendance,
+// leave_decision, approval, ...) since every call site already sets a tag
+// for Web Push's own dedup purposes.
+async function recordNotification(userId, payload) {
+  if (!userId || !payload) return;
+  try {
+    await sql`
+      INSERT INTO user_notifications (user_id, type, title, body, url)
+      VALUES (${userId}, ${payload.tag || 'general'}, ${payload.title || ''}, ${payload.body || ''}, ${payload.url || '/'})
+    `;
+  } catch (err) {
+    console.error('recordNotification failed for user', userId, err);
+  }
+}
+async function sendPushToUser(userId, payload) {
+  await recordNotification(userId, payload);
+  if (!webPushConfigured()) return;
+  const subs = await sql`SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ${userId}`;
+  for (const sub of subs) {
+    try {
+      await webpush.sendNotification(
+        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+        JSON.stringify(payload)
+      );
+    } catch (err) {
+      // 404/410 means the browser itself dropped this subscription (e.g.
+      // the PWA was uninstalled) — Web Push's own way of telling us to stop
+      // trying it, so clean it up instead of failing the same way forever.
+      if (err.statusCode === 404 || err.statusCode === 410) {
+        await sql`DELETE FROM push_subscriptions WHERE id = ${sub.id}`.catch(() => {});
+      } else {
+        console.error('push send failed for subscription', sub.id, err.statusCode || err.message);
+      }
+    }
+  }
+}
+async function sendPushToStudent(studentId, payload) {
+  const userIds = await getStudentContactUserIds(studentId);
+  for (const userId of userIds) await sendPushToUser(userId, payload);
+}
+// Alerts every login of the given role(s) — used for approval workflows,
+// where "who should be notified" is "whoever can act on this", not one
+// specific student/parent. Admin/Principal today; a school that delegates
+// approval to another role later just needs its name added at the call
+// site, not a new function.
+async function notifyUsersByRole(roles, payload) {
+  const rows = await sql`SELECT id FROM users WHERE role IN (${roles})`;
+  for (const row of rows) await sendPushToUser(row.id, payload);
+}
+
+// ---------- Notification triggers: fee payment, attendance, marks ----------
+// Called (fire-and-forget — never awaited by the request that triggered
+// it, so a slow or failing push/WhatsApp send never adds latency to a
+// staff member recording a payment/attendance/mark) from handleSimple()
+// below for office-entered payments/attendance/marks, and directly from
+// the Razorpay verify route above for online payments.
+async function notifyFeePayment({ studentId, amount, mode, receiptNo }) {
+  if (!studentId) return;
+  const rows = await sql`SELECT * FROM students WHERE id = ${studentId}`;
+  const student = rows[0];
+  if (!student) return;
+  const body = `${fmtMoneyServer(amount)} received for ${student.first_name} ${student.last_name}${mode ? ' via ' + mode : ''}${receiptNo ? ' · Receipt ' + receiptNo : ''}.`;
+  await sendPushToStudent(student.id, { title: 'Payment received', body, tag: 'fee-payment', url: '/' });
+  if (whatsappConfigured()) {
+    const phone = getStudentParentPhone(student);
+    if (phone) await sendWhatsAppTemplate(phone, 'FEE_PAYMENT', [`${student.first_name} ${student.last_name}`, fmtMoneyServer(amount), receiptNo || '—']);
+  }
+}
+// Only Absent/Late/Leave push — a "marked Present" push every school day
+// for every student would just be daily noise parents learn to ignore. See
+// the Attendance module's Teacher-scoping comments for the same
+// only-what-needs-attention principle applied to what a Teacher can see.
+async function notifyAttendanceEvent({ studentId, date, status }) {
+  if (!studentId || !['Absent', 'Late', 'Leave'].includes(status)) return;
+  const rows = await sql`SELECT * FROM students WHERE id = ${studentId}`;
+  const student = rows[0];
+  if (!student) return;
+  const body = `${student.first_name} ${student.last_name} was marked ${status} on ${date}.`;
+  await sendPushToStudent(student.id, { title: `Marked ${status}`, body, tag: 'attendance', url: '/' });
+  if (whatsappConfigured()) {
+    const phone = getStudentParentPhone(student);
+    if (phone) await sendWhatsAppTemplate(phone, 'ATTENDANCE_ALERT', [`${student.first_name} ${student.last_name}`, status, date]);
+  }
+}
+// Fires once — the moment a student's mark set for an exam goes from
+// incomplete to complete, matching the "Results published" wording already
+// used in the in-app Notifications feed (computeMyNotifications) — never
+// once per individual subject saved, and never a second time if a mark is
+// later edited (notification_events makes that idempotent).
+async function notifyMarksIfComplete({ examId, studentId }) {
+  if (!examId || !studentId) return;
+  const examRows = await sql`SELECT * FROM exam_defs WHERE id = ${examId}`;
+  const exam = examRows[0];
+  if (!exam) return;
+  const classMap = await studentClassMap([studentId]);
+  const cls = classMap[studentId];
+  if (!cls) return;
+  const classSubjects = exam.class_subjects || {};
+  const subjects = classSubjects[cls.className + '||' + cls.section] || [];
+  if (!subjects.length) return;
+  const resultRows = await sql`SELECT DISTINCT subject FROM exam_results WHERE exam_id = ${examId} AND student_id = ${studentId}`;
+  const done = new Set(resultRows.map(r => r.subject));
+  if (!subjects.every(s => done.has(s.name))) return;
+  const wasNew = await insertNotificationEventIfNew(studentId, 'marks_published', examId);
+  if (!wasNew) return; // already notified for this exam
+  const studentRows = await sql`SELECT * FROM students WHERE id = ${studentId}`;
+  const student = studentRows[0];
+  if (!student) return;
+  const body = `${exam.name} results are now available for ${student.first_name} ${student.last_name}.`;
+  await sendPushToStudent(student.id, { title: 'Results published', body, tag: 'marks', url: '/' });
+  if (whatsappConfigured()) {
+    const phone = getStudentParentPhone(student);
+    if (phone) await sendWhatsAppTemplate(phone, 'MARKS_PUBLISHED', [`${student.first_name} ${student.last_name}`, exam.name]);
+  }
+}
+// Fires once, right when an exam schedule is first created (not on every
+// edit — a typo fix to the date a day later shouldn't re-alert the whole
+// school). class_subjects is keyed 'ClassName||Section' (see
+// notifyMarksIfComplete's own read of the same field above) — split each key
+// back apart to notify exactly the class+section combinations this exam
+// actually covers, not the whole school.
+async function notifyExamScheduled(e) {
+  const classSubjects = e.classSubjects || {};
+  const keys = Object.keys(classSubjects);
+  if (!keys.length) return;
+  const when = e.startDate ? (e.endDate && e.endDate !== e.startDate ? `${e.startDate} to ${e.endDate}` : e.startDate) : '';
+  const body = `${e.name}${when ? ' — ' + when : ''}. Check the exam schedule for details.`;
+  const notified = new Set();
+  for (const key of keys) {
+    const sep = key.indexOf('||');
+    const className = sep === -1 ? key : key.slice(0, sep);
+    const section = sep === -1 ? '' : key.slice(sep + 2);
+    const userIds = await getClassSectionContactUserIds(className, section || null);
+    for (const uid of userIds) {
+      if (notified.has(uid)) continue; // one exam can list several sections of the same class — never double-notify a login
+      notified.add(uid);
+      await sendPushToUser(uid, { title: 'Exam schedule published', body, tag: 'exam_schedule', url: '/?view=myprofile' });
+    }
+  }
+}
+// Fires once, right when a homework item is first assigned (never on an
+// edit — see notifyExamScheduled's own reasoning above for why: fixing a
+// typo in the description a day later shouldn't re-alert the whole class).
+// section blank means every section of that class, same convention as the
+// homework_items table itself.
+async function notifyHomeworkAssigned(h) {
+  if (!h.className) return;
+  const body = `${h.subject ? h.subject + ' — ' : ''}${h.title}${h.dueDate ? '. Due ' + h.dueDate : ''}.`;
+  const userIds = await getClassSectionContactUserIds(h.className, h.section || null);
+  for (const uid of userIds) {
+    await sendPushToUser(uid, { title: 'New homework assigned', body, tag: 'homework', url: '/?view=myprofile' });
+  }
+}
+// Fires the moment a staff member files a fee-discount request — Admin is
+// the only role that can act on it (see Roles & Permissions matrix), so
+// that's who gets alerted, exactly like every other notify* here: never
+// awaited by the write that triggered it (see handleSimple's call site).
+async function notifyPendingDiscountRequest({ studentId, requestedBy }) {
+  if (!studentId) return;
+  const rows = await sql`SELECT * FROM students WHERE id = ${studentId}`;
+  const student = rows[0];
+  const name = student ? `${student.first_name} ${student.last_name}` : 'a student';
+  const body = `${requestedBy || 'A staff member'} requested a fee discount for ${name} — needs your approval.`;
+  await notifyUsersByRole(['Admin'], { title: 'Discount approval needed', body, tag: 'discount-approval', url: '/' });
+}
+
+// ---------- Fee-due reminders: a server-side replica of computeDefaulters() ----------
+// computeDefaulters() (fee + bus outstanding balance) only exists client-side
+// today, computed from in-memory arrays the browser already has loaded — no
+// use to a scheduled job with no browser open. This mirrors it closely
+// enough for a reminder's purposes (tuition + bus only, same as the
+// Defaulters tab; hostel/stock aren't part of that tab either).
+async function computeStudentDueBalance(student) {
+  const [feeStructRows, discountRows, paymentRows, transportRows] = await Promise.all([
+    sql`SELECT fee, bus FROM fee_structure WHERE class_name = ${student.class_name}`,
+    sql`SELECT applies_to, mode, value FROM student_discounts WHERE student_id = ${student.id} AND status = 'Approved' AND applies_to IN ('fee','bus')`,
+    sql`SELECT category, amount, discount, class_at_payment FROM payments WHERE student_id = ${student.id} AND category IN ('fee','bus')`,
+    sql`SELECT value FROM kv_store WHERE \`key\` = 'transport-routes'`,
+  ]);
+  const struct = feeStructRows[0] || { fee: 0, bus: 0 };
+  const extra = student.extra || {};
+  let busExpected = Number(struct.bus) || 0;
+  if (extra.transportRouteId && extra.transportStopId) {
+    const routes = (transportRows[0] && transportRows[0].value) || [];
+    const route = routes.find(r => r.id === extra.transportRouteId);
+    const stop = route ? (route.stops || []).find(st => st.id === extra.transportStopId) : null;
+    if (stop) busExpected = Number(stop.fare) || 0;
+  }
+  const expected = { fee: Number(struct.fee) || 0, bus: busExpected };
+  const collected = { fee: 0, bus: 0 };
+  const discount = { fee: 0, bus: 0 };
+  paymentRows.forEach(p => {
+    if (expected[p.category] === undefined) return;
+    if (p.class_at_payment && p.class_at_payment !== student.class_name) return;
+    collected[p.category] += Number(p.amount) || 0;
+    discount[p.category] += Number(p.discount) || 0;
+  });
+  discountRows.forEach(d => {
+    if (expected[d.applies_to] === undefined) return;
+    discount[d.applies_to] += d.mode === 'percentage'
+      ? Math.round(expected[d.applies_to] * (Number(d.value) || 0) / 100)
+      : (Number(d.value) || 0);
+  });
+  let total = 0;
+  for (const cat of ['fee', 'bus']) {
+    const netPayable = Math.max(expected[cat] - discount[cat], 0);
+    total += Math.max(netPayable - collected[cat], 0);
+  }
+  return total;
+}
+// Exactly two reminders per due-date cycle, per the school's own
+// late-fee-settings.dueDate (the same single due-date concept the Late Fee
+// screen already uses — nothing new to configure): one FEE_REMINDER_LEAD_DAYS
+// before it, one the day it first becomes overdue. Both are idempotent via
+// notification_events keyed on the due date itself, so changing the due
+// date later naturally opens a fresh reminder cycle instead of silently
+// never firing again.
+const FEE_REMINDER_LEAD_DAYS = 3;
+async function runFeeDueReminders() {
+  const settingsRows = await sql`SELECT value FROM kv_store WHERE \`key\` = 'late-fee-settings'`;
+  const dueDate = settingsRows.length ? settingsRows[0].value.dueDate : '';
+  if (!dueDate) return; // school hasn't set a fee due date yet — nothing to remind about
+  const today = new Date().toISOString().slice(0, 10);
+  const before = new Date(dueDate);
+  before.setDate(before.getDate() - FEE_REMINDER_LEAD_DAYS);
+  const beforeStr = before.toISOString().slice(0, 10);
+  let kind = null;
+  if (today === beforeStr) kind = 'fee_due_before';
+  else if (today > dueDate) kind = 'fee_due_after';
+  if (!kind) return;
+  const students = await sql`SELECT * FROM students WHERE (status IS NULL OR LOWER(status) = 'active') AND deleted_at IS NULL`;
+  for (const student of students) {
+    try {
+      const balance = await computeStudentDueBalance(student);
+      if (balance <= 0) continue;
+      const wasNew = await insertNotificationEventIfNew(student.id, kind, dueDate);
+      if (!wasNew) continue; // already sent for this due date
+      const title = kind === 'fee_due_before' ? 'Fee due soon' : 'Fee overdue';
+      const body = kind === 'fee_due_before'
+        ? `${student.first_name} ${student.last_name}'s fee of ${fmtMoneyServer(balance)} is due on ${dueDate}.`
+        : `${student.first_name} ${student.last_name}'s fee of ${fmtMoneyServer(balance)} was due on ${dueDate} and is now overdue.`;
+      await sendPushToStudent(student.id, { title, body, tag: 'fee-due', url: '/' });
+      if (whatsappConfigured()) {
+        const phone = getStudentParentPhone(student);
+        if (phone) {
+          await sendWhatsAppTemplate(phone, kind === 'fee_due_before' ? 'FEE_DUE_BEFORE' : 'FEE_DUE_AFTER',
+            [`${student.first_name} ${student.last_name}`, fmtMoneyServer(balance), dueDate]);
+        }
+      }
+    } catch (err) {
+      console.error('fee due reminder failed for student', student.id, err);
+    }
+  }
+}
+// In-process daily scheduler — no new Render service/cron needed. Checked
+// hourly but only actually runs the scan once per calendar day (tracked in
+// memory), plus once shortly after boot so a reminder due "today" isn't
+// missed just because the server happened to restart that morning.
+let lastFeeReminderRunDate = null;
+async function feeReminderTick() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastFeeReminderRunDate === today) return;
+  lastFeeReminderRunDate = today;
+  await runFeeDueReminders().catch(err => console.error('runFeeDueReminders failed:', err));
+}
+setInterval(feeReminderTick, 60 * 60 * 1000);
+setTimeout(feeReminderTick, 30 * 1000);
+
+// ---------- Push subscription endpoints ----------
+// Any signed-in login can call these (not just Parent/Student) so a Teacher
+// or Admin who wants their own notifications later isn't blocked by this
+// route itself — today only the Parent/Student client code actually
+// subscribes, matching the four event types this session added, which are
+// all parent-facing.
+app.get('/api/push/vapid-key', (req, res) => {
+  if (!webPushConfigured()) return res.status(501).json({ error: 'Push notifications are not set up yet.' });
+  return res.status(200).json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+});
+app.post('/api/push/subscribe', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+    const { endpoint, keys } = req.body || {};
+    if (!endpoint || !keys || !keys.p256dh || !keys.auth) return res.status(400).json({ error: 'Invalid subscription.' });
+    await sql`
+      INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+      VALUES (${req.authUser.id}, ${endpoint}, ${keys.p256dh}, ${keys.auth}, ${req.headers['user-agent'] || ''})
+      ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), p256dh = VALUES(p256dh), auth = VALUES(auth)
+    `;
+    return res.status(201).json({ ok: true });
+  } catch (err) {
+    console.error('push subscribe error:', err);
+    return res.status(500).json({ error: 'Could not save your subscription.' });
+  }
+});
+app.post('/api/push/unsubscribe', async (req, res) => {
+  try {
+    const { endpoint } = req.body || {};
+    if (!endpoint) return res.status(400).json({ error: 'Missing endpoint.' });
+    await sql`DELETE FROM push_subscriptions WHERE endpoint = ${endpoint}`;
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('push unsubscribe error:', err);
+    return res.status(500).json({ error: 'Could not remove your subscription.' });
+  }
+});
+
+// ---------- In-app notification bell ----------
+// Every login (Student/Parent, Teacher/Staff, Admin/Principal) reads its own
+// feed here — see recordNotification above for how rows land in this table,
+// and the design comment on user_notifications for why this exists
+// alongside (and independently of) Web Push.
+function shapeNotification(r) {
+  return { id: r.id, type: r.type, title: r.title, body: r.body, url: r.url, createdAt: r.created_at, read: !!r.read_at };
+}
+app.get('/api/notifications', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+    // Most-recent-first, capped generously — this is a rolling feed, not an
+    // archive; nothing here ever needs pagination in a single-school app.
+    const rows = await sql`SELECT * FROM user_notifications WHERE user_id = ${req.authUser.id} ORDER BY created_at DESC LIMIT 200`;
+    return res.status(200).json(rows.map(shapeNotification));
+  } catch (err) {
+    console.error('notifications list error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+app.put('/api/notifications/mark-all-read', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+    await sql`UPDATE user_notifications SET read_at = now() WHERE user_id = ${req.authUser.id} AND read_at IS NULL`;
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('notifications mark-all-read error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+app.put('/api/notifications/:id/read', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+    // Scoped to the caller's own id in the WHERE clause itself — reading
+    // someone else's notification id can never mark a row that isn't yours.
+    await sql`UPDATE user_notifications SET read_at = now() WHERE id = ${req.params.id} AND user_id = ${req.authUser.id} AND read_at IS NULL`;
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('notifications mark-read error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+// Fans a Communications ("Notice Board") message out to the actual logins
+// its audience resolves to, replacing the old behavior where every
+// "In-App" message was simply readable by every Student/Parent regardless
+// of who it was actually addressed to (renderMyNoticesTab used to filter
+// only on the channel, never the audience). The client already knows how to
+// resolve "Whole Class" / "Section" / "Individual Student" / "Fee
+// Defaulters" / "All Staff" into an exact list (see commsAudienceTargets()),
+// so this trusts that list rather than re-deriving it server-side — same
+// trust level the rest of this app already gives an authenticated
+// Admin/Principal/comms_compose user over bulk writes.
+app.post('/api/notifications/broadcast', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+    if (!(await checkModuleAccess(req, res, ['announcements']))) return;
+    const b = req.body || {};
+    const title = String(b.title || '').trim().slice(0, 200);
+    const body = String(b.body || '').trim().slice(0, 2000);
+    if (!title || !body) return res.status(400).json({ error: 'Missing title or body.' });
+    const type = String(b.type || 'circular').slice(0, 64);
+    const url = b.url ? String(b.url).slice(0, 300) : '/?view=noticeboard';
+    const studentIds = Array.isArray(b.studentIds) ? b.studentIds.filter(Boolean).slice(0, 5000) : [];
+    const staffIds = Array.isArray(b.staffIds) ? b.staffIds.filter(Boolean).slice(0, 5000) : [];
+    const userIds = new Set();
+    if (studentIds.length) {
+      const placeholders = studentIds.map((_, i) => `$${i + 1}`).join(', ');
+      const rows = await sql.query(`SELECT id FROM users WHERE linked_student_id IN (${placeholders})`, studentIds);
+      rows.forEach(r => userIds.add(r.id));
+    }
+    if (staffIds.length) {
+      // staffIds here are staff.id (the roster this app already scopes
+      // Communications' "All Staff" audience by) — resolved to logins via
+      // the same extra.linkedUserId convention as getMyStaffRow, just in
+      // bulk rather than one row at a time.
+      const staffRows = await sql`SELECT extra FROM staff WHERE id IN (${staffIds})`;
+      staffRows.forEach(r => { const uid = r.extra && r.extra.linkedUserId; if (uid) userIds.add(uid); });
+    }
+    const wantPush = b.push === true;
+    for (const uid of userIds) {
+      if (wantPush) await sendPushToUser(uid, { title, body, tag: type, url });
+      else await recordNotification(uid, { title, body, tag: type, url });
+    }
+    return res.status(200).json({ ok: true, notified: userIds.size, pushed: wantPush });
+  } catch (err) {
+    console.error('notifications broadcast error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+// Generic requester-facing decision notification — backs every approval
+// flow that lives purely as a client-side KV record with no dedicated
+// server route of its own (promotion/transfer/section requests, inventory
+// change requests, fee discount requests): right after Admin/Principal
+// decides one — from the Approvals Center or the item's own page — the
+// client calls this so the ORIGINAL REQUESTER gets a push + in-app
+// notification telling them the outcome, the same guarantee
+// handleStaffLeaveRequests' PUT already gives leave decisions natively
+// (see sendPushToUser calls there). Restricted to MANAGEMENT_ROLES since
+// only they can actually decide any of these flows; the client only ever
+// calls this immediately after its own successful decision, never as a
+// generic message-to-anyone endpoint.
+app.post('/api/notify-user', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+    if (!MANAGEMENT_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Admin or Principal access required.' });
+    }
+    const b = req.body || {};
+    const userId = String(b.userId || '').trim();
+    const title = String(b.title || '').trim().slice(0, 200);
+    const body = String(b.body || '').trim().slice(0, 2000);
+    const tag = String(b.tag || 'approval-decision').trim().slice(0, 64) || 'approval-decision';
+    const url = b.url ? String(b.url).slice(0, 300) : '/';
+    if (!userId || !title || !body) return res.status(400).json({ error: 'Missing userId, title, or body.' });
+    await sendPushToUser(userId, { title, body, tag, url });
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('notify-user error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// ---------- Biometric device attendance (optional, per-school integration) ----------
+// Every biometric attendance device brand (eSSL, ZKTeco, Realtime, Mantra,
+// ...) speaks its own protocol, and network biometric devices live on the
+// school's own LAN, not the public internet — this cloud-hosted ERP has no
+// way to dial into a school's private network to pull logs itself. So the
+// integration point is the other direction: a small on-site "bridge"
+// program (see ../biometric-bridge/ next to this file) runs on any PC on
+// the SAME network as the device(s), polls them using their own SDK, and
+// PUSHES new punches up to this endpoint over the internet — a direction
+// that always works with no port-forwarding or firewall change needed.
+//
+// This is exactly as optional as the Razorpay integration above and follows
+// the same pattern: a school that doesn't have a biometric device (or
+// doesn't want to wire it up yet) simply never gets a BIOMETRIC_API_KEY
+// and never runs the bridge, and every trace of this feature — the Staff
+// form's Biometric ID field, the Staff Attendance "Biometric Sync" tab —
+// stays hidden from that school's app entirely (see GET .../status below).
+//
+// Reads BIOMETRIC_API_KEY from Render's environment — set it on a school's
+// service only once you're actually setting up their device bridge, and
+// give the bridge the same value in its own .env.
+function biometricConfigured() {
+  return !!process.env.BIOMETRIC_API_KEY;
+}
+// Whether this school has biometric attendance turned on at all — checked
+// by the app at boot (loadBiometricStatus in index.html) so it can hide
+// every trace of the feature for a school that hasn't set it up. Requires
+// a real login (unlike the ingestion endpoint below, which the bridge
+// calls with its own API key, not a user session) since this is only ever
+// read by the already-logged-in app itself.
+app.get('/api/biometric/status', async (req, res) => {
+  return res.status(200).json({ enabled: biometricConfigured() });
+});
+// Recent punches, for the Admin's Biometric Sync tab — who's mapped,
+// who isn't, and confirmation the bridge is actually reaching this ERP.
+app.get('/api/biometric/punches', async (req, res) => {
+  try {
+    if (!(await checkModuleAccess(req, res, ['staff', 'attendance']))) return;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+    const rows = await sql`SELECT * FROM biometric_punches ORDER BY punched_at DESC LIMIT ${limit}`;
+    return res.status(200).json(rows.map(r => ({
+      id: r.id, deviceSerial: r.device_serial, deviceUserId: r.device_user_id,
+      punchedAt: r.punched_at, staffId: r.staff_id, staffName: r.staff_name, matched: r.matched,
+    })));
+  } catch (err) {
+    console.error('biometric punches list error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+// The bridge's ingestion call. Authenticated by BIOMETRIC_API_KEY, sent as
+// a plain header exactly like the vendor-dashboard's own server-to-server
+// calls above (x-vendor-api-key) — this is a machine calling in from the
+// school's own network, not a person with a login session, so it's listed
+// in PUBLIC_API_ROUTES (POST only) to skip the session-cookie check, and
+// checks this key by hand instead.
+//
+// Body: { deviceSerial, punches: [{ deviceUserId, timestamp }, ...] }.
+// For each punch: matched to a staff member by their Biometric ID (set on
+// the Staff form, stored in staff.extra.biometricId), logged either way,
+// and — only when matched — used to mark that staff member Present for
+// that calendar day, but ONLY if no attendance record already exists for
+// them that day. This is deliberately insert-only, never an overwrite: if
+// the office has already marked (or corrected) that day by hand, biometric
+// sync never silently replaces it. The id scheme (statt_<staffId>_<date>)
+// is shared with the Staff Attendance "Mark" screen's own manual saves
+// (see saveStaffAttendance in index.html), so whichever one gets there
+// first simply wins and the other becomes a no-op.
+app.post('/api/biometric/punches', async (req, res) => {
+  try {
+    if (!biometricConfigured()) {
+      return res.status(501).json({ error: 'Biometric attendance is not set up for this school yet.' });
+    }
+    const key = req.headers['x-biometric-api-key'];
+    if (!key || key !== process.env.BIOMETRIC_API_KEY) {
+      return res.status(401).json({ error: 'Invalid or missing biometric API key.' });
+    }
+    const deviceSerial = String((req.body && req.body.deviceSerial) || 'unknown').slice(0, 100);
+    const punches = Array.isArray(req.body && req.body.punches) ? req.body.punches.slice(0, 2000) : [];
+    let matchedCount = 0;
+    for (const p of punches) {
+      const deviceUserId = p && p.deviceUserId !== undefined && p.deviceUserId !== null ? String(p.deviceUserId).trim() : '';
+      const punchedAt = p && p.timestamp ? new Date(p.timestamp) : null;
+      if (!deviceUserId || !punchedAt || isNaN(punchedAt.getTime())) continue; // skip anything malformed rather than fail the whole batch
+      let staffId = null, staffName = null;
+      const staffRows = await sql`SELECT id, first_name, last_name FROM staff WHERE JSON_UNQUOTE(JSON_EXTRACT(extra, '$.biometricId')) = ${deviceUserId} LIMIT 1`;
+      if (staffRows.length) {
+        staffId = staffRows[0].id;
+        staffName = `${staffRows[0].first_name || ''} ${staffRows[0].last_name || ''}`.trim();
+        matchedCount++;
+      }
+      const punchId = 'biop_' + deviceSerial + '_' + deviceUserId + '_' + punchedAt.toISOString();
+      await sql`
+        INSERT IGNORE INTO biometric_punches (id, device_serial, device_user_id, punched_at, staff_id, staff_name, matched)
+        VALUES (${punchId}, ${deviceSerial}, ${deviceUserId}, ${punchedAt.toISOString()}, ${staffId}, ${staffName}, ${!!staffId})
+      `;
+      if (staffId) {
+        // IST is UTC+5:30 with no DST, so this fixed offset is safe year-round.
+        // Cutoff is 1:00 PM IST — a punch before that is treated as the
+        // morning-session punch, at/after as the afternoon-session punch.
+        // Schools with a different session split can adjust the cutoff hour
+        // (13) below; this only affects auto-marking from biometric punches,
+        // not manual marking in the ERP, which lets staff pick the session
+        // explicitly.
+        const istMs = punchedAt.getTime() + 5.5 * 60 * 60 * 1000;
+        const istDate = new Date(istMs);
+        const dateStr = istDate.toISOString().slice(0, 10);
+        const session = istDate.getUTCHours() < 13 ? 'Morning' : 'Afternoon';
+        const attId = 'statt_' + staffId + '_' + dateStr + '_' + session;
+        await sql`
+          INSERT IGNORE INTO staff_attendance_records (id, staff_id, date, session, status)
+          VALUES (${attId}, ${staffId}, ${dateStr}, ${session}, 'Present')
+        `;
+      }
+    }
+    return res.status(200).json({ ok: true, received: punches.length, matched: matchedCount, unmatched: punches.length - matchedCount });
+  } catch (err) {
+    console.error('biometric punches ingest error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// ---------- Login ----------
+// The only place a username/password pair is ever checked now that GET
+// /api/users no longer sends passwords to the browser at all (see
+// handleUsers and the migration above) — the app's own login screen, the
+// "change my password" screens (which re-verify the current password
+// before accepting a new one), and nothing else, all call this instead of
+// comparing locally. Deliberately returns the same generic message on a
+// bad username and a bad password, rather than confirming which one was
+// wrong, so this can't be used to enumerate valid usernames.
+// ---------- Login rate limiting ----------
+// In-memory (per-process) tracking of failed login attempts, keyed by
+// IP + username so one bad actor guessing one account can't lock out
+// every other user, and one legitimate user mistyping their own password
+// a few times doesn't get caught by someone else's attempts elsewhere.
+// This is enough for this app's actual deployment — a single Render
+// instance, no load balancer spreading requests across processes — without
+// adding a dependency or a database table just to store short-lived
+// counters that only ever need to survive a few minutes.
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const loginAttempts = new Map(); // key -> { count, firstAttempt, blockedUntil }
+
+function loginRateKey(req, username) {
+  const fwd = req.headers['x-forwarded-for'];
+  const ip = (fwd ? String(fwd).split(',')[0].trim() : '') || req.socket.remoteAddress || 'unknown';
+  return ip + '|' + String(username || '').toLowerCase();
+}
+
+// Returns seconds remaining if this key is currently blocked, otherwise null.
+function checkLoginRateLimit(key) {
+  const rec = loginAttempts.get(key);
+  if (!rec) return null;
+  if (rec.blockedUntil && Date.now() < rec.blockedUntil) {
+    return Math.ceil((rec.blockedUntil - Date.now()) / 1000);
+  }
+  if (rec.blockedUntil && Date.now() >= rec.blockedUntil) {
+    loginAttempts.delete(key); // block expired — start fresh
+  }
+  return null;
+}
+
+function recordLoginFailure(key) {
+  const now = Date.now();
+  let rec = loginAttempts.get(key);
+  if (!rec || now - rec.firstAttempt > LOGIN_WINDOW_MS) {
+    rec = { count: 0, firstAttempt: now, blockedUntil: null };
+  }
+  rec.count++;
+  if (rec.count >= LOGIN_MAX_ATTEMPTS) {
+    rec.blockedUntil = now + LOGIN_WINDOW_MS;
+  }
+  loginAttempts.set(key, rec);
+}
+
+function recordLoginSuccess(key) {
+  loginAttempts.delete(key);
+}
+
+// Sweep stale entries periodically so this Map doesn't grow unbounded over
+// the life of the process. unref() so this timer never keeps the process
+// alive on its own.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, rec] of loginAttempts) {
+    if ((!rec.blockedUntil || now > rec.blockedUntil) && now - rec.firstAttempt > LOGIN_WINDOW_MS) {
+      loginAttempts.delete(key);
+    }
+  }
+}, 10 * 60 * 1000).unref();
+
+// Which side of the login screen's Staff / Parent & Student toggle each
+// role belongs to. Purely a "you're on the wrong tab" guardrail, not a
+// substitute for the per-route role checks a real authorization layer
+// would add — a Teacher who successfully signs in here still gets
+// whatever a Teacher session normally gets, same as before this existed.
+const STAFF_LOGIN_ROLES = ['Admin', 'Principal', 'Accountant', 'Office Assistant', 'Teacher', 'Staff'];
+const PARENT_LOGIN_ROLES = ['Student', 'Parent'];
+// Who "Management" resolves to when a Student/Parent addresses a concern or
+// submission to Management rather than a specific teacher — both roles see
+// everything sent there (see /api/concerns/inbox and /api/submissions/inbox
+// below), matching how the rest of the app already treats Admin and
+// Principal as the two full-access staff roles.
+const MANAGEMENT_ROLES = ['Admin', 'Principal'];
+// Mirrors ATT_SESSIONS in index.html — kept as its own server-side constant
+// (rather than importing across the client/server boundary) purely for
+// validating a half-day leave request's session value in
+// handleStaffLeaveRequests above.
+const ATT_SESSIONS_SERVER = ['Morning', 'Afternoon'];
+
+// ---------- Student/Parent self-service: "My Portal" reads ----------
+// The generic staff-module permission gate below (RESOURCE_TO_MODULE +
+// checkModuleAccess) is designed to control what STAFF roles can browse —
+// but a Student/Parent self-service login structurally never has any of
+// those staff modules (managefee, exams/result, attendance, ...), so every
+// fetch these read-only "My Portal" screens make was silently 403ing and
+// falling back to whatever this browser's own localStorage happened to
+// have cached — showing fees/marks/attendance as empty or "still due" even
+// when the real data says otherwise. See the two carve-outs below and the
+// PARENT_SHARED_REFERENCE_RESOURCES/PARENT_SHARED_REFERENCE_KV_KEYS bypass
+// further down in the main dispatcher.
+//
+// Two different fixes, by data shape:
+//  - PARENT_OWN_RECORD_RESOURCES: a real per-student table (has a
+//    student_id column). Scoped to just that login's own linked student —
+//    never the whole school's rows — the same principle as the 'students'
+//    carve-out itself.
+//  - PARENT_SHARED_REFERENCE_RESOURCES: read-only reference data with no
+//    student_id at all (this year's fee schedule, exam definitions/dates,
+//    the subject list) — nothing in these is specific to any one student,
+//    so there's no "own record" to scope to; a Student/Parent login is
+//    simply allowed to read them like every other GET below, unchanged.
+const PARENT_OWN_RECORD_RESOURCES = {
+  payments: { table: 'payments', fields: () => SIMPLE_RESOURCES.payments.fields },
+  discounts: { table: 'student_discounts', fields: () => SIMPLE_RESOURCES.discounts.fields },
+  'extra-fees': { table: 'student_extra_fees', fields: () => SIMPLE_RESOURCES['extra-fees'].fields },
+  'exam-results': { table: 'exam_results', fields: () => SIMPLE_RESOURCES['exam-results'].fields },
+  attendance: { table: 'attendance_records', fields: () => SIMPLE_RESOURCES.attendance.fields },
+};
+// 'homework-items' added alongside the pre-existing three: a Student/Parent
+// login has to be able to read homework (renderMySyllabusHomeworkTab) even
+// though their role has no 'syllabus' module permission — same reasoning as
+// fee-structure/exam-defs/subjects, nothing per-student to leak in a GET.
+const PARENT_SHARED_REFERENCE_RESOURCES = ['fee-structure', 'exam-defs', 'subjects', 'homework-items'];
+// Same idea, one level down, for the generic /api/kv/:key store — right now
+// just the late-fee policy (rate/grace period), which Fees needs to show an
+// accurate "Outstanding" figure instead of silently treating every family
+// as having no late fee at all.
+// 'syllabus-topics' added here for the same reason 'homework-items' was
+// added to PARENT_SHARED_REFERENCE_RESOURCES: renderMySyllabusHomeworkTab
+// reads it directly for every Student/Parent login, and without this bypass
+// that GET 403s for any role whose defaults don't include 'syllabus' (see
+// SERVER_ROLE_VIEWS — Student/Parent's is just ['myprofile']), silently
+// leaving the tab empty instead of erroring loudly.
+// 'fee-schedule' added so a parent's Fees tab shows the same term due dates the
+// office sees (it holds only dates and percentages, nothing per-student).
+const PARENT_SHARED_REFERENCE_KV_KEYS = ['late-fee-settings', 'syllabus-topics', 'fee-schedule', 'grading-scale', 'grading-schemes'];
+
+// Lets the login page show the "demo" banner and the demo logins. Reveals nothing when not a demo.
+app.get('/api/demo-info', (req, res) => {
+  if (!DEMO_MODE) return res.status(200).json({ demo: false });
+  return res.status(200).json({ demo: true, password: process.env.DEMO_PASSWORD || 'Demo@123',
+    logins: [['demo.admin','Admin'],['demo.principal','Principal'],['demo.accountant','Accountant'],['demo.office','Office Assistant'],['demo.teacher','Teacher'],['demo.parent','Parent'],['demo.student','Student']] });
+});
+
+app.post('/api/login', async (req, res) => {
+  try {
+    const { username, password, audience } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: 'Username and password are required.' });
+    const rateKey = loginRateKey(req, username);
+    const blockedForSeconds = checkLoginRateLimit(rateKey);
+    if (blockedForSeconds) {
+      const mins = Math.ceil(blockedForSeconds / 60);
+      return res.status(429).json({ error: `Too many failed attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.` });
+    }
+    const rows = await sql`SELECT * FROM users WHERE LOWER(username) = LOWER(${String(username)}) AND deleted_at IS NULL`;
+    if (!rows.length) { recordLoginFailure(rateKey); return res.status(401).json({ error: 'Invalid username or password.' }); }
+    const user = rows[0];
+    const ok = await bcrypt.compare(String(password), user.password || '');
+    if (!ok) { recordLoginFailure(rateKey); return res.status(401).json({ error: 'Invalid username or password.' }); }
+    // Checked only after the password is already confirmed correct, so this
+    // never gives anyone a way to learn an account's role without already
+    // knowing its password — at that point they could just switch tabs
+    // anyway. Treated as a successful login for rate-limiting purposes
+    // (it's a real account with the real password, just the wrong tab).
+    // A manual, vendor-triggered access cutoff for non-payment (see
+    // vendor-reporting.js's isAccessSuspended) — never automatic, and Admin
+    // always stays able to sign in so the school can see why and reach the
+    // vendor. Checked after the password so this never leaks anything to a
+    // wrong guess; a correct one still counts as a successful attempt.
+    if (user.role !== 'Admin') {
+      const access = isAccessSuspended();
+      if (access.suspended) {
+        recordLoginSuccess(rateKey);
+        return res.status(403).json({
+          error: access.reason
+            ? `Access is temporarily suspended: ${access.reason} Please contact your school office.`
+            : 'Access to this ERP has been temporarily suspended due to a pending payment. Please contact your school office.',
+          accessSuspended: true,
+        });
+      }
+    }
+    if (audience === 'staff' && !STAFF_LOGIN_ROLES.includes(user.role)) {
+      recordLoginSuccess(rateKey);
+      return res.status(403).json({ error: 'This is a Parent/Student account — switch to the "Parent & Student" tab to sign in.', wrongAudience: true });
+    }
+    if (audience === 'parent' && !PARENT_LOGIN_ROLES.includes(user.role)) {
+      recordLoginSuccess(rateKey);
+      return res.status(403).json({ error: 'This is a Staff account — switch to the "Staff" tab to sign in.', wrongAudience: true });
+    }
+    recordLoginSuccess(rateKey);
+    const shaped = simpleToAppShape(user, SIMPLE_RESOURCES.users.fields);
+    delete shaped.password;
+    // So the client can hide a nav item the school's Plan doesn't include —
+    // same idea as the ROLE_VIEWS shape it already gets, just billing-driven
+    // instead of role-driven. See checkPlanModuleAccess above for enforcement.
+    shaped.moduleAccess = getModuleAccess();
+    await createSession(req, res, user);
+    return res.status(200).json(shaped);
+  } catch (err) {
+    console.error('login error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.post('/api/logout', async (req, res) => {
+  try {
+    await destroySession(req, res);
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('logout error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// ---------- Self-service account (any signed-in user, own record only) ----------
+// 'users' is Admin-only for writes (see the resource === 'users' gate in the
+// generic handler), which is right for managing OTHER people's logins but
+// meant a Teacher/Accountant/etc. could never save their own photo, name or
+// password — the request was refused and the change silently stayed local.
+// These two endpoints let a signed-in user change only their OWN name, photo
+// and password: the target row always comes from the session, never from the
+// request body, so nobody can use them to touch another account or role.
+app.put('/api/account/profile', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.id === 'vendor-support') return res.status(403).json({ error: 'Not available for this session.' });
+    const name = String((req.body && req.body.name) || '').trim();
+    const photo = String((req.body && req.body.photo) || '');
+    if (!name) return res.status(400).json({ error: 'Enter your name.' });
+    if (name.length > 120) return res.status(400).json({ error: 'Name is too long.' });
+    if (photo && !/^data:image\/(png|jpe?g|webp|gif);base64,/i.test(photo)) return res.status(400).json({ error: 'Photo must be an image.' });
+    if (photo.length > 3 * 1024 * 1024) return res.status(400).json({ error: 'Photo is too large. Please choose a smaller image.' });
+    await sql`UPDATE users SET name = ${name}, photo = ${photo || null} WHERE id = ${req.authUser.id} AND deleted_at IS NULL`;
+    return res.status(200).json({ ok: true, name, photo });
+  } catch (err) {
+    console.error('account profile error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.post('/api/account/password', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.id === 'vendor-support') return res.status(403).json({ error: 'Not available for this session.' });
+    const current = String((req.body && req.body.current) || '');
+    const next = String((req.body && req.body.next) || '');
+    if (next.length < 4) return res.status(400).json({ error: 'New password must be at least 4 characters.' });
+    const rows = await sql`SELECT password FROM users WHERE id = ${req.authUser.id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(401).json({ error: 'Account no longer exists.' });
+    const ok = await bcrypt.compare(current, rows[0].password || '');
+    if (!ok) return res.status(400).json({ error: 'Current password is incorrect.' });
+    const hash = await bcrypt.hash(next, 10);
+    await sql`UPDATE users SET password = ${hash} WHERE id = ${req.authUser.id}`;
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('account password error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// Accepts a short-lived, signed troubleshooting link from the Vendor
+// Dashboard (Schools tab → Support Login) — see vendor-support-login.js's
+// own header comment and README.md's "Support Login" section. The token
+// itself is the only thing that authorizes this; there's no password
+// involved on either side. Named distinctly ("Vendor Support") in the
+// session/audit trail so it's never mistaken for a real staff login.
+app.get('/api/vendor-support-login', (req, res) => {
+  handleVendorSupportLogin(req.query.token, {
+    onValid: async (payload) => {
+      try {
+        await createSession(req, res, {
+          id: 'vendor-support',
+          role: 'Admin',
+          name: 'Vendor Support' + (payload && payload.adminName ? ` (${payload.adminName})` : ''),
+        });
+        res.redirect('/');
+      } catch (err) {
+        console.error('vendor support login error:', err);
+        res.status(500).send('Could not start the support session.');
+      }
+    },
+    onInvalid: (reason) => {
+      res.status(401).send('This support login link is invalid or has expired (' + reason + '). Ask your vendor to generate a new one.');
+    },
+  });
+});
+
+// Lets the vendor dashboard read this school's public admission enquiries
+// (submitted through this school's own website) without logging in as this
+// school's staff — authenticated by the same VENDOR_API_KEY env var
+// vendor-support-login.js and vendor-reporting.js already use, sent as a
+// plain header since this is a direct server-to-server call, not a link a
+// person clicks. Read-only: nothing here can create, edit, or delete an
+// enquiry, only list what's already been submitted.
+app.get('/api/vendor/admission-inquiries', async (req, res) => {
+  try {
+    const key = req.headers['x-vendor-api-key'];
+    if (!process.env.VENDOR_API_KEY || !key || key !== process.env.VENDOR_API_KEY) {
+      return res.status(401).json({ error: 'Invalid or missing vendor API key.' });
+    }
+    const rows = await sql`SELECT * FROM admission_inquiries FORCE INDEX (idx_admission_inquiries_created_at) ORDER BY created_at DESC LIMIT 500`;
+    return res.status(200).json(rows.map(r => ({
+      id: r.id,
+      parentName: r.parent_name,
+      parentEmail: r.parent_email,
+      parentPhone: r.parent_phone,
+      studentName: r.student_name,
+      applyingGrade: r.applying_grade,
+      notes: r.notes,
+      submittedDate: r.submitted_date,
+      status: r.status,
+      createdAt: r.created_at,
+    })));
+  } catch (err) {
+    console.error('vendor admission-inquiries error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// ---------- Hard wipe ("Reset School Data") ----------
+// A school that filled in demo/test data during onboarding and wants a
+// clean slate for real data entry — this is NOT the recycle-bin/purge
+// system above (that's for one record at a time, with a 60-day undo
+// window). This deletes every row of every table below, immediately,
+// with no recovery on this server afterward — the one-time JSON backup
+// this route hands back to the caller is the only copy that survives.
+//
+// What is deliberately NOT touched, so a school never has to redo
+// onboarding just because someone fat-fingered a few test students:
+// user accounts/logins (users), branding/settings (school_info,
+// attendance_settings, custom_roles, kv_store), the website's own photo
+// gallery (website_gallery), structural setup (subjects, exam_defs,
+// fee_structure, rooms, exam_room_config), running document/receipt/
+// certificate serial counters (doc_counters — left alone so a number is
+// never reused even across a wipe), the school's holiday calendar, push
+// notification subscriptions, active login sessions, and both audit
+// trails (audit_log, wipe_log — this row of which is written by this
+// very request, right after the wipe below).
+//
+// Only the vendor dashboard can call this — never a school's own Admin,
+// and there's no UI anywhere in this app that reaches it. Authenticated
+// the same way /api/vendor/admission-inquiries above is (the school's own
+// VENDOR_API_KEY, sent as a plain header for this direct server-to-server
+// call), PLUS this route independently re-checks the school's own name
+// against confirmSchoolName even though the dashboard already made the
+// vendor type it and re-enter their password before ever sending this
+// request — defense in depth for the most destructive thing this server
+// can do.
+const WIPE_TABLES = [
+  'exam_hall_tickets', 'exam_results', 'attendance_records', 'staff_attendance_records',
+  'biometric_punches', 'payments', 'student_discounts', 'student_extra_fees',
+  'certificates_issued', 'purge_log', 'deletion_requests', 'comms_messages',
+  'acct_income', 'acct_expenses', 'student_concerns', 'student_submissions',
+  'notification_events', 'admission_inquiries', 'staff_payroll', 'staff', 'students',
+];
+app.post('/api/vendor/wipe-data', async (req, res) => {
+  try {
+    const key = req.headers['x-vendor-api-key'];
+    if (!process.env.VENDOR_API_KEY || !key || key !== process.env.VENDOR_API_KEY) {
+      return res.status(401).json({ error: 'Invalid or missing vendor API key.' });
+    }
+    const { confirmSchoolName, vendorAdminName } = req.body || {};
+    const infoRows = await sql`SELECT data FROM school_info WHERE id = 1`;
+    const actualName = (infoRows[0] && infoRows[0].data && infoRows[0].data.name) || '';
+    if (!confirmSchoolName || String(confirmSchoolName).trim().toLowerCase() !== String(actualName).trim().toLowerCase()) {
+      return res.status(400).json({ error: "The school name didn't match what this server has on file — nothing was wiped." });
+    }
+    // Read everything first — this IS the backup. Built before a single
+    // DELETE runs, so even if the transaction below fails partway (it
+    // shouldn't — see the comment on sql.transaction), nothing is lost
+    // that wasn't already captured here.
+    const backup = { schoolName: actualName, wipedAt: new Date().toISOString(), tables: {} };
+    for (const table of WIPE_TABLES) {
+      backup.tables[table] = await sql.query(`SELECT * FROM ${table}`);
+    }
+    const counts = Object.fromEntries(WIPE_TABLES.map(t => [t, backup.tables[t].length]));
+    // sql.transaction runs every statement in one database transaction —
+    // if any single DELETE fails, ALL of them roll back, so this can only
+    // ever end in "nothing changed" or "everything on the list is gone",
+    // never a half-wiped school. The literal table names below must stay
+    // in sync with WIPE_TABLES above (a tagged template can't take a
+    // dynamic identifier the way sql.query above does).
+    await sql.transaction([
+      sql`DELETE FROM exam_hall_tickets`,
+      sql`DELETE FROM exam_results`,
+      sql`DELETE FROM attendance_records`,
+      sql`DELETE FROM staff_attendance_records`,
+      sql`DELETE FROM biometric_punches`,
+      sql`DELETE FROM payments`,
+      sql`DELETE FROM student_discounts`,
+      sql`DELETE FROM student_extra_fees`,
+      sql`DELETE FROM certificates_issued`,
+      sql`DELETE FROM purge_log`,
+      sql`DELETE FROM deletion_requests`,
+      sql`DELETE FROM comms_messages`,
+      sql`DELETE FROM acct_income`,
+      sql`DELETE FROM acct_expenses`,
+      sql`DELETE FROM student_concerns`,
+      sql`DELETE FROM student_submissions`,
+      sql`DELETE FROM notification_events`,
+      sql`DELETE FROM admission_inquiries`,
+      sql`DELETE FROM staff_payroll`,
+      sql`DELETE FROM staff`,
+      sql`DELETE FROM students`,
+    ]);
+    const wipeId = 'wipe_' + crypto.randomBytes(8).toString('hex');
+    await sql`
+      INSERT INTO wipe_log (id, vendor_admin_name, counts)
+      VALUES (${wipeId}, ${vendorAdminName ? String(vendorAdminName).trim().slice(0, 200) : null}, ${JSON.stringify(counts)}::jsonb)
+    `;
+    return res.status(200).json({ ok: true, wipeId, wipedAt: backup.wipedAt, counts, backup });
+  } catch (err) {
+    console.error('vendor wipe-data error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server — nothing was wiped (the transaction only commits if every step succeeds).' });
+  }
+});
+
+// GET /api/vendor/backup-snapshot — a read-only counterpart to the hard
+// wipe above: exactly the same tables (WIPE_TABLES), exactly the same
+// shape of response, but nothing is ever deleted here. The vendor
+// dashboard calls this once a day (see its own README-DEPLOY) to keep a
+// rolling automatic backup on file even for a school that never touches
+// the wipe button, plus whenever a vendor admin clicks "Back Up Now".
+// Authenticated the same way every other vendor-only route on this server
+// is — the school's own VENDOR_API_KEY, sent as a plain header for this
+// direct server-to-server call — and needs no extra confirmation the way
+// the wipe does, since reading data can't destroy anything.
+app.get('/api/vendor/backup-snapshot', async (req, res) => {
+  try {
+    const key = req.headers['x-vendor-api-key'];
+    if (!process.env.VENDOR_API_KEY || !key || key !== process.env.VENDOR_API_KEY) {
+      return res.status(401).json({ error: 'Invalid or missing vendor API key.' });
+    }
+    const infoRows = await sql`SELECT data FROM school_info WHERE id = 1`;
+    const actualName = (infoRows[0] && infoRows[0].data && infoRows[0].data.name) || '';
+    const snapshotAt = new Date().toISOString();
+    const tables = {};
+    for (const table of WIPE_TABLES) {
+      tables[table] = await sql.query(`SELECT * FROM ${table}`);
+    }
+    const counts = Object.fromEntries(WIPE_TABLES.map(t => [t, tables[t].length]));
+    return res.status(200).json({
+      ok: true,
+      schoolName: actualName,
+      snapshotAt,
+      counts,
+      backup: { schoolName: actualName, snapshotAt, tables },
+    });
+  } catch (err) {
+    console.error('vendor backup-snapshot error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server taking the backup snapshot.' });
+  }
+});
+
+// Lets a signed-in staff member send a message directly to the vendor from
+// inside the ERP (see the "Contact Vendor" screen) — it lands in the vendor
+// dashboard's Support tab against this school, so the vendor can see it and
+// reply. Uses the same VENDOR_DASHBOARD_URL / VENDOR_SCHOOL_ID /
+// VENDOR_API_KEY env vars the silent background reporting in
+// vendor-reporting.js already relies on, but unlike that module this is NOT
+// silent — whoever submits it needs to know whether it actually went
+// through, so errors are reported back rather than swallowed.
+app.post('/api/contact-vendor', async (req, res) => {
+  try {
+    const dashboardUrl = process.env.VENDOR_DASHBOARD_URL;
+    const schoolId = process.env.VENDOR_SCHOOL_ID;
+    const apiKey = process.env.VENDOR_API_KEY;
+    if (!dashboardUrl || !schoolId || !apiKey) {
+      return res.status(400).json({ error: 'Vendor contact is not configured on this ERP yet — ask your vendor to set VENDOR_DASHBOARD_URL, VENDOR_SCHOOL_ID, and VENDOR_API_KEY.' });
+    }
+    const { subject, message, priority, type } = req.body || {};
+    if (!subject || !String(subject).trim()) return res.status(400).json({ error: 'Subject is required.' });
+    if (!message || !String(message).trim()) return res.status(400).json({ error: 'Message is required.' });
+    const submittedBy = req.authUser ? `${req.authUser.name} (${req.authUser.role})` : 'ERP staff';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let upstream;
+    try {
+      upstream = await fetch(dashboardUrl.replace(/\/$/, '') + '/api/ingest/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          schoolId,
+          apiKey,
+          subject: String(subject).trim().slice(0, 300),
+          message: `From: ${submittedBy}\n\n${String(message).trim().slice(0, 3900)}`,
+          priority: ['low', 'normal', 'high'].includes(priority) ? priority : 'normal',
+          type: type === 'customization' ? 'customization' : 'support',
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => '');
+      let errMsg = 'The vendor dashboard rejected this message.';
+      try { const parsed = JSON.parse(text); if (parsed && parsed.error) errMsg = parsed.error; } catch {}
+      return res.status(502).json({ error: errMsg });
+    }
+    return res.status(201).json({ ok: true });
+  } catch (err) {
+    console.error('contact-vendor error:', err);
+    return res.status(502).json({ error: 'Could not reach the vendor dashboard — it may be offline. Please try again shortly.' });
+  }
+});
+
+// ---------- Student/Parent -> Staff: Concerns & Work Submissions ----------
+// Two small, related features, both reachable only from the Student/Parent
+// portal (myprofile view in index.html): sending a concern to the Class
+// Teacher / a Subject Teacher / Management, and submitting completed
+// homework or holiday work the same way. Both share the same "who is this
+// for" resolution (recipientType + recipientStaffId, decided client-side —
+// the client already has the exact same staffList/subjectsList lookups the
+// rest of the app uses for this, e.g. classTeacherClass and
+// subjectStaffForSection), the same student-identity rule (always the
+// caller's own linked student, never whatever a request body claims), and
+// the same staff-inbox shape (whatever's addressed to my own staff record,
+// plus anything addressed to Management if I'm Admin/Principal).
+function shapeConcern(r) {
+  return {
+    id: r.id, studentId: r.student_id, studentName: r.student_name,
+    className: r.class_name, section: r.section,
+    recipientType: r.recipient_type, recipientStaffId: r.recipient_staff_id,
+    recipientName: r.recipient_name, subjectName: r.subject_name,
+    message: r.message, status: r.status,
+    replyMessage: r.reply_message, repliedBy: r.replied_by, repliedAt: r.replied_at,
+    resolvedAt: r.resolved_at, resolvedBy: r.resolved_by,
+    createdAt: r.created_at,
+  };
+}
+function shapeSubmission(r) {
+  // Older rows (saved before multi-attachment support) carry their one file
+  // in `attachment`; newer rows carry `attachments` and leave `attachment`
+  // null. Either way the client always gets an `attachments` array to render.
+  const attachments = (r.attachments && r.attachments.length) ? r.attachments
+    : (r.attachment ? [{ name: 'Attachment', dataUrl: r.attachment }] : []);
+  return {
+    id: r.id, studentId: r.student_id, studentName: r.student_name,
+    className: r.class_name, section: r.section,
+    recipientType: r.recipient_type, recipientStaffId: r.recipient_staff_id,
+    recipientName: r.recipient_name, subjectName: r.subject_name,
+    homeworkId: r.homework_id, title: r.title, description: r.description, attachments,
+    status: r.status, feedback: r.feedback, marks: r.marks, reviewedBy: r.reviewed_by, reviewedAt: r.reviewed_at,
+    createdAt: r.created_at,
+  };
+}
+const CONCERN_RECIPIENT_TYPES = ['class_teacher', 'subject_teacher', 'management'];
+// A Teacher/Staff login has no direct column tying it to a staff record —
+// the same linkedUserId convention index.html already reads elsewhere
+// (see myStaffRecord in the Homework tab) is how "which staff member is
+// signed in right now" is worked out here too.
+async function getMyStaffRow(userId) {
+  const rows = await sql`SELECT id FROM staff WHERE JSON_UNQUOTE(JSON_EXTRACT(extra, '$.linkedUserId')) = ${userId} LIMIT 1`;
+  return rows.length ? rows[0] : null;
+}
+// ---------- Notice Board targeting ----------
+// A Notice Board / Communications message carries its own audience
+// (audienceScope + class/section/individual) and a toWebsite flag, so the
+// public website, each parent's portal and the staff only get what is
+// addressed to them. Older posts (before targeting existed) are still
+// understood: a board post with no audienceScope is read from its label.
+function noticeIsWebsite(m) {
+  if (!m || m.boardRemoved) return false;
+  if (m.toWebsite !== undefined) return !!m.toWebsite;
+  return Array.isArray(m.channels) && m.channels.includes('In-App') && !m.audienceScope;
+}
+function noticeForStudent(m, s) {
+  if (!m || m.boardRemoved || !s) return false;
+  const ch = Array.isArray(m.channels) ? m.channels : [];
+  if (!ch.includes('In-App')) return false;
+  const cls = s.class_name, sec = s.section;
+  let sc = m.audienceScope;
+  if (!sc) {
+    const l = String(m.audienceLabel || '');
+    if (/^all staff/i.test(l)) return false;
+    if (l.includes(' \u2014 Section ')) { const [c, x] = l.split(' \u2014 Section '); return c === cls && x === sec; }
+    if (/\(Whole Class\)$/.test(l)) return l.replace(/\s*\(Whole Class\)$/, '') === cls;
+    return true;
+  }
+  if (sc === 'allstudents' || sc === 'everyone') return true;
+  if (sc === 'class') return m.audienceClass === cls;
+  if (sc === 'section') return m.audienceClass === cls && m.audienceSection === sec;
+  if (sc === 'individual') return m.individualId === s.id;
+  return false; // staff / teachers / website-only / fee defaulters
+}
+// Posting a notice to the PUBLIC website needs more than Notice Board access:
+// Admin, Principal, or a role an admin explicitly granted "Publish to Public
+// Website" (noticeboard_website) in Roles & Permissions. Mirrors
+// canPublishToWebsite() in the client.
+async function canPublishToWebsite(role) {
+  if (role === 'Admin') return true;
+  const ov = await getRoleOverride(role);
+  if (ov && ov.noticeboard_website !== undefined) return !!ov.noticeboard_website.create;
+  return role === 'Principal';
+}
+async function handleCommsMessagesRead(req, res) {
+  const rows = await sql.query('SELECT * FROM comms_messages FORCE INDEX (idx_comms_messages_created_at) ORDER BY created_at ASC');
+  const all = rows.map(r => hybridToAppShape(r, HYBRID_RESOURCES['comms-messages'].core));
+  if (!req.authUser) {
+    // The public website: only notices explicitly marked for it, and only the
+    // fields it displays — never audiences, recipients or message internals.
+    return res.status(200).json(all.filter(noticeIsWebsite).map(m => ({
+      id: m.id, type: m.type, title: m.title, body: m.body, link: m.link || '',
+      sentDate: m.sentDate, sentBy: m.sentBy, audienceLabel: 'Public website', channels: ['In-App'],
+    })));
+  }
+  if (PARENT_LOGIN_ROLES.includes(req.authUser.role)) {
+    const student = await getLinkedStudent(req.authUser.id);
+    return res.status(200).json(student ? all.filter(m => noticeForStudent(m, student)) : []);
+  }
+  return res.status(200).json(all);
+}
+async function getLinkedStudent(userId) {
+  const userRows = await sql`SELECT linked_student_id FROM users WHERE id = ${userId}`;
+  const studentId = userRows.length ? userRows[0].linked_student_id : '';
+  if (!studentId) return null;
+  const studentRows = await sql`SELECT * FROM students WHERE id = ${studentId} AND deleted_at IS NULL`;
+  return studentRows.length ? studentRows[0] : null;
+}
+// ---------- Teacher self-service scoping: homeroom attendance & assigned-subject marks ----------
+// A Teacher login's module access (SERVER_ROLE_VIEWS.Teacher includes
+// 'attendance' and 'exams'/'result') was letting any teacher mark
+// attendance or enter exam marks for ANY class in the school, not just the
+// ones they actually teach — the module system only answers "can this
+// role touch this module at all," not "can this specific person touch
+// this specific class." These helpers resolve a signed-in Teacher's real
+// duties — the homeroom class they're the Class Teacher of (set on their
+// staff record, same classTeacherClass/classTeacherSection index.html
+// already reads) and the subject+section combinations they're the
+// assigned Subject Teacher for (subjects.section_staff, the same
+// assignment subjectStaffForSection() reads client-side) — so attendance
+// and marks can be scoped to just that, the same way getLinkedStudent
+// scopes a Parent/Student login to just their own child.
+async function getMyStaffFull(userId) {
+  const rows = await sql`SELECT * FROM staff WHERE JSON_UNQUOTE(JSON_EXTRACT(extra, '$.linkedUserId')) = ${userId} LIMIT 1`;
+  return rows.length ? rows[0] : null;
+}
+async function getTeacherScope(userId) {
+  const staff = await getMyStaffFull(userId);
+  if (!staff) return { staffId: null, classTeacherOf: null, subjectSections: [] };
+  const extra = staff.extra || {};
+  const classTeacherOf = (extra.classTeacherClass && extra.classTeacherSection)
+    ? { className: extra.classTeacherClass, section: extra.classTeacherSection }
+    : null;
+  const subjectRows = await sql`SELECT name, class_name, section_staff FROM subjects`;
+  const subjectSections = [];
+  for (const s of subjectRows) {
+    const sectionStaff = s.section_staff || {};
+    for (const [section, staffIds] of Object.entries(sectionStaff)) {
+      if (Array.isArray(staffIds) && staffIds.includes(staff.id)) {
+        subjectSections.push({ subject: s.name, className: s.class_name, section });
+      }
+    }
+  }
+  return { staffId: staff.id, classTeacherOf, subjectSections };
+}
+async function studentClassMap(studentIds) {
+  if (!studentIds.length) return {};
+  const placeholders = studentIds.map((_, i) => `$${i + 1}`).join(', ');
+  const rows = await sql.query(`SELECT id, class_name, section FROM students WHERE id IN (${placeholders})`, studentIds);
+  const map = {};
+  rows.forEach(r => { map[r.id] = { className: r.class_name, section: r.section }; });
+  return map;
+}
+function validateRecipient(b) {
+  const recipientType = CONCERN_RECIPIENT_TYPES.includes(b.recipientType) ? b.recipientType : null;
+  if (!recipientType) return 'Please choose who this is for.';
+  if (recipientType !== 'management' && !b.recipientStaffId) return 'Could not identify the teacher to send this to.';
+  return null;
+}
+
+app.post('/api/concerns', async (req, res) => {
+  try {
+    if (!req.authUser || !PARENT_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Only a Student/Parent login can send a concern.' });
+    }
+    const student = await getLinkedStudent(req.authUser.id);
+    if (!student) return res.status(400).json({ error: 'This login is not linked to a student record yet — ask your Admin.' });
+    const b = req.body || {};
+    const recipientError = validateRecipient(b);
+    if (recipientError) return res.status(400).json({ error: recipientError });
+    if (!b.message || !String(b.message).trim()) return res.status(400).json({ error: 'Please enter your message.' });
+    const id = 'concern_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
+    await sql`
+      INSERT INTO student_concerns (id, student_id, student_name, class_name, section, recipient_type, recipient_staff_id, recipient_name, subject_name, message)
+      VALUES (${id}, ${student.id}, ${(student.first_name + ' ' + (student.last_name || '')).trim()}, ${student.class_name}, ${student.section},
+              ${b.recipientType}, ${b.recipientType === 'management' ? null : b.recipientStaffId},
+              ${b.recipientName || (b.recipientType === 'management' ? 'Management' : '')},
+              ${b.recipientType === 'subject_teacher' ? (b.subjectName || '') : null},
+              ${String(b.message).trim().slice(0, 4000)})
+    `;
+    return res.status(201).json({ ok: true, id });
+  } catch (err) {
+    console.error('concerns create error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.get('/api/concerns/mine', async (req, res) => {
+  try {
+    if (!req.authUser || !PARENT_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not available for this account.' });
+    }
+    const student = await getLinkedStudent(req.authUser.id);
+    if (!student) return res.status(200).json([]);
+    const rows = await sql`SELECT * FROM student_concerns WHERE student_id = ${student.id} ORDER BY created_at DESC`;
+    return res.status(200).json(rows.map(shapeConcern));
+  } catch (err) {
+    console.error('concerns mine error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.get('/api/concerns/inbox', async (req, res) => {
+  try {
+    if (!req.authUser || !STAFF_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not available for this account.' });
+    }
+    // Roles & Permissions enforcement: a staff role whose Inbox module
+    // access has been explicitly restricted by the admin can no longer read
+    // this by calling the API directly, even though it's not one of the
+    // generic SIMPLE_RESOURCES/HYBRID_RESOURCES/kv routes above.
+    if (!(await checkModuleAccess(req, res, ['inbox']))) return;
+    const isManagement = MANAGEMENT_ROLES.includes(req.authUser.role);
+    // Admin/Principal get full oversight — every concern in the school,
+    // whoever it's addressed to — not just ones sent to Management, so a
+    // Class/Subject Teacher sitting on a parent's concern doesn't go
+    // unnoticed. Every other staff role still only sees what's addressed to
+    // their own staff record.
+    if (isManagement) {
+      const rows = await sql`SELECT * FROM student_concerns FORCE INDEX (idx_student_concerns_created_at) ORDER BY created_at ASC`;
+      return res.status(200).json(rows.map(shapeConcern));
+    }
+    const myStaff = await getMyStaffRow(req.authUser.id);
+    if (!myStaff) return res.status(200).json([]);
+    const rows = await sql`SELECT * FROM student_concerns WHERE recipient_staff_id = ${myStaff.id} ORDER BY created_at DESC`;
+    return res.status(200).json(rows.map(shapeConcern));
+  } catch (err) {
+    console.error('concerns inbox error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.put('/api/concerns/:id/reply', async (req, res) => {
+  try {
+    if (!req.authUser || !STAFF_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not available for this account.' });
+    }
+    if (!(await checkModuleAccess(req, res, ['inbox']))) return;
+    const rows = await sql`SELECT * FROM student_concerns WHERE id = ${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Concern not found.' });
+    const concern = rows[0];
+    const myStaff = await getMyStaffRow(req.authUser.id);
+    const isManagement = MANAGEMENT_ROLES.includes(req.authUser.role);
+    // Admin/Principal can act on any concern (same oversight reasoning as
+    // /api/concerns/inbox above) — not just ones addressed to Management.
+    const canReply = (myStaff && concern.recipient_staff_id === myStaff.id) || isManagement;
+    if (!canReply) return res.status(403).json({ error: 'This concern is not addressed to you.' });
+    const replyMessage = req.body && req.body.replyMessage;
+    if (!replyMessage || !String(replyMessage).trim()) return res.status(400).json({ error: 'Please enter a reply.' });
+    // Deliberately doesn't touch status/resolved_at — replying and marking a
+    // concern solved are two separate actions (see /api/concerns/:id/status
+    // below), since a reply doesn't always mean the matter is actually
+    // settled yet, and a concern can be resolved with no reply logged at all.
+    await sql`
+      UPDATE student_concerns SET reply_message = ${String(replyMessage).trim().slice(0, 4000)},
+        replied_by = ${req.authUser.name}, replied_at = now()
+      WHERE id = ${req.params.id}
+    `;
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('concerns reply error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// Marks a concern solved or reopens it — independent of replying (see
+// above). Reopening clears resolved_at/resolved_by rather than keeping them
+// as history, so what's shown always reflects the concern's current state.
+app.put('/api/concerns/:id/status', async (req, res) => {
+  try {
+    if (!req.authUser || !STAFF_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not available for this account.' });
+    }
+    if (!(await checkModuleAccess(req, res, ['inbox']))) return;
+    const rows = await sql`SELECT * FROM student_concerns WHERE id = ${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Concern not found.' });
+    const concern = rows[0];
+    const myStaff = await getMyStaffRow(req.authUser.id);
+    const isManagement = MANAGEMENT_ROLES.includes(req.authUser.role);
+    const canAct = (myStaff && concern.recipient_staff_id === myStaff.id) || isManagement;
+    if (!canAct) return res.status(403).json({ error: 'This concern is not addressed to you.' });
+    const resolved = !!(req.body && req.body.resolved);
+    if (resolved) {
+      await sql`UPDATE student_concerns SET status = 'resolved', resolved_at = now(), resolved_by = ${req.authUser.name} WHERE id = ${req.params.id}`;
+    } else {
+      await sql`UPDATE student_concerns SET status = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = ${req.params.id}`;
+    }
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('concerns status error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.post('/api/submissions', async (req, res) => {
+  try {
+    if (!req.authUser || !PARENT_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Only a Student/Parent login can submit work.' });
+    }
+    const student = await getLinkedStudent(req.authUser.id);
+    if (!student) return res.status(400).json({ error: 'This login is not linked to a student record yet — ask your Admin.' });
+    const b = req.body || {};
+    const recipientError = validateRecipient(b);
+    if (recipientError) return res.status(400).json({ error: recipientError });
+    if (!b.title || !String(b.title).trim()) return res.status(400).json({ error: 'Please enter a title.' });
+    // A submission can carry several files (see the ALTER TABLE above) — cap
+    // the count server-side too, not just in the UI, since this body still
+    // has to fit inside the app's global 25mb JSON limit either way.
+    const attachments = Array.isArray(b.attachments)
+      ? b.attachments.filter(a => a && a.dataUrl).slice(0, 5).map(a => ({ name: String(a.name || 'file').slice(0, 200), dataUrl: a.dataUrl }))
+      : [];
+    const id = 'submission_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
+    await sql`
+      INSERT INTO student_submissions (id, student_id, student_name, class_name, section, recipient_type, recipient_staff_id, recipient_name, subject_name, homework_id, title, description, attachments)
+      VALUES (${id}, ${student.id}, ${(student.first_name + ' ' + (student.last_name || '')).trim()}, ${student.class_name}, ${student.section},
+              ${b.recipientType}, ${b.recipientType === 'management' ? null : b.recipientStaffId},
+              ${b.recipientName || (b.recipientType === 'management' ? 'Management' : '')},
+              ${b.recipientType === 'subject_teacher' ? (b.subjectName || '') : null},
+              ${b.homeworkId || null}, ${String(b.title).trim().slice(0, 300)},
+              ${String(b.description || '').trim().slice(0, 4000)}, ${JSON.stringify(attachments)}::jsonb)
+    `;
+    return res.status(201).json({ ok: true, id });
+  } catch (err) {
+    console.error('submissions create error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.get('/api/submissions/mine', async (req, res) => {
+  try {
+    if (!req.authUser || !PARENT_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not available for this account.' });
+    }
+    const student = await getLinkedStudent(req.authUser.id);
+    if (!student) return res.status(200).json([]);
+    const rows = await sql`SELECT * FROM student_submissions WHERE student_id = ${student.id} ORDER BY created_at DESC`;
+    return res.status(200).json(rows.map(shapeSubmission));
+  } catch (err) {
+    console.error('submissions mine error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.get('/api/submissions/inbox', async (req, res) => {
+  try {
+    if (!req.authUser || !STAFF_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not available for this account.' });
+    }
+    if (!(await checkModuleAccess(req, res, ['inbox']))) return;
+    const isManagement = MANAGEMENT_ROLES.includes(req.authUser.role);
+    // Same oversight reasoning as /api/concerns/inbox — Admin/Principal see
+    // every submission, not just ones sent to Management, so a teacher
+    // ignoring submitted work doesn't go unnoticed.
+    if (isManagement) {
+      const rows = await sql`SELECT * FROM student_submissions FORCE INDEX (idx_student_submissions_created_at) ORDER BY created_at ASC`;
+      return res.status(200).json(rows.map(shapeSubmission));
+    }
+    const myStaff = await getMyStaffRow(req.authUser.id);
+    if (!myStaff) return res.status(200).json([]);
+    const rows = await sql`SELECT * FROM student_submissions WHERE recipient_staff_id = ${myStaff.id} ORDER BY created_at DESC`;
+    return res.status(200).json(rows.map(shapeSubmission));
+  } catch (err) {
+    console.error('submissions inbox error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+app.put('/api/submissions/:id/review', async (req, res) => {
+  try {
+    if (!req.authUser || !STAFF_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not available for this account.' });
+    }
+    if (!(await checkModuleAccess(req, res, ['inbox']))) return;
+    const rows = await sql`SELECT * FROM student_submissions WHERE id = ${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Submission not found.' });
+    const submission = rows[0];
+    const myStaff = await getMyStaffRow(req.authUser.id);
+    const isManagement = MANAGEMENT_ROLES.includes(req.authUser.role);
+    const canReview = (myStaff && submission.recipient_staff_id === myStaff.id) || isManagement;
+    if (!canReview) return res.status(403).json({ error: 'This submission is not addressed to you.' });
+    const feedback = req.body && req.body.feedback;
+    const marks = req.body && req.body.marks;
+    const status = (req.body && req.body.status === 'resubmit') ? 'resubmit' : 'reviewed';
+    await sql`
+      UPDATE student_submissions SET feedback = ${feedback ? String(feedback).trim().slice(0, 4000) : null},
+        marks = ${marks ? String(marks).trim().slice(0, 40) : null}, status = ${status},
+        reviewed_by = ${req.authUser.name}, reviewed_at = now()
+      WHERE id = ${req.params.id}
+    `;
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('submissions review error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+function shapeHomeworkItem(r) {
+  return {
+    id: r.id, className: r.class_name, section: r.section || '', subject: r.subject, title: r.title,
+    description: r.description || '', assignedDate: r.assigned_date || '', dueDate: r.due_date || '',
+    staffId: r.staff_id || '', attachments: r.attachments || [],
+    createdAt: r.created_at, updatedAt: r.updated_at,
+  };
+}
+// Custom handler (not the generic handleSimple()) so attachments — a JSON
+// array, same {name, dataUrl} convention as student_submissions — can be
+// written with an explicit ::jsonb cast, and so a create can fire the
+// notify-on-assign push below. GET is readable by everyone signed in
+// (Student/Parent included — see PARENT_SHARED_REFERENCE_RESOURCES); the
+// generic dispatcher's RESOURCE_TO_MODULE gate already restricts
+// POST/PUT/DELETE to a role with the 'syllabus' module before this runs.
+async function handleHomeworkItems(req, res) {
+  if (!req.authUser) return res.status(401).json({ error: 'Not signed in.' });
+  if (req.method === 'GET') {
+    const rows = await sql`SELECT * FROM homework_items FORCE INDEX (idx_homework_items_created_at) ORDER BY created_at ASC`;
+    return res.status(200).json(rows.map(shapeHomeworkItem));
+  }
+  if (req.method === 'POST' || req.method === 'PUT') {
+    const b = req.body || {};
+    if (!b.id) return res.status(400).json({ error: 'Missing id.' });
+    const attachments = Array.isArray(b.attachments)
+      ? b.attachments.filter(a => a && a.dataUrl).slice(0, 5).map(a => ({ name: String(a.name || 'file').slice(0, 200), dataUrl: a.dataUrl }))
+      : [];
+    if (req.method === 'POST') {
+      await sql`
+        INSERT INTO homework_items (id, class_name, section, subject, title, description, assigned_date, due_date, staff_id, attachments)
+        VALUES (${b.id}, ${b.className || ''}, ${b.section || ''}, ${b.subject || ''}, ${b.title || ''}, ${b.description || ''},
+                ${b.assignedDate || null}, ${b.dueDate || null}, ${b.staffId || null}, ${JSON.stringify(attachments)}::jsonb)
+      `;
+      notifyHomeworkAssigned({ className: b.className, section: b.section, subject: b.subject, title: b.title, dueDate: b.dueDate })
+        .catch(err => console.error('homework notification failed:', err));
+      return res.status(201).json({ ok: true });
+    }
+    await sql`
+      UPDATE homework_items SET class_name = ${b.className || ''}, section = ${b.section || ''}, subject = ${b.subject || ''},
+        title = ${b.title || ''}, description = ${b.description || ''}, assigned_date = ${b.assignedDate || null},
+        due_date = ${b.dueDate || null}, staff_id = ${b.staffId || null}, attachments = ${JSON.stringify(attachments)}::jsonb,
+        updated_at = now()
+      WHERE id = ${b.id}
+    `;
+    return res.status(200).json({ ok: true });
+  }
+  if (req.method === 'DELETE') {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'Missing id.' });
+    await sql`DELETE FROM homework_items WHERE id = ${id}`;
+    await sql`DELETE FROM student_submissions WHERE homework_id = ${id}`;
+    return res.status(200).json({ ok: true });
+  }
+  return res.status(405).json({ error: 'Method not allowed.' });
+}
+
+// Per-homework completion roster: every active student in that homework's
+// class(+section), cross-referenced against student_submissions for this
+// homework_id, so a teacher can see who's actually turned it in without
+// hunting through the whole Inbox. A student with more than one submission
+// for this homework (e.g. resubmitted after "Needs Resubmission") shows
+// their latest one.
+app.get('/api/homework-items/:id/roster', async (req, res) => {
+  try {
+    if (!req.authUser || !STAFF_LOGIN_ROLES.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'Not available for this account.' });
+    }
+    if (!(await checkModuleAccess(req, res, ['syllabus']))) return;
+    const hwRows = await sql`SELECT * FROM homework_items WHERE id = ${req.params.id}`;
+    if (!hwRows.length) return res.status(404).json({ error: 'Homework item not found.' });
+    const hw = hwRows[0];
+    const studentRows = hw.section
+      ? await sql`SELECT * FROM students WHERE class_name = ${hw.class_name} AND section = ${hw.section} AND deleted_at IS NULL AND (status IS NULL OR LOWER(status) = 'active')`
+      : await sql`SELECT * FROM students WHERE class_name = ${hw.class_name} AND deleted_at IS NULL AND (status IS NULL OR LOWER(status) = 'active')`;
+    const subRows = await sql`SELECT * FROM student_submissions WHERE homework_id = ${req.params.id} ORDER BY created_at ASC`;
+    const byStudent = {};
+    subRows.forEach(r => { byStudent[r.student_id] = shapeSubmission(r); }); // last write wins — oldest-first order means latest submission survives
+    const roster = studentRows.map(s => {
+      const sub = byStudent[s.id] || null;
+      return {
+        studentId: s.id, studentName: (s.first_name + ' ' + (s.last_name || '')).trim(), section: s.section,
+        status: sub ? sub.status : 'not_submitted', submittedAt: sub ? sub.createdAt : null,
+        marks: sub ? sub.marks : null, submissionId: sub ? sub.id : null,
+      };
+    });
+    return res.status(200).json({ homework: shapeHomeworkItem(hw), roster });
+  } catch (err) {
+    console.error('homework roster error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// Lets the page ask "am I still logged in, and as whom?" on load/refresh
+// instead of trusting a client-side flag — the auth middleware above has
+// already rejected this request with 401 if the session cookie is missing
+// or expired, so reaching this handler at all means req.authUser is valid.
+// Looked up fresh from `users` (not just the id/role/name cached on the
+// session row) so a role or name change since login shows up immediately
+// on the next page load, same shape /api/login returns.
+app.get('/api/me', async (req, res) => {
+  try {
+    // A Vendor Support session (see vendor-support-login.js) is never a row
+    // in `users` — it's a temporary, vendor-issued identity, not a school
+    // staff account. Answer it straight from the session instead of
+    // re-querying `users`, or every support-login would 401 right back out
+    // to the login screen the instant the page called this on load.
+    if (req.authUser.id === 'vendor-support') {
+      return res.status(200).json({ id: 'vendor-support', role: req.authUser.role, name: req.authUser.name });
+    }
+    const rows = await sql`SELECT * FROM users WHERE id = ${req.authUser.id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(401).json({ error: 'Account no longer exists.' });
+    const shaped = simpleToAppShape(rows[0], SIMPLE_RESOURCES.users.fields);
+    delete shaped.password;
+    shaped.moduleAccess = getModuleAccess();
+    return res.status(200).json(shaped);
+  } catch (err) {
+    console.error('me error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// ---------- Full data backup/export ----------
+// A single admin-triggered dump of every table in the database as plain
+// JSON, so there's a real, human-inspectable disaster-recovery copy that
+// doesn't depend on remembering to configure anything on Neon's side, and
+// that can be opened and read even by someone without database access.
+// Reads the table list from Postgres itself (information_schema) rather
+// than hardcoding the 24+ tables from ensureSchema — that means a table
+// added later (the audit log below, or anything after it) is picked up
+// automatically with no risk of someone updating the schema and forgetting
+// to update a separate hardcoded backup list. Table names here come from
+// Postgres's own catalog, not from any request input, so building the
+// SELECT with a template string is safe — there's no user-controlled value
+// anywhere in it.
+app.get('/api/backup', async (req, res) => {
+  try {
+    const tableRows = await sql`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+      ORDER BY table_name
+    `;
+    const backup = { generatedAt: new Date().toISOString(), tables: {} };
+    for (const row of tableRows) {
+      const name = row.table_name;
+      backup.tables[name] = await sql.query(`SELECT * FROM "${name}"`);
+    }
+    // Name the download after this school, not whichever school this shared
+    // template server was first written for — same slug logic as the
+    // frontend's slugifySchoolName().
+    let schoolSlug = 'school';
+    try {
+      const infoRows = await sql`SELECT data FROM school_info WHERE id = 1`;
+      const rawName = infoRows[0] && infoRows[0].data && infoRows[0].data.name;
+      const slug = String(rawName || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      if (slug) schoolSlug = slug;
+    } catch (e) { /* fall back to 'school' below */ }
+    const filename = `${schoolSlug}-erp-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).json(backup);
+  } catch (err) {
+    console.error('backup error:', err);
+    return res.status(500).json({ error: 'Could not generate backup.' });
+  }
+});
+
+// ---------- ONE-TIME: Neon -> GoDaddy MySQL data import ----------
+// Temporary, admin-only route to load the real setup/config data that
+// already existed in the old Neon-backed deployment (staff, users,
+// subjects, fee structure, custom roles, kv_store settings, school info,
+// exam defs, accounting/attendance/exam-room/holiday config, and the
+// audit/wipe/purge logs) into this app's fresh MySQL database, so this
+// GoDaddy app doesn't start from empty after everything already entered
+// there. Meant to run exactly once, then be deleted from this file.
+// Double-gated: requires an already-authenticated Admin session (same as
+// every other /api/* route) AND a one-time secret only known to whoever
+// triggers the import, since this both reads and destructively replaces
+// several tables. Row contents are never logged — only counts — so no
+// staff/student PII ends up in the platform's runtime logs.
+const NEON_IMPORT_TABLES = new Set([
+  'staff', 'users', 'subjects', 'fee_structure', 'custom_roles', 'kv_store',
+  'school_info', 'exam_defs', 'acct_expenses', 'attendance_settings',
+  'exam_room_config', 'holidays', 'wipe_log', 'purge_log', 'audit_log',
+]);
+const NEON_IMPORT_JSON_COLUMNS = new Set([
+  'extra', 'value', 'data', 'details', 'snapshot', 'counts',
+  'sections', 'section_staff', 'staff_ids', 'class_subjects',
+  'permissions', 'working_days', 'attachments',
+]);
+// Postgres's json_agg gives timestamps like "...T05:08:37.385815+00:00" (an
+// explicit numeric offset, not 'Z') — db.js's own coerceParam only matches
+// the 'Z'-suffixed form used elsewhere in this app, so this route needs its
+// own, more permissive conversion straight to MySQL's DATETIME text form.
+const NEON_IMPORT_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+function neonImportToMysqlDatetime(v) {
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return v;
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+         `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+app.post('/api/admin/neon-import', async (req, res) => {
+  if (!req.authUser || req.authUser.role !== 'Admin') {
+    return res.status(403).json({ error: 'Admin only.' });
+  }
+  if (!process.env.NEON_IMPORT_SECRET || req.headers['x-import-secret'] !== process.env.NEON_IMPORT_SECRET) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  const tables = (req.body && req.body.tables) || {};
+  const summary = [];
+  try {
+    for (const [table, rows] of Object.entries(tables)) {
+      if (!NEON_IMPORT_TABLES.has(table)) continue;
+      await sql.query(`DELETE FROM \`${table}\``, []);
+      let inserted = 0;
+      for (const row of rows) {
+        const cols = Object.keys(row);
+        const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+        const colList = cols.map(c => `\`${c}\``).join(', ');
+        const values = cols.map(c => {
+          let v = row[c];
+          if (typeof v === 'string' && NEON_IMPORT_DATETIME_RE.test(v)) return neonImportToMysqlDatetime(v);
+          if (NEON_IMPORT_JSON_COLUMNS.has(c) && v !== null && typeof v === 'object') return JSON.stringify(v);
+          if (typeof v === 'boolean') return v ? 1 : 0;
+          return v;
+        });
+        await sql.query(`INSERT INTO \`${table}\` (${colList}) VALUES (${placeholders})`, values);
+        inserted++;
+      }
+      summary.push({ table, inserted });
+    }
+    console.log('neon-import complete:', summary.map(s => `${s.table}=${s.inserted}`).join(', '));
+    return res.status(200).json({ ok: true, summary });
+  } catch (err) {
+    console.error('neon-import failed:', err.message, err.sqlMessage || '');
+    return res.status(500).json({ error: err.message, sqlMessage: err.sqlMessage || null, partial: summary });
+  }
+});
+
+// Read-only viewer for the audit log — newest first, capped at 500 rows per
+// call so this stays fast and bounded no matter how long the table gets
+// (the Admin-only UI reads this straight through, no further pagination
+// needed for a log meant for "what changed recently," not full history
+// mining).
+app.get('/api/audit-log', async (req, res) => {
+  try {
+    const rows = await sql`SELECT * FROM audit_log FORCE INDEX (idx_audit_log_created_at) ORDER BY created_at DESC LIMIT 500`;
+    return res.status(200).json(rows);
+  } catch (err) {
+    console.error('audit-log fetch error:', err);
+    return res.status(500).json({ error: 'Could not load the audit log.' });
+  }
+});
+
+// The one write this app accepts from a completely anonymous caller. Every
+// other POST/PUT in the app is reached only through the ERP's own UI, used
+// by staff who are (for now) trusted the moment they're on the login
+// screen — but this one is open to anyone who can reach the public school
+// website, logged in or not. A short server-side sanity check here, in
+// addition to the 20kb body-size cap above, means a bad actor can't stuff
+// oversized or missing-field junk straight into the admissions pipeline.
+const ADMISSION_INQUIRY_FIELD_LIMITS = {
+  studentName: 120, parentName: 120, parentEmail: 160, parentPhone: 40, applyingGrade: 40, notes: 2000,
+};
+function validateAdmissionInquiry(body) {
+  if (!body || typeof body !== 'object') return 'Invalid submission.';
+  // The id is meant to be an opaque token, and index.html's admin view
+  // later drops it, unescaped, inside an onclick="...('<id>')" attribute —
+  // so anything containing a quote, angle bracket, backtick or backslash is
+  // rejected here, since a legitimate auto-generated id never needs one.
+  // This is deliberately a blocklist of the dangerous characters rather
+  // than an allowlist of an assumed id format, since the public website
+  // that generates these ids is a separate project this session can't see
+  // the source of — a blocklist can't reject a legitimate historical id
+  // whose exact shape isn't known here, while an allowlist could.
+  if (!body.id || typeof body.id !== 'string' || body.id.length > 200 || /['"<>`\\]/.test(body.id)) {
+    return 'Missing or invalid id.';
+  }
+  if (!body.parentName || !body.studentName) return 'Parent name and student name are required.';
+  for (const [field, max] of Object.entries(ADMISSION_INQUIRY_FIELD_LIMITS)) {
+    const v = body[field];
+    if (v != null && String(v).length > max) return `${field} is too long.`;
+  }
+  return null;
+}
+
+// ---------- Main API route ----------
+// This one route replaces the old api/[resource].js dynamic file — same
+// logic, just reading the resource name from Express's route parameter
+// (req.params.resource) instead of Vercel's automatic req.query.resource.
+app.all('/api/:resource', async (req, res) => {
+  const { resource } = req.params;
+  // Log every write centrally, right here, instead of inside each of the
+  // individual handlers below (handleUsers, handleSimple, handleHybrid,
+  // handleSubjects, ...) — one place to get right instead of N, and any
+  // future resource added to this dispatcher is covered automatically.
+  // Logged from res.on('finish') so this reflects what actually happened:
+  // a validation error or a DB failure further down still ends the
+  // request with a 4xx/5xx and produces no log entry, same as if the
+  // write had never been attempted.
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
+    // req.authUser now comes from a verified session (see the auth
+    // middleware above) for every write except the public, unauthenticated
+    // admission-inquiries submission — trust that over the client-supplied
+    // x-actor-name/x-actor-role headers whenever it's present, since those
+    // headers are just whatever the browser said and were never actually
+    // checked against who was logged in.
+    const actorName = req.authUser ? req.authUser.name : (decodeHeaderValue(req.headers['x-actor-name']) || '(unknown)');
+    const actorRole = req.authUser ? req.authUser.role : (decodeHeaderValue(req.headers['x-actor-role']) || '');
+    const recordId = (req.body && req.body.id) || req.query.id || null;
+    // A soft-delete restore travels over the wire as a PUT (see handleUsers
+    // / handleHybrid below) but reads far more clearly in the audit trail
+    // under its own verb than lumped in with ordinary edits.
+    const auditMethod = (req.method === 'PUT' && req.query.restore === '1') ? 'RESTORE' : req.method;
+    res.on('finish', () => {
+      if (res.statusCode >= 400) return;
+      sql`INSERT INTO audit_log (actor_name, actor_role, method, resource, record_id)
+          VALUES (${actorName}, ${actorRole}, ${auditMethod}, ${resource}, ${recordId ? String(recordId) : null})`
+        .catch(err => console.error('audit log insert failed:', err));
+    });
+  }
+  try {
+    // CORS (above) only stops a BROWSER from calling this cross-origin —
+    // it does nothing against a direct request from curl, a script, or
+    // any other non-browser caller, and this app has no server-side auth
+    // yet (see the security review) that would otherwise close that gap.
+    // So this check runs for PUT too, not just the POST the public form
+    // itself is meant to send.
+    if (resource === 'admission-inquiries' && (req.method === 'POST' || req.method === 'PUT')) {
+      const validationError = validateAdmissionInquiry(req.body);
+      if (validationError) return res.status(400).json({ error: validationError });
+    }
+    // 'users' controls who can log in — hard-locked to the built-in Admin
+    // role, unconditionally, mirroring LOCKED_ADMIN_ONLY_PAGES on the client.
+    // No override, saved or otherwise, can ever widen this.
+    if (resource === 'users' && (!req.authUser || req.authUser.role !== 'Admin')) {
+      return res.status(403).json({ error: 'Admin access required.' });
+    }
+    // 'roles' (custom_roles — the saved Roles & Permissions overrides) is
+    // writable by Admin only, same as 'users' — but every logged-in role,
+    // not just Admin, needs to READ it: index.html's loadCustomRoles() /
+    // findRoleOverride() fetch this same list on every login to work out
+    // which sidebar links THEIR OWN role is actually allowed, so a non-Admin
+    // blocked from GET here silently fell back to the hardcoded default
+    // permission set for their role — making any customization an admin
+    // saved in Roles & Permissions invisible to that role's own login, no
+    // matter how many times they reloaded or which device they used. The
+    // response is just {id, name, permissions} per role (no user records,
+    // no credentials), so reading it carries none of the risk writing it
+    // would.
+    if (resource === 'roles' && req.method !== 'GET' && (!req.authUser || req.authUser.role !== 'Admin')) {
+      return res.status(403).json({ error: 'Admin access required.' });
+    }
+    // A Student/Parent self-service login has no reason to see the whole
+    // roster — and 'admissions' (below) is a staff module they'll never be
+    // granted — but the entire "My Portal" self-service view depends on
+    // fetching /api/students and finding its own linked record client-side
+    // (see myProfileStudent() in index.html). Without this carve-out, every
+    // Student/Parent login hit the 'admissions' check below, got a 403, and
+    // silently fell back to whatever this browser's own localStorage
+    // happened to have cached (empty on a fresh browser/device) — showing
+    // "No student linked to this login yet" even though the link is correct
+    // in the database. Scoped narrowly on purpose: only a GET, and only that
+    // login's own single linked record, never the full roster and never a
+    // write — everything else for 'students' still goes through the normal
+    // 'admissions' gate right below.
+    if (resource === 'comms-messages' && req.method === 'GET') return await handleCommsMessagesRead(req, res);
+    if (resource === 'comms-messages' && (req.method === 'POST' || req.method === 'PUT') && req.authUser && noticeIsWebsite(req.body || {}) && !(await canPublishToWebsite(req.authUser.role))) {
+      return res.status(403).json({ error: 'You do not have permission to publish notices to the public website.' });
+    }
+    if (resource === 'students' && req.method === 'GET' && req.authUser && PARENT_LOGIN_ROLES.includes(req.authUser.role)) {
+      const student = await getLinkedStudent(req.authUser.id);
+      return res.status(200).json(student ? [studentMediaLight(hybridToAppShape(student, HYBRID_RESOURCES.students.core))] : []);
+    }
+    // See PARENT_OWN_RECORD_RESOURCES above — the same self-service carve-out
+    // as 'students', for every other per-student table "My Portal" reads
+    // (Fees and Marks). Scoped by student_id so this never returns anyone
+    // else's payments, discounts, extra fees, exam results, or attendance.
+    if (req.method === 'GET' && req.authUser && PARENT_LOGIN_ROLES.includes(req.authUser.role) && PARENT_OWN_RECORD_RESOURCES[resource]) {
+      const student = await getLinkedStudent(req.authUser.id);
+      if (!student) return res.status(200).json([]);
+      const { table, fields } = PARENT_OWN_RECORD_RESOURCES[resource];
+      const rows = await sql.query(`SELECT * FROM ${table} WHERE student_id = $1 ORDER BY created_at ASC`, [student.id]);
+      return res.status(200).json(rows.map(r => simpleToAppShape(r, fields())));
+    }
+    // A Teacher's access to the student roster ('admissions') can be turned
+    // off entirely by an admin via Roles & Permissions — and when it is,
+    // that otherwise 403s /api/students outright for every Teacher login
+    // and leaves Attendance and Marks Entry with an empty roster for EVERY
+    // class, including their own, since both screens resolve "who's in
+    // this class" from this same endpoint. That 'admissions' toggle is
+    // about the full roster-management screen (add/edit/delete any
+    // student) — a Teacher still needs to see the students in the specific
+    // classes they're allotted to, same as they can already see those
+    // classes' attendance and marks. So regardless of how 'admissions' is
+    // set, a GET here for a Teacher login always returns just the students
+    // in their homeroom class and/or the class/sections of the subjects
+    // they're assigned to teach — see getTeacherScope above — never the
+    // rest of the school's roster, and never a write (adding/editing a
+    // student still goes through the normal 'admissions' permission).
+    if (resource === 'students' && req.method === 'GET' && req.authUser && req.authUser.role === 'Teacher') {
+      const scope = await getTeacherScope(req.authUser.id);
+      const pairs = [];
+      if (scope.classTeacherOf) pairs.push(scope.classTeacherOf);
+      scope.subjectSections.forEach(ss => {
+        if (!pairs.some(p => p.className === ss.className && p.section === ss.section)) {
+          pairs.push({ className: ss.className, section: ss.section });
+        }
+      });
+      if (!pairs.length) return res.status(200).json([]);
+      const rows = await sql`SELECT * FROM students WHERE deleted_at IS NULL`;
+      const filtered = rows.filter(r => pairs.some(p => p.className === r.class_name && p.section === r.section));
+      return res.status(200).json(filtered.map(r => studentMediaLight(hybridToAppShape(r, HYBRID_RESOURCES.students.core))));
+    }
+    // A Teacher login only ever gets to see or touch attendance for the one
+    // class they're the Class Teacher of, and exam marks for the
+    // subject+section combinations they're the assigned Subject Teacher
+    // for — see getTeacherScope above. Reads are scoped down to that (never
+    // a 403 — an empty result, same spirit as the Parent carve-outs above),
+    // writes are checked against the specific student/subject in the
+    // request and rejected outright if it falls outside their duties. This
+    // runs before the blanket 'attendance'/'exams'/'result' module check
+    // below because that check only knows the Teacher role can touch these
+    // modules at all, not which class/subject. Admin/Principal never hit
+    // this — MANAGEMENT_ROLES-only pages aside, checkModuleAccess already
+    // lets them through everything unconditionally.
+    if (req.authUser && req.authUser.role === 'Teacher' && (resource === 'attendance' || resource === 'exam-results')) {
+      const scope = await getTeacherScope(req.authUser.id);
+      if (resource === 'attendance') {
+        if (req.method === 'GET') {
+          if (!scope.classTeacherOf) return res.status(200).json([]);
+          const studentRows = await sql`SELECT id FROM students WHERE class_name = ${scope.classTeacherOf.className} AND section = ${scope.classTeacherOf.section}`;
+          const ids = studentRows.map(s => s.id);
+          if (!ids.length) return res.status(200).json([]);
+          const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
+          const rows = await sql.query(`SELECT * FROM attendance_records WHERE student_id IN (${placeholders}) ORDER BY created_at ASC`, ids);
+          return res.status(200).json(rows.map(r => simpleToAppShape(r, SIMPLE_RESOURCES.attendance.fields)));
+        }
+        if (['POST', 'PUT', 'DELETE'].includes(req.method)) {
+          let targetStudentId = (req.body || {}).studentId || null;
+          if (req.method === 'DELETE') {
+            const { id } = req.query;
+            const existing = id ? await sql`SELECT student_id FROM attendance_records WHERE id = ${id}` : [];
+            targetStudentId = existing.length ? existing[0].student_id : null;
+          }
+          const inScope = targetStudentId && scope.classTeacherOf &&
+            (await sql`SELECT 1 FROM students WHERE id = ${targetStudentId} AND class_name = ${scope.classTeacherOf.className} AND section = ${scope.classTeacherOf.section}`).length > 0;
+          if (!inScope) return res.status(403).json({ error: 'You can only manage attendance for your own homeroom class.' });
+        }
+      }
+      if (resource === 'exam-results') {
+        const isMySubjectSection = (subject, className, section) =>
+          scope.subjectSections.some(ss => ss.subject === subject && ss.className === className && ss.section === section);
+        if (req.method === 'GET') {
+          if (!scope.subjectSections.length) return res.status(200).json([]);
+          const allRows = await sql`SELECT * FROM exam_results FORCE INDEX (idx_exam_results_created_at) ORDER BY created_at ASC`;
+          const studentIds = [...new Set(allRows.map(r => r.student_id))];
+          const classMap = await studentClassMap(studentIds);
+          const filtered = allRows.filter(r => {
+            const cls = classMap[r.student_id];
+            return cls && isMySubjectSection(r.subject, cls.className, cls.section);
+          });
+          return res.status(200).json(filtered.map(r => simpleToAppShape(r, SIMPLE_RESOURCES['exam-results'].fields)));
+        }
+        if (['POST', 'PUT', 'DELETE'].includes(req.method)) {
+          let targetStudentId, targetSubject;
+          if (req.method === 'DELETE') {
+            const { id } = req.query;
+            const existing = id ? await sql`SELECT student_id, subject FROM exam_results WHERE id = ${id}` : [];
+            targetStudentId = existing.length ? existing[0].student_id : null;
+            targetSubject = existing.length ? existing[0].subject : null;
+          } else {
+            targetStudentId = (req.body || {}).studentId || null;
+            targetSubject = (req.body || {}).subject || null;
+          }
+          const cls = targetStudentId ? (await studentClassMap([targetStudentId]))[targetStudentId] : null;
+          const inScope = cls && targetSubject && isMySubjectSection(targetSubject, cls.className, cls.section);
+          if (!inScope) return res.status(403).json({ error: 'You can only enter marks for a class/subject you are assigned to teach.' });
+        }
+      }
+    }
+    // A Teacher login has no 'staff' module access — that's the Staff
+    // directory, a separate concern — but the class/subject-teacher duty
+    // scoping just above (and myTeacherScope() on the client) both need
+    // every staff record's linkedUserId/classTeacherClass/classTeacherSection
+    // just to work at all: resolving "which staff record is me" and,
+    // elsewhere in the app, "who is the Class Teacher of this student's
+    // section." Without this, a Teacher's own classTeacherClass lookup
+    // silently comes back empty and their homeroom class never appears —
+    // which is exactly the bug this carve-out fixes. It exposes only that
+    // narrow, non-sensitive scheduling subset for every OTHER staff
+    // member — never a colleague's phone, address, salary, or any other
+    // personal field that might live in their `extra` — while the caller's
+    // own record still comes back in full (their own data, nothing to
+    // protect it from).
+    if (req.method === 'GET' && resource === 'staff' && req.authUser && req.authUser.role === 'Teacher') {
+      const rows = await sql`SELECT * FROM staff FORCE INDEX (idx_staff_created_at) ORDER BY created_at ASC`;
+      return res.status(200).json(rows.map(r => {
+        const shapedCore = {};
+        HYBRID_RESOURCES.staff.core.forEach(f => { shapedCore[f.app] = r[f.col]; });
+        const extra = r.extra || {};
+        if (extra.linkedUserId === req.authUser.id) return staffMediaLight({ ...shapedCore, ...extra });
+        const safeExtra = {};
+        if (extra.classTeacherClass !== undefined) safeExtra.classTeacherClass = extra.classTeacherClass;
+        if (extra.classTeacherSection !== undefined) safeExtra.classTeacherSection = extra.classTeacherSection;
+        if (extra.linkedUserId !== undefined) safeExtra.linkedUserId = extra.linkedUserId;
+        return { ...shapedCore, ...safeExtra };
+      }));
+    }
+    // Roles & Permissions enforcement (see the block above HYBRID_RESOURCES):
+    // a resource mapped here 403s for a role that the admin has explicitly
+    // denied that module to; anything unmapped is unaffected. A
+    // Student/Parent login reading one of PARENT_SHARED_REFERENCE_RESOURCES
+    // (see above) skips this — there's nothing per-student to leak in a fee
+    // schedule, an exam's dates, or the subject list, and the self-service
+    // portal can't work correctly without being able to read them.
+    const parentSharedBypass = req.method === 'GET' && req.authUser && PARENT_LOGIN_ROLES.includes(req.authUser.role) && PARENT_SHARED_REFERENCE_RESOURCES.includes(resource);
+    if (RESOURCE_TO_MODULE[resource]) {
+      // Plan gating (see checkPlanModuleAccess above) applies regardless of
+      // role — including Admin and the parent/student shared-reference
+      // bypass — since it's about what the school paid for, not who's asking.
+      const planOk = await checkPlanModuleAccess(req, res, RESOURCE_TO_MODULE[resource]);
+      if (!planOk) return;
+    }
+    if (RESOURCE_TO_MODULE[resource] && !parentSharedBypass) {
+      const allowed = await checkModuleAccess(req, res, RESOURCE_TO_MODULE[resource]);
+      if (!allowed) return; // checkModuleAccess already sent the 403
+    }
+    // 'users' is also in SIMPLE_RESOURCES (its column/field list is reused
+    // by handleUsers above), but takes its own dedicated handler instead of
+    // the generic one because of the password rules described there.
+    if (resource === 'users') return await handleUsers(req, res);
+    if (resource === 'deletion-requests') return await handleDeletionRequests(req, res);
+    // Not listed in RESOURCE_TO_MODULE above — deliberately unrestricted by
+    // the 'staff' module permission (that permission is really "can manage
+    // HR/payroll records", which most Teacher/Staff logins won't have and
+    // shouldn't need just to apply for their own leave). The handler itself
+    // already scopes GET/POST to the caller's own linked staff record and
+    // gates PUT (approve/reject) to MANAGEMENT_ROLES, so no extra module
+    // gate is needed here.
+    if (resource === 'staff-leave-requests') return await handleStaffLeaveRequests(req, res);
+    if (resource === 'certificates') return await handleCertificates(req, res);
+    if (resource === 'homework-items') return await handleHomeworkItems(req, res);
+    // One-step bulk cleanup for the "Find Duplicate Students" view — see
+    // handleDeleteDuplicateStudents' own comment for why this exists
+    // alongside (never instead of) the 3-step deletion-request flow above.
+    // Checked before the generic HYBRID_RESOURCES dispatch below, since
+    // 'students' is also a hybrid resource and would otherwise route this
+    // POST into handleHybrid's normal create/update branch.
+    if (resource === 'students' && req.method === 'POST' && req.query.action === 'delete-duplicates') {
+      return await handleDeleteDuplicateStudents(req, res);
+    }
+    // Belt-and-braces alongside the client-side block in renderAttRoster:
+    // school policy is that attendance isn't taken on a holiday, so refuse a
+    // write here too rather than trusting every caller of this generic
+    // resource endpoint to have applied that rule client-side first.
+    if (resource === 'attendance' && (req.method === 'POST' || req.method === 'PUT')) {
+      const dateStr = req.body && req.body.date;
+      if (dateStr) {
+        const isHoliday = (await sql`SELECT 1 FROM holidays WHERE date = ${dateStr} LIMIT 1`).length > 0;
+        if (isHoliday) return res.status(400).json({ error: "Attendance isn't taken on a holiday." });
+      }
+    }
+    if (SIMPLE_RESOURCES[resource]) return await handleSimple(req, res, SIMPLE_RESOURCES[resource], resource);
+    if (HYBRID_RESOURCES[resource]) return await handleHybrid(req, res, HYBRID_RESOURCES[resource]);
+    if (resource === 'subjects') return await handleSubjects(req, res);
+    if (resource === 'exam-defs') return await handleExamDefs(req, res);
+    if (resource === 'roles') return await handleRoles(req, res);
+    if (resource === 'fee-structure') return await handleFeeStructure(req, res);
+    if (resource === 'attendance-settings') return await handleAttendanceSettings(req, res);
+    if (resource === 'school-info') return await handleSchoolInfo(req, res);
+    return res.status(404).json({ error: `Unknown resource: ${resource}` });
+  } catch (err) {
+    console.error(`${resource} API error:`, err);
+    reportVendorError(err, { route: req.path });
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+// A request body that's still too large (bigger than the 25mb limit above)
+// or isn't valid JSON reaches here as an error instead of a route handler.
+// Without this, Express's default error page is a raw HTML blob with a 413
+// or 400 status — the frontend's fetch calls now check response.ok (see
+// index.html), so they need a real JSON body to work with, and a person
+// checking the browser's Network tab gets an actual explanation instead of
+// a wall of HTML.
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'That upload is too large. Try a smaller photo or file.' });
+  }
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Malformed request.' });
+  }
+  if (err) {
+    console.error('Unhandled error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+  next();
+});
+
+// ---------- Serve the ERP itself ----------
+// Put your ERP's index.html (and any other static assets) in the "public"
+// folder next to this file — Express serves it directly, same origin as
+// the API, so the frontend's existing fetch('/api/...') calls just work.
+// The HTML shell must always revalidate with the server on every load —
+// every trace of this app's code lives inline in index.html, so a stale
+// cached copy of it means stale JS too, no matter how many times the page
+// itself gets refreshed. Everything ELSE (icons, manifest.json) can still
+// use the browser's normal caching — only index.html is forced to check
+// back, and ETag/Last-Modified still make that check a cheap 304 when
+// nothing actually changed, so this doesn't mean re-downloading the whole
+// file on every visit, just never trusting a copy without asking first.
+//
+// The no-cache header below is what the APP intends, but it only binds this
+// Node process — a hosting platform's own edge/CDN layer in front of it can
+// (and on GoDaddy's "airoapp" preview/live hosting, does) apply its OWN
+// default long-lived cache policy to recognizable static file types like
+// .js, overriding whatever Cache-Control this server sends. That's exactly
+// what made the Oct 2026 "Extra Fees Collected" deploy invisible on a
+// browser that had already loaded the ERP before: the server was correctly
+// serving the new module file, but the edge cache kept handing out a
+// month-old copy under the SAME url regardless.
+//
+// The fix that survives an edge cache we don't control: never ask the same
+// URL to change its meaning. APP_BUILD is a fresh value every time this
+// process starts (i.e. every deploy/restart), and every module <script src>
+// in index.html gets "?v=<APP_BUILD>" appended when the shell is served.
+// index.html itself is never cached (see above), so every visitor's next
+// page load immediately asks for the NEW versioned urls — a request no
+// cache (browser or CDN) has ever seen before, so it can only be answered
+// by hitting this server fresh. The old, unversioned-request cache entries
+// are simply never asked for again; they age out on their own instead of
+// needing to be invalidated.
+const APP_BUILD = String(Date.now());
+const INDEX_HTML_PATH = path.join(__dirname, 'public', 'index.html');
+function renderIndexHtml(){
+  const raw = fs.readFileSync(INDEX_HTML_PATH, 'utf8');
+  return raw.replace(/(<script src="modules\/[^"]+\.js)(")/g, `$1?v=${APP_BUILD}$2`);
+}
+// gzip for the big static files. The ~2 MB of module JavaScript and the 370 KB
+// shell page were going out uncompressed, which is most of the wait on a slow
+// connection when the ERP first opens (and again after every publish). Built-in
+// zlib only (no new dependency), compressed once per file version and cached.
+const _gzCache = new Map();
+function acceptsGzip(req){ return /\bgzip\b/.test(String(req.headers['accept-encoding'] || '')); }
+function sendGzipped(req, res, key, version, contentType, getBuffer){
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.setHeader('Vary', 'Accept-Encoding');
+  res.type(contentType);
+  let hit = _gzCache.get(key);
+  if (!hit || hit.version !== version) {
+    const raw = getBuffer();
+    hit = { version, raw, gz: zlib.gzipSync(raw, { level: 6 }), etag: '"' + crypto.createHash('sha1').update(raw).digest('hex').slice(0, 20) + '"' };
+    _gzCache.set(key, hit);
+  }
+  res.setHeader('ETag', hit.etag);
+  if (req.headers['if-none-match'] === hit.etag) return res.status(304).end();
+  if (acceptsGzip(req)) { res.setHeader('Content-Encoding', 'gzip'); return res.end(hit.gz); }
+  return res.end(hit.raw);
+}
+function sendIndexHtml(res, req){
+  if (req) return sendGzipped(req, res, 'index.html', APP_BUILD, 'html', () => Buffer.from(renderIndexHtml(), 'utf8'));
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.type('html').send(renderIndexHtml());
+}
+// Module scripts: served here (before express.static) so they can be gzipped.
+app.get(/^\/modules\/([A-Za-z0-9._-]+\.js)$/, (req, res, next) => {
+  const file = path.join(__dirname, 'public', 'modules', req.params[0]);
+  let st;
+  try { st = fs.statSync(file); } catch (e) { return next(); }
+  if (!st.isFile()) return next();
+  return sendGzipped(req, res, file, st.mtimeMs + ':' + st.size, 'application/javascript', () => fs.readFileSync(file));
+});
+app.use(express.static(path.join(__dirname, 'public'), {
+  // 'allow' (not the Express default 'ignore') so /.well-known/assetlinks.json
+  // is actually servable — that file is how the Android app (a Trusted Web
+  // Activity) proves it's allowed to open this site without a browser URL bar.
+  dotfiles: 'allow',
+  // index.html is served through sendIndexHtml() below instead (it needs
+  // the module urls rewritten with the cache-busting query string above),
+  // so the static middleware must never hand out the raw, unrewritten file
+  // for '/' or an explicit '/index.html' request.
+  index: false,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('index.html')) {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+    // The app's JS used to be entirely inline inside index.html, so the
+    // no-cache rule above was enough to guarantee every fix reached every
+    // browser on the next load. Now that the same code is split into
+    // public/modules/*.js (loaded via <script src>), those files need the
+    // SAME no-cache treatment — otherwise a browser (or an intermediate
+    // cache/CDN) could keep serving an old, already-fixed-elsewhere module
+    // file indefinitely, which would look exactly like the "stale tab"
+    // confusion we've hit before, just caused by HTTP caching instead of an
+    // open tab. ETag/Last-Modified still make the revalidation a cheap 304
+    // when nothing changed, so this doesn't mean re-downloading on every
+    // visit — just never trusting a cached copy without asking first.
+    // Belt-and-braces alongside the cache-busted "?v=" query string above:
+    // that handles a CDN that ignores this header for .js files, this
+    // handles any path that fetches a module file WITHOUT the query string
+    // (e.g. a stale already-open tab re-requesting its own old <script src>).
+    if (filePath.includes(path.join('public', 'modules') + path.sep) && filePath.endsWith('.js')) {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+  },
+}));
+app.get(['/', '/index.html'], (req, res) => {
+  sendIndexHtml(res, req);
+});
+app.get(/.*/, (req, res) => {
+  sendIndexHtml(res, req);
+});
+
+const PORT = process.env.PORT || 3000;
+// Diagnostic logging around the bind itself: on GoDaddy's platform, three
+// separate deploy/restart attempts each ran this whole file successfully
+// end to end (database schema created, admin seeded, "Database
+// initialization complete." logged) — yet "Server running on port ..."
+// below never appeared in the platform's own runtime logs, and the
+// platform kept reporting the app as unhealthy/not ready. That's
+// unexplained by anything in this file: locally, the exact same code binds
+// and starts answering requests within ~3 seconds, well before the
+// database step even finishes. The two lines bracketing the call below,
+// plus the explicit 'error' handler (a failed bind — EADDRINUSE, EACCES,
+// a bad PORT value — otherwise surfaces as an unhandled 'error' event, not
+// necessarily a clearly-logged one), are here to pin down, on the next
+// deploy, whether this line is even reached, and if so, whether the bind
+// itself is failing with a specific OS error instead of silently hanging.
+console.log(`Binding to port ${PORT} (process.env.PORT was ${JSON.stringify(process.env.PORT)})...`);
+const httpServer = app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+// ---- Demo install only (DEMO_MODE=true): load the sample school if the database is empty,
+// and reload it every night at 02:00 IST so the demo never drifts. Does nothing on a real school.
+if (DEMO_MODE) {
+  let seeding = false, lastNightly = '';
+  const runDemoSeed = () => {
+    if (seeding) return; seeding = true;
+    import('node:child_process').then(({ spawn }) => {
+      const p = spawn(process.execPath, ['demo/seed-demo.mjs', `--base=http://127.0.0.1:${PORT}`], { stdio: 'inherit', env: process.env });
+      p.on('exit', code => { seeding = false; console.log('Demo seed finished with code', code); });
+    }).catch(e => { seeding = false; console.error('Demo seed failed to start:', e); });
+  };
+  setTimeout(async () => {
+    try {
+      const r = await sql`SELECT COUNT(*) AS n FROM students`;
+      if (Number(r[0].n) === 0) { console.log('Demo mode: database is empty, loading sample school…'); runDemoSeed(); }
+    } catch (e) { console.error('Demo mode check failed:', e.message); }
+  }, 90 * 1000);
+  setInterval(() => {
+    const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+    const day = ist.toISOString().slice(0, 10);
+    if (ist.getUTCHours() === 2 && ist.getUTCMinutes() < 10 && lastNightly !== day) { lastNightly = day; runDemoSeed(); }
+  }, 5 * 60 * 1000);
+}
+httpServer.on('error', (err) => {
+  console.error(`HTTP server failed to bind to port ${PORT}:`, err);
+});
