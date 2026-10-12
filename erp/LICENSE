@@ -1,0 +1,81 @@
+Copyright (c) 2026 SVM EdTech. All rights reserved.
+
+PROPRIETARY SOFTWARE - NOT OPEN SOURCE - CONFIDENTIAL
+
+This software, including its source code, object code, database design and schema,
+user interface, workflows, documentation, templates, sample data and all updates
+(together, the "Software"), is the confidential property and trade secret of
+SVM EdTech ("SVM"). The Software is protected by copyright law, by trade-secret
+law and by this licence.
+
+1. NO LICENCE EXCEPT IN WRITING
+   No right or licence is granted to anyone except by a separate written agreement
+   signed by SVM. Access to the Software in any form (a demo, a trial, a login, a
+   copy of a file, a repository invitation) is not a licence and does not transfer
+   any ownership.
+
+2. WHAT A SCHOOL GETS
+   A school that has signed a written service agreement with SVM receives only a
+   limited, non-exclusive, non-transferable, revocable right to USE the Software as
+   a hosted service operated by or for SVM, for that school's own internal
+   operations, for the term and plan agreed in writing. A school does not receive
+   the source code, does not own any copy of the Software, and may not host, copy
+   or move the Software elsewhere. The school keeps ownership of its own data.
+
+3. RESTRICTIONS
+   Without SVM's prior written permission you may NOT, and may not allow anyone else to:
+   (a) copy, reproduce, download, mirror, scrape, archive or store the Software or any part of it;
+   (b) modify, adapt, translate, or create derivative works or look-alike products from it;
+   (c) distribute, sublicense, sell, rent, lease, lend, publish or otherwise make the
+       Software or any part of it available to any third party, including by posting
+       it to a public or shared repository, paste site or file-sharing service;
+   (d) reverse engineer, decompile, disassemble or attempt to derive the source code,
+       database design or business logic, except where applicable law expressly
+       allows it despite this restriction;
+   (e) remove, hide or alter any copyright, licence or proprietary notice;
+   (f) use the Software, its screens, its data model, its documentation or its
+       outputs to build, train, improve or market a competing or substantially
+       similar product or service, including by feeding them to any AI or machine
+       learning system for that purpose;
+   (g) bypass, disable or interfere with any access control, suspension, usage
+       reporting, licensing or security feature;
+   (h) use the Software for any unlawful purpose.
+
+4. CONFIDENTIALITY
+   Anyone who receives access to any part of the Software must keep it confidential,
+   use it only as permitted in writing, and protect it with at least the care they
+   give their own confidential information. This duty continues after access ends.
+
+5. SUSPENSION AND TERMINATION
+   SVM may suspend or end access at any time for non-payment, breach of this licence
+   or of the service agreement, misuse, or security risk. The Software reports its
+   operating status to SVM so that suspension and support can work; by using it you
+   accept this. On termination all rights end and all copies in your possession or
+   control must be deleted, and you must confirm this in writing when asked.
+
+6. OWNERSHIP
+   SVM and its licensors own all rights, title and interest in the Software and in
+   any suggestions, feedback or improvements relating to it. Nothing here transfers
+   any of those rights.
+
+7. DEMONSTRATION AND EVALUATION ACCESS
+   Any demonstration or evaluation access is provided "AS IS" solely so the Software
+   can be evaluated, contains only sample data, and may be withdrawn at any time.
+
+8. NO WARRANTY; LIMIT OF LIABILITY
+   The Software is provided "AS IS" without warranty of any kind. To the maximum
+   extent permitted by law, SVM is not liable for indirect or consequential loss, or
+   for loss of data, profit or goodwill, and its total liability for any claim is
+   limited to the fees actually paid for the service in the 3 months before the claim.
+
+9. REMEDIES
+   Breach of sections 3 or 4 may cause harm that money cannot fully repair. SVM may
+   therefore seek an injunction and other urgent relief in addition to damages, and
+   may pursue every remedy available under copyright, trade-secret, contract and
+   information-technology law.
+
+10. LAW AND COURTS
+   This licence is governed by the laws of India. The courts at the place where
+   SVM EdTech has its registered office have exclusive jurisdiction.
+
+For licensing enquiries contact SVM EdTech.
