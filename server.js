@@ -75,6 +75,7 @@ const WEBSITE_CORS_RULES = {
   '/api/comms-messages': 'GET, OPTIONS',
   '/api/website-gallery': 'GET, OPTIONS',
   '/api/school-info': 'GET, OPTIONS',
+  '/api/website-extras': 'GET, OPTIONS',
 };
 // WEBSITE_ORIGIN may list several origins separated by commas, and the bare
 // and "www." forms of each are always treated as the same site, so a visitor
@@ -1008,6 +1009,7 @@ const PUBLIC_API_ROUTES = [
   { path: '/api/comms-messages', methods: ['GET'] },
   { path: '/api/website-gallery', methods: ['GET'] },
   { path: '/api/school-info', methods: ['GET'] },
+  { path: '/api/website-extras', methods: ['GET'] },
   // Called by the on-site biometric bridge (a machine, not a logged-in
   // person) — authenticated by its own BIOMETRIC_API_KEY header check
   // inside the route, same pattern as /api/vendor/admission-inquiries above.
@@ -1122,6 +1124,36 @@ app.all('/api/kv/:key', async (req, res) => {
   }
 });
 
+
+// ---------- Public website extras (read-only, no login) ----------
+// Everything the public site shows beyond notices/gallery/leadership: alumni, achievements, safety
+// points, vehicles + tracking links, admission copy. Authored in the ERP (Website Gallery > Website
+// Content, stored under kv key 'website-extras'). Only items marked visible are sent, and the
+// teacher:student ratio is computed from counts only — no names or per-student data ever leave here.
+app.get('/api/website-extras', async (req, res) => {
+  try {
+    const rows = await sql`SELECT value FROM kv_store WHERE \`key\` = 'website-extras'`;
+    const x = (rows.length && rows[0].value) || {};
+    const vis = a => (Array.isArray(a) ? a : []).filter(i => i && i.show !== false);
+    const out = {
+      alumni: vis(x.alumni), achievements: vis(x.achievements), safety: vis(x.safety),
+      downloads: vis(x.downloads).filter(d => /^https?:\/\//i.test(d.url || '')).map(d => ({ id: d.id, title: d.title, url: d.url })),
+      transport: x.transport || {}, recognition: { board: (x.recognition || {}).board, medium: (x.recognition || {}).medium, recognition: (x.recognition || {}).recognition, timings: (x.recognition || {}).timings }, admission: x.admission || {}, results: x.results || {}, visible: x.visible || {}, academics: x.academics || {}, ratio: x.ratio || {}
+    };
+    let students = 0, teachers = 0;
+    try {
+      students = Number((await sql`SELECT COUNT(*) AS c FROM students WHERE deleted_at IS NULL AND (status IS NULL OR status = '' OR status = 'Active')`)[0].c) || 0;
+      teachers = Number((await sql`SELECT COUNT(*) AS c FROM staff WHERE (status IS NULL OR status = '' OR status = 'Active') AND LOWER(COALESCE(designation, '')) LIKE '%teach%'`)[0].c) || 0;
+    } catch (e) {}
+    out.counts = { students, teachers };
+    res.set('Cache-Control', 'public, max-age=60');
+    return res.status(200).json(out);
+  } catch (err) {
+    console.error('website-extras error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
 // ---------- Voucher register tables ----------
 // doc_number_log: who asked for each voucher/receipt number, and when — so an Admin looking at a gap
 // (e.g. PV/26-27/000118 never saved) can see whose screen it was issued to. Best-effort: never blocks issuing.
@@ -1164,26 +1196,90 @@ const DOC_SERIES_PREFIX = {
   payment_voucher: 'PV',  // Payment Voucher — money going out
   journal_voucher: 'JV',  // Journal Voucher — Accounting > Journal Vouchers (the screen already asks for this series)
 };
+// A number that was issued but never got a voucher (network dropped between "number issued" and "voucher saved")
+// is handed out AGAIN instead of being lost:
+//   1. Same attempt retried (the browser sends the same draftKey) -> the same number comes back.
+//   2. Otherwise the lowest unused number from earlier in the year is given before a new one is opened.
+// A number is only treated as unused after DOC_ORPHAN_GRACE_MIN minutes (so a slow save in progress is never
+// stolen) and never when the Admin has already written a reason for it in the Voucher Register.
+const DOC_ORPHAN_GRACE_MIN = Math.max(0, Number(process.env.DOC_ORPHAN_GRACE_MIN ?? 10) || 0);
+var _draftTableReady = null;
+function ensureDraftKeyTable() {
+  if (!_draftTableReady) {
+    _draftTableReady = sql`CREATE TABLE IF NOT EXISTS doc_draft_keys (
+      series VARCHAR(40) NOT NULL, draft_key VARCHAR(64) NOT NULL, period VARCHAR(40) NOT NULL, seq INT NOT NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (series, draft_key)
+    )`.catch(err => { _draftTableReady = null; throw err; });
+  }
+  return _draftTableReady;
+}
+async function savedSeqSet(src, period) {
+  const rows = await sql.query(`SELECT DISTINCT ${src.col} AS no FROM ${src.table} WHERE ${src.col} LIKE $1`, [`${src.prefix}/${period}/%`]);
+  const tail = new RegExp('^' + src.prefix + '/' + period + '/(\\d+)$');
+  const set = new Set();
+  rows.forEach(r => { const m = tail.exec(String(r.no || '')); if (m) set.add(parseInt(m[1], 10)); });
+  return set;
+}
 app.post('/api/next-doc-number', async (req, res) => {
   try {
     const series = req.body && req.body.series;
     const prefix = DOC_SERIES_PREFIX[series];
     if (!prefix) return res.status(400).json({ error: 'Unknown numbering series: ' + series });
     const period = currentFinancialYear();
-    // Single atomic statement: locks the (series, period) row for the
-    // duration of this update (via nextDocSeq's LAST_INSERT_ID idiom — see
-    // db.js), so two requests arriving at the same instant are still
-    // serialized into 1 and 2, never both getting the same number — this is
-    // the guarantee kv_store's whole-blob PUT couldn't give.
-    const seq = await nextDocSeq(series, period);
-    const docNumber = `${prefix}/${period}/${String(seq).padStart(6, '0')}`;
+    const src = REGISTER_SERIES[series];   // journal vouchers have no register table: they keep plain numbering
+    const rawKey = req.body && req.body.draftKey;
+    const draftKey = src && typeof rawKey === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(rawKey) ? rawKey : null;
+    const by = (req.authUser && req.authUser.name) || '', role = (req.authUser && req.authUser.role) || '';
+    const fmt = n => `${prefix}/${period}/${String(n).padStart(6, '0')}`;
+    const result = await withKeyLock('docno:' + series, async () => {
+      let seq = 0, reused = false;
+      let saved = null;
+      if (src) {
+        await ensureRegisterTables();
+        await ensureDraftKeyTable();
+        saved = await savedSeqSet(src, period);
+        // 1. Same attempt asking again (retry, lost reply, page reloaded): give back the number it already has.
+        if (draftKey) {
+          const k = await sql.query('SELECT period, seq FROM doc_draft_keys WHERE series = $1 AND draft_key = $2', [series, draftKey]);
+          if (k.length && k[0].period === period && !saved.has(Number(k[0].seq))) { seq = Number(k[0].seq); reused = true; }
+        }
+        // 2. Hand out the lowest unused number from earlier in the year before opening a new one.
+        if (!seq) {
+          const c = await sql.query('SELECT next_seq FROM doc_counters WHERE series = $1 AND period = $2', [series, period]);
+          const top = c.length ? Number(c[0].next_seq) || 0 : 0;
+          if (top > 0) {
+            const notes = new Set((await sql.query('SELECT seq FROM doc_gap_notes WHERE series = $1 AND period = $2', [series, period])).map(r => Number(r.seq)));
+            const recent = new Set((await sql.query(
+              `SELECT seq FROM doc_number_log WHERE series = $1 AND period = $2 AND issued_at > (NOW() - INTERVAL ${DOC_ORPHAN_GRACE_MIN} MINUTE)`, [series, period])).map(r => Number(r.seq)));
+            (await sql.query(
+              `SELECT seq FROM doc_draft_keys WHERE series = $1 AND period = $2 AND updated_at > (NOW() - INTERVAL ${DOC_ORPHAN_GRACE_MIN} MINUTE)`, [series, period])).forEach(r => recent.add(Number(r.seq)));
+            for (let n = 1; n <= top; n++) {
+              if (saved.has(n) || notes.has(n) || recent.has(n)) continue;
+              seq = n; reused = true; break;
+            }
+          }
+        }
+      }
+      if (!seq) seq = await nextDocSeq(series, period);
+      if (src && draftKey) {
+        // Another attempt may still point at this number: it must not get it back as well.
+        await sql.query('DELETE FROM doc_draft_keys WHERE series = $1 AND period = $2 AND seq = $3 AND draft_key <> $4', [series, period, seq, draftKey]);
+        await sql.query(
+          `INSERT INTO doc_draft_keys (series, draft_key, period, seq) VALUES ($1, $2, $3, $4)
+           ON DUPLICATE KEY UPDATE period = VALUES(period), seq = VALUES(seq), updated_at = CURRENT_TIMESTAMP`,
+          [series, draftKey, period, seq]);
+      }
+      return { seq, reused };
+    });
+    const docNumber = fmt(result.seq);
     // Remember who this number went to (best-effort — see doc_number_log).
     try {
       await ensureRegisterTables();
       await sql.query('INSERT INTO doc_number_log (series, period, seq, doc_number, issued_by, issued_role) VALUES ($1, $2, $3, $4, $5, $6)',
-        [series, period, seq, docNumber, (req.authUser && req.authUser.name) || '', (req.authUser && req.authUser.role) || '']);
+        [series, period, result.seq, docNumber, by, role]);
     } catch (logErr) { console.error('doc_number_log write failed (number still issued):', logErr.message); }
-    return res.status(200).json({ docNumber });
+    return res.status(200).json({ docNumber, reused: result.reused });
   } catch (err) {
     console.error('next-doc-number error:', err);
     return res.status(500).json({ error: 'Could not issue a document number.' });
@@ -1315,25 +1411,82 @@ app.post('/api/receipt-numbers', async (req, res) => {
     if (!/^[A-Za-z0-9-]{2,20}$/.test(prefix)) return res.status(400).json({ error: 'Invalid receipt prefix.' });
     const count = Math.max(1, Math.min(parseInt(b.count, 10) || 1, 20));
     const start = Math.max(1, parseInt(b.start, 10) || 1);
-    let minNext = start;
-    const existing = await sql.query('SELECT next_seq FROM doc_counters WHERE series = $1 AND period = $2', ['fee_receipt', prefix]);
-    if (!existing.length) {
-      const rows = await sql.query('SELECT receipt_no FROM payments WHERE receipt_no LIKE $1', [prefix + '%']);
-      let max = 0;
-      rows.forEach(r => {
-        const m = /(\d+)$/.exec(String(r.receipt_no || ''));
-        if (m) max = Math.max(max, parseInt(m[1], 10));
-      });
-      minNext = Math.max(start, max + 1);
-    }
-    const first = await reserveDocSeqRange('fee_receipt', prefix, count, minNext);
-    const numbers = Array.from({ length: count }, (_, i) => prefix + String(first + i).padStart(6, '0'));
+    const rawKey = b.draftKey;
+    const draftKey = typeof rawKey === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(rawKey) ? rawKey : null;
+    const by = req.authUser.name || '', role = req.authUser.role || '';
+    const SERIES = 'fee_receipt';
+    const out = await withKeyLock('docno:' + SERIES + ':' + prefix, async () => {
+      await ensureRegisterTables();
+      await ensureDraftKeyTable();
+      // Receipt numbers already saved on payments, e.g. "REHS-26-000041" -> 41.
+      const tail = new RegExp('^' + prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\d+)$');
+      const saved = new Set();
+      (await sql.query('SELECT DISTINCT receipt_no FROM payments WHERE receipt_no LIKE $1', [prefix + '%']))
+        .forEach(r => { const m = tail.exec(String(r.receipt_no || '')); if (m) saved.add(parseInt(m[1], 10)); });
+      const seqs = new Array(count).fill(0);
+      const taken = new Set();
+      // 1. Same attempt asking again (retry, lost reply, page reloaded): give back the numbers it already has.
+      if (draftKey) {
+        for (let i = 0; i < count; i++) {
+          const k = await sql.query('SELECT period, seq FROM doc_draft_keys WHERE series = $1 AND draft_key = $2', [SERIES, draftKey + '_' + i]);
+          if (k.length && k[0].period === prefix) {
+            const n = Number(k[0].seq);
+            if (n > 0 && !saved.has(n) && !taken.has(n)) { seqs[i] = n; taken.add(n); }
+          }
+        }
+      }
+      // 2. Numbers the server issued earlier but no receipt was ever saved for: use them before opening new ones.
+      //    Only numbers actually issued (they have a log row) are refilled, so a deliberately raised
+      //    "next receipt starts at" is never filled in below.
+      if (seqs.includes(0)) {
+        const counter = await sql.query('SELECT next_seq FROM doc_counters WHERE series = $1 AND period = $2', [SERIES, prefix]);
+        const top = counter.length ? (Number(counter[0].next_seq) || 1) - 1 : 0;
+        if (top > 0) {
+          const notes = new Set((await sql.query('SELECT seq FROM doc_gap_notes WHERE series = $1 AND period = $2', [SERIES, prefix])).map(r => Number(r.seq)));
+          const logged = await sql.query(
+            `SELECT seq, MAX(issued_at) AS last_at, MAX(issued_at) > (NOW() - INTERVAL ${DOC_ORPHAN_GRACE_MIN} MINUTE) AS recent
+               FROM doc_number_log WHERE series = $1 AND period = $2 GROUP BY seq ORDER BY seq`, [SERIES, prefix]);
+          const heldRecently = new Set((await sql.query(
+            `SELECT seq FROM doc_draft_keys WHERE series = $1 AND period = $2 AND updated_at > (NOW() - INTERVAL ${DOC_ORPHAN_GRACE_MIN} MINUTE)`, [SERIES, prefix])).map(r => Number(r.seq)));
+          for (const row of logged) {
+            const n = Number(row.seq);
+            if (n > top || saved.has(n) || notes.has(n) || taken.has(n) || heldRecently.has(n) || Number(row.recent)) continue;
+            const slot = seqs.indexOf(0);
+            if (slot < 0) break;
+            seqs[slot] = n; taken.add(n);
+          }
+        }
+      }
+      // 3. Anything still missing gets brand-new numbers from the shared counter.
+      const need = seqs.filter(n => !n).length;
+      if (need > 0) {
+        let minNext = start;
+        const existing = await sql.query('SELECT next_seq FROM doc_counters WHERE series = $1 AND period = $2', [SERIES, prefix]);
+        if (!existing.length) {
+          const mx = saved.size ? Math.max(...saved) : 0;
+          minNext = Math.max(start, mx + 1);
+        }
+        const first = await reserveDocSeqRange(SERIES, prefix, need, minNext);
+        let k = 0;
+        for (let i = 0; i < count; i++) if (!seqs[i]) seqs[i] = first + (k++);
+      }
+      if (draftKey) {
+        for (let i = 0; i < count; i++) {
+          await sql.query('DELETE FROM doc_draft_keys WHERE series = $1 AND period = $2 AND seq = $3 AND draft_key <> $4', [SERIES, prefix, seqs[i], draftKey + '_' + i]);
+          await sql.query(
+            `INSERT INTO doc_draft_keys (series, draft_key, period, seq) VALUES ($1, $2, $3, $4)
+             ON DUPLICATE KEY UPDATE period = VALUES(period), seq = VALUES(seq), updated_at = CURRENT_TIMESTAMP`,
+            [SERIES, draftKey + '_' + i, prefix, seqs[i]]);
+        }
+      }
+      return seqs;
+    });
+    const numbers = out.map(n => prefix + String(n).padStart(6, '0'));
     // Remember who these numbers went to (best-effort — see doc_number_log).
     try {
-      await ensureRegisterTables();
       for (let i = 0; i < count; i++) {
         await sql.query('INSERT INTO doc_number_log (series, period, seq, doc_number, issued_by, issued_role) VALUES ($1, $2, $3, $4, $5, $6)',
-          ['fee_receipt', prefix, first + i, numbers[i], req.authUser.name || '', req.authUser.role || '']);
+          ['fee_receipt', prefix, out[i], numbers[i], by, role]);
       }
     } catch (logErr) { console.error('doc_number_log write failed (numbers still issued):', logErr.message); }
     return res.status(200).json({ numbers });
@@ -1617,6 +1770,8 @@ const RESOURCE_TO_MODULE = {
 // actually a school-data settings blob (as opposed to internal plumbing),
 // mapped to the module(s) whose screen reads/writes it.
 const KV_KEY_TO_MODULE = {
+  // Public-website content (alumni, achievements, safety, vehicles, admission copy) — edited in Website Gallery > Website Content.
+  'website-extras': ['websitegallery'],
   'finance-settings': ['managefee'],
   'fee-types': ['managefee'],
   'discount-types': ['managefee'],
