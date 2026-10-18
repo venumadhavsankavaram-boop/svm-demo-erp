@@ -422,6 +422,26 @@ async function main() {
   await api('PUT', '/api/kv/inventory-sales', invSales);
   console.log(`  ${ROUTES.length} routes, ${HOSTEL_ROOMS.length} hostel rooms, ${tt.length} timetable slots, ${libBooks.length} books, ${invItems.length} products, ${invSales.length} sales`);
 
+  // Public-website content (Website Gallery > Website Content) so a demo website shows every section
+  await api('PUT', '/api/kv/website-extras', {
+    alumni: [
+      { id: 'wa1', show: true, name: 'Anitha Rao', batch: '2012', now: 'Doctor, District Hospital', quote: 'The teachers here believed in me before I did.' },
+      { id: 'wa2', show: true, name: 'Rahul Verma', batch: '2014', now: 'Software Engineer', quote: 'Strong basics from school made college easy.' },
+      { id: 'wa3', show: true, name: 'Meena Joshi', batch: '2016', now: 'Teacher', quote: '' }
+    ],
+    achievements: [
+      { id: 'wc1', show: true, title: 'District Kabaddi Champions', year: '2025', category: 'Sports', detail: 'Our under-16 team won the district final.' },
+      { id: 'wc2', show: true, title: '100% result in Class 10', year: '2025', category: 'Academics', detail: 'Every student passed, 18 with distinction.' },
+      { id: 'wc3', show: true, title: 'Inter-school Drawing Prize', year: '2026', category: 'Arts', detail: 'First prize in the zonal drawing competition.' }
+    ],
+    safety: [], downloads: [],
+    transport: { gps: true },
+    recognition: { board: 'State Board', medium: 'English', recognition: 'Recognised school', timings: '9:00 AM – 4:00 PM' },
+    admission: { open: true, heading: 'Admissions open for 2026-27', lastDate: 'Last date 30 April', hours: 'Mon–Sat, 9:00 AM – 4:00 PM' },
+    results: { label: 'Class 10 — 2025', pass: '100%' },
+    visible: {}, academics: {}, ratio: {}
+  });
+
   // Remove the temporary seeder login
   await sql`DELETE FROM sessions WHERE user_id = 'u_seeder'`;
   await sql`DELETE FROM users WHERE id = 'u_seeder'`;
