@@ -1,7 +1,5 @@
 /* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
    Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
-/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
-   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 // Express server for Render — serves the ERP's static files AND handles
 // every /api/* request, using the exact same tested resource-handling logic
 // that ran on Vercel. Only the "wrapper" around it changed: Vercel routed
@@ -6425,6 +6423,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('index.html')) {
       res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+    // The bundled typefaces never change under the same file name (a new version gets a new name), so phones
+    // may keep them for a year instead of asking again on every visit.
+    if (filePath.includes(path.join('public', 'fonts') + path.sep)) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     }
     // The app's JS used to be entirely inline inside index.html, so the
     // no-cache rule above was enough to guarantee every fix reached every
