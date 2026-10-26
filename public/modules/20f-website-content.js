@@ -173,7 +173,7 @@ Email: {{email}}` }
     { k:'overview', icon:'🏠', label:'Overview', perm:'websitegallery' },
     { k:'home', icon:'🎯', label:'Home & Banner', perm:'websitegallery' },
     { k:'pages', icon:'📄', label:'Pages', perm:'websitegallery' },
-    { k:'people', icon:'🏆', label:'Alumni & Achievements', perm:'websitegallery' },
+    { k:'people', icon:'🏆', label:'Alumni & Awards', perm:'websitegallery' },
     { k:'policies', icon:'📜', label:'Policies', perm:'websitegallery' },
     { k:'gallery', icon:'🖼️', label:'Gallery', perm:'websitegallery' },
     { k:'notices', icon:'📌', label:'Notices', perm:'noticeboard' },
@@ -192,7 +192,7 @@ Email: {{email}}` }
 .wc-actions{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.wc-show{font-size:.82rem;font-weight:600}
 .wc-vis{display:block;margin:6px 0 12px;color:var(--brand-navy)}
 .wc-bar{position:sticky;bottom:0;background:var(--white);padding:12px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;z-index:3}
-.web-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
+.web-tabs{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px}.web-tabs .mf-tab{padding:8px 10px;font-size:.82rem;white-space:nowrap}
 .web-badge{display:inline-block;min-width:18px;padding:0 6px;margin-left:6px;border-radius:99px;background:#A80D5D;color:#fff;font-size:.7rem;font-weight:700;line-height:18px;text-align:center}
 .web-unsaved{display:inline-block;padding:4px 10px;border-radius:99px;background:#FFF3D6;color:#7A5200;font-size:.78rem;font-weight:700}
 .web-feed{font-size:.82rem;margin:0 0 12px}.web-feed b{font-weight:700}
@@ -363,6 +363,8 @@ Email: {{email}}` }
     add('notices','📌','Notices on the website', notices ? 'live' : 'off', notices ? `${notices} notice${notices > 1 ? 's' : ''}` : 'None right now');
     const ne = newEnquiries();
     if(ne) todo.push({ tab:'enquiries', text:`${ne} new admission enquir${ne > 1 ? 'ies are' : 'y is'} waiting for a call.` });
+    { let u = (typeof schoolInfo !== 'undefined' && schoolInfo && schoolInfo.website) ? String(schoolInfo.website).trim() : '';
+      if(!u) todo.push({ view:'schoolprofile', text:'Your website address is not set in School Profile, so the "View website" button is hidden.' }); }
     if(wcDirty) todo.push({ tab: webTab === 'overview' ? 'home' : webTab, text:'You have changes that are not saved yet.' });
     return { rows, todo, photos, notices, ne, live: rows.filter(r => r.state === 'live').length };
   }
@@ -377,14 +379,14 @@ Email: {{email}}` }
     pane.innerHTML = `
       <p class="web-feed">${webFeedOk === null ? '' : webFeedOk ? '<b style="color:#1f7a4d;">● Connected.</b> The website can read these settings.' : '<b style="color:#A80D5D;">● Could not check the website feed.</b> Try again in a moment.'}</p>
       <section class="sf-kpis">
-        ${kpi('Sections live', o.live, 'good', `of ${o.rows.length}`)}
+        ${kpi('Website parts showing', o.live, 'good', `out of ${o.rows.length} parts`)}
         ${kpi('Gallery photos', o.photos, 'plain', 'on the website')}
         ${kpi('Notices on website', o.notices, 'plain', 'public notices')}
         ${kpi('New enquiries', o.ne, o.ne ? 'danger' : 'plain', 'waiting for a call')}
       </section>
       <section class="sf-card cm-post">
         <h3 class="cm-h">✅ Needs attention</h3>
-        ${o.todo.length ? `<ul class="web-todo">${o.todo.map(t => `<li><span>${E(t.text)}</span>${can(t.tab) ? `<button type="button" class="sf-btn sf-btn--soft" onclick="webGo('${t.tab}')">Open ${E(tabLabel(t.tab))}</button>` : ''}</li>`).join('')}</ul>` : '<p class="cm-sub" style="margin:0;">Nothing needs attention right now. 🎉</p>'}
+        ${o.todo.length ? `<ul class="web-todo">${o.todo.map(t => `<li><span>${E(t.text)}</span>${t.view ? (allowedViews().includes('setup') ? `<button type="button" class="sf-btn sf-btn--soft" onclick="switchView('${t.view}')">Open School Profile</button>` : '') : (can(t.tab) ? `<button type="button" class="sf-btn sf-btn--soft" onclick="webGo('${t.tab}')">Open ${E(tabLabel(t.tab))}</button>` : '')}</li>`).join('')}</ul>` : '<p class="cm-sub" style="margin:0;">Nothing needs attention right now. 🎉</p>'}
       </section>
       <section class="sf-card cm-post">
         <h3 class="cm-h">🌐 What visitors see</h3>

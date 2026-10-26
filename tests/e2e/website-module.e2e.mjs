@@ -36,13 +36,19 @@ ok('Communication has no website items; Website has its own sidebar section (' +
 await page.evaluate(() => { [...document.querySelectorAll('.sb-link')].find(x => x.textContent.trim() === 'Manage Website').click(); });
 await page.waitForTimeout(2500);
 const tabs = await page.$$eval('#webTabs .mf-tab', els => els.map(e => e.textContent.replace(/\d+$/, '').trim()));
-assert.deepEqual(tabs.map(t => t.replace(/^\S+\s/, '')), ['Overview', 'Home & Banner', 'Pages', 'Alumni & Achievements', 'Policies', 'Gallery', 'Notices', 'Enquiries']); ok('eight tabs for Admin: ' + tabs.join(' | '));
+assert.deepEqual(tabs.map(t => t.replace(/^\S+\s/, '')), ['Overview', 'Home & Banner', 'Pages', 'Alumni & Awards', 'Policies', 'Gallery', 'Notices', 'Enquiries']); ok('eight tabs for Admin: ' + tabs.join(' | '));
 
 // 3. Overview
 const ov = await page.textContent('#webPaneOverview');
-assert.ok(/Sections live/.test(ov) && /Needs attention/.test(ov) && /What visitors see/.test(ov)); assert.ok(/SSC 2026 · 100%/.test(ov)); assert.ok(/Admissions open/.test(ov));
+assert.ok(/Website parts showing/.test(ov) && /Needs attention/.test(ov) && /What visitors see/.test(ov)); assert.ok(/SSC 2026 · 100%/.test(ov)); assert.ok(/Admissions open/.test(ov));
 assert.ok(/Alumni[\s\S]*Hidden/.test(ov)); ok('Overview shows live/hidden status from the saved content (results tile, banner, hidden alumni)');
 assert.ok(await page.locator('#webPaneOverview >> text=Connected').count() > 0); ok('Overview checks the website feed');
+
+// 3b. polish: tabs fit on one row at laptop width; missing website address is flagged
+const rows = await page.$$eval('#webTabs .mf-tab', els => new Set(els.map(e => e.offsetTop)).size);
+assert.equal(rows, 1, 'tabs wrap onto ' + rows + ' rows'); ok('all eight tabs fit on one row at laptop width');
+await page.evaluate(() => { window.__w = schoolInfo.website; schoolInfo.website = ''; }); await call(page, "webGo('home')"); await page.waitForTimeout(500); await call(page, "webGo('overview')"); await page.waitForTimeout(1200);
+assert.ok(/website address is not set/.test(await page.textContent('#webPaneOverview'))); await page.evaluate(() => { schoolInfo.website = window.__w; }); ok('Overview flags a missing website address');
 
 // 4. Edit on two tabs, one save
 await call(page, "webGo('home')"); await page.waitForTimeout(1200);
