@@ -1186,6 +1186,30 @@ function isPublicApiRoute(req) {
   return PUBLIC_API_ROUTES.some(r => r.path === req.path && r.methods.includes(req.method));
 }
 
+// ---------- Require two-step sign-in (Admin / Principal) ----------
+// Off by default. When an Admin switches it on (Settings → Two-step sign-in), any Admin or Principal who
+// has not set two-step sign-in up yet can still sign in, but only reach the set-up screen until it is done.
+let req2faCache = { on: false, t: 0 };
+async function require2faOn() {
+  if (Date.now() - req2faCache.t < 15000) return req2faCache.on;
+  try {
+    const r = await sql`SELECT value FROM kv_store WHERE \`key\` = 'require-2fa'`;
+    let v = r[0] && r[0].value; if (typeof v === 'string') { try { v = JSON.parse(v); } catch (_) {} }
+    req2faCache = { on: !!(v && v.on), t: Date.now() };
+  } catch (_) { req2faCache.t = Date.now(); }
+  return req2faCache.on;
+}
+const has2faCache = new Map();
+async function userNeeds2faSetup(userId) {
+  if (!(await require2faOn())) return false;
+  const hit = has2faCache.get(userId);
+  if (hit && Date.now() - hit < 15000) return false;
+  const rows = await sql`SELECT twofa_method FROM users WHERE id = ${userId} AND deleted_at IS NULL`.catch(() => null);
+  if (!rows || !rows.length) return false;
+  if (rows[0].twofa_method) { has2faCache.set(userId, Date.now()); return false; }
+  return true;
+}
+
 app.use(async (req, res, next) => {
   if (!req.path.startsWith('/api/')) return next(); // static files / the app shell itself stay open
   if (req.method === 'OPTIONS' || isPublicApiRoute(req)) return next();
@@ -1207,6 +1231,12 @@ app.use(async (req, res, next) => {
     const newExpires = new Date(Math.min(now + SESSION_IDLE_MS, createdAt + SESSION_ABSOLUTE_MAX_MS));
     sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()}, last_seen_at = now() WHERE id = ${idHash}`.catch(() => {});
     req.authUser = { id: session.user_id, role: session.role, name: session.name };
+    // "Require two-step sign-in" is on and this Admin/Principal has not set it up yet: only the set-up screen works.
+    if (!session.impersonated_by && session.user_id !== 'vendor-support' && ['Admin', 'Principal'].includes(session.role)
+        && req.path !== '/api/me' && req.path !== '/api/logout' && !req.path.startsWith('/api/account/2fa')
+        && await userNeeds2faSetup(session.user_id)) {
+      return res.status(403).json({ error: 'Please set up two-step sign-in first.', code: 'MUST_SETUP_2FA' });
+    }
     next();
   } catch (err) {
     console.error('auth check error:', err);
@@ -4794,6 +4824,7 @@ async function completeLogin(req, res, user) {
   // instead of role-driven. See checkPlanModuleAccess above for enforcement.
   shaped.moduleAccess = getModuleAccess();
   shaped.twofaEnabled = !!user.twofa_method;
+  shaped.mustSetup2fa = ['Admin', 'Principal'].includes(user.role) && !user.twofa_method && await require2faOn();
   await createSession(req, res, user);
   auditNote(user.name, user.role, 'LOGIN', 'sign-in', user.id, user.twofa_method ? 'with two-step code' : null, clientIp(req));
   return res.status(200).json(shaped);
@@ -4933,6 +4964,7 @@ app.post('/api/account/2fa/confirm', async (req, res) => {
 app.post('/api/account/2fa/disable', async (req, res) => {
   try {
     if (!twofaGate(req, res)) return;
+    if (await require2faOn()) return res.status(400).json({ error: 'Your school requires two-step sign-in for Admin and Principal accounts, so it cannot be turned off.' });
     const { password, code } = req.body || {};
     if (!await twofaPasswordOk(req.authUser.id, password)) return res.status(400).json({ error: 'Your password is not right.' });
     const rows = await sql`SELECT * FROM users WHERE id = ${req.authUser.id}`;
@@ -4947,6 +4979,7 @@ app.post('/api/account/2fa/disable', async (req, res) => {
       if (!r.ok) return res.status(400).json({ error: 'That code is not right.' });
     }
     await sql`UPDATE users SET twofa_method = NULL, totp_secret = NULL, twofa_email = NULL, twofa_recovery = NULL, twofa_last_step = NULL WHERE id = ${req.authUser.id}`;
+    has2faCache.delete(req.authUser.id);
     await sql`INSERT INTO audit_log (actor_name, actor_role, method, resource, record_id) VALUES (${req.authUser.name}, ${req.authUser.role}, 'NOTE', 'twofa_disabled', ${req.authUser.id})`.catch(() => {});
     return res.status(200).json({ ok: true });
   } catch (err) { console.error('2fa disable error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
@@ -4959,6 +4992,29 @@ app.get('/api/account/2fa/overview', async (req, res) => {
     return res.status(200).json({ emailAvailable: smtpConfigured(), users: rows.map(r => ({ id: r.id, name: r.name, username: r.username, role: r.role, method: r.twofa_method || '' })) });
   } catch (err) { console.error('2fa overview error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
+// Admin: read / switch the "require two-step sign-in" rule.
+app.get('/api/account/2fa/policy', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.role !== 'Admin') return res.status(403).json({ error: 'Admin access required.' });
+    req2faCache.t = 0;
+    const rows = await sql`SELECT twofa_method FROM users WHERE role IN ('Admin', 'Principal') AND deleted_at IS NULL`;
+    return res.status(200).json({ required: await require2faOn(), total: rows.length, protectedCount: rows.filter(r => r.twofa_method).length });
+  } catch (err) { console.error('2fa policy error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/account/2fa/policy', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.role !== 'Admin' || req.authUser.id === 'vendor-support') return res.status(403).json({ error: 'Admin access required.' });
+    const on = !!(req.body && req.body.required);
+    if (on) {
+      const me = await sql`SELECT twofa_method FROM users WHERE id = ${req.authUser.id}`;
+      if (!me.length || !me[0].twofa_method) return res.status(400).json({ error: 'Turn on two-step sign-in for your own account first (My Account), then switch this on.' });
+    }
+    await sql`INSERT INTO kv_store (\`key\`, value) VALUES ('require-2fa', ${JSON.stringify({ on })}) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP`;
+    req2faCache = { on, t: Date.now() }; has2faCache.clear();
+    await sql`INSERT INTO audit_log (actor_name, actor_role, method, resource, record_id) VALUES (${req.authUser.name}, ${req.authUser.role}, 'NOTE', ${on ? 'twofa_required_on' : 'twofa_required_off'}, ${req.authUser.id})`.catch(() => {});
+    return res.status(200).json({ ok: true, required: on });
+  } catch (err) { console.error('2fa policy save error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
 app.post('/api/account/2fa/reset', async (req, res) => {
   try {
     if (!req.authUser || req.authUser.role !== 'Admin' || req.authUser.id === 'vendor-support') return res.status(403).json({ error: 'Admin access required.' });
@@ -4966,6 +5022,7 @@ app.post('/api/account/2fa/reset', async (req, res) => {
     const rows = await sql`SELECT id, name, role FROM users WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length || !TWOFA_ROLES.includes(rows[0].role)) return res.status(404).json({ error: 'Account not found.' });
     await sql`UPDATE users SET twofa_method = NULL, totp_secret = NULL, twofa_email = NULL, twofa_recovery = NULL, twofa_last_step = NULL WHERE id = ${id}`;
+    has2faCache.delete(id);
     await sql`INSERT INTO audit_log (actor_name, actor_role, method, resource, record_id) VALUES (${req.authUser.name}, ${req.authUser.role}, 'NOTE', 'twofa_reset', ${id})`.catch(() => {});
     return res.status(200).json({ ok: true });
   } catch (err) { console.error('2fa reset error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
@@ -5804,6 +5861,7 @@ app.get('/api/me', async (req, res) => {
     const shaped = simpleToAppShape(rows[0], SIMPLE_RESOURCES.users.fields);
     delete shaped.password;
     shaped.moduleAccess = getModuleAccess();
+    shaped.mustSetup2fa = !req.authUser.impersonatedBy && ['Admin', 'Principal'].includes(rows[0].role) && await userNeeds2faSetup(req.authUser.id);
     return res.status(200).json(shaped);
   } catch (err) {
     console.error('me error:', err);

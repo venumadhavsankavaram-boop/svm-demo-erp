@@ -612,6 +612,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
       currentUser = u;
       moduleAccess = u.moduleAccess || { restricted: false, enabledKeys: [] };
       sessionStorage.setItem('rgv_current_user', u.id);
+      if(u.mustSetup2fa && !u.impersonating){ loginLoaderStop(); hideLoginScreen(); await showForcedTwofaSetup(); location.reload(); return; }
       loginLoaderStart('Restoring your session…', 0);
       loginLoaderStage('Loading students, fees and records…', 0, true);
       try{ await loadAllAppData(); } finally { loginLoaderStop(); }
@@ -784,6 +785,14 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     currentUser = u;
     moduleAccess = u.moduleAccess || { restricted: false, enabledKeys: [] };
     sessionStorage.setItem('rgv_current_user', u.id);
+    if(u.mustSetup2fa){
+      loginLoaderStop();
+      if(submitBtn) submitBtn.disabled = false;
+      hideLoginScreen();
+      await showForcedTwofaSetup();
+      location.reload();
+      return false;
+    }
     _sessionExpiredHandled = false;
     // The app's very first data load (at page open, before this login)
     // happened with no session cookie yet, so every module fell back to
