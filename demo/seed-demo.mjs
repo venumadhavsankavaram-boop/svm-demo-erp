@@ -279,6 +279,27 @@ async function main() {
   payments.forEach((p, k) => { p.receiptNo = `SPS-26-${pad(k + 1, 6)}`; });
   await pool(payments, p => api('POST', '/api/payments', p), 4);
 
+  // One-off extra fees (previous-year dues, late fees, a trip) so the Dashboard's Grand Total has real rows.
+  console.log('Extra fees and old balances…');
+  const extras = [], extraPays = [];
+  students.forEach((s, i) => {
+    const mkExtra = (key, name, amount, paidFrac, daysBack) => {
+      const paid = Math.round(amount * paidFrac / 50) * 50;
+      const id = `sef_demo_${pad(i, 4)}_${key}`;
+      extras.push({ id, studentId: s.id, name, amount, paid: paid >= amount, paidAmount: paid, date: isoDay(daysAgo(daysBack)), kind: '', addedBy: 'Demo Accountant' });
+      if (paid > 0) extraPays.push({ id: `pay_demo_${pad(i, 4)}_x_${key}`, studentId: s.id, studentName: s.name, category: 'extra', extraFeeName: name, extraFeeId: id, mode: pick(modes),
+        amount: paid, discount: 0, instalment: '', date: isoDay(daysAgo(Math.max(1, daysBack - int(1, 10)))), note: '', classAtPayment: s.className });
+    };
+    if (i % 7 === 0) mkExtra('ob', 'Previous Year Dues', int(2, 9) * 500, [0, 0.5, 1][i % 3], int(60, 120));
+    if (i % 11 === 0) mkExtra('late', 'Late Fee', int(1, 4) * 100, [1, 0][i % 2], int(5, 40));
+    if (i % 13 === 0) mkExtra('trip', 'Annual Day Costume', 600, 1, int(10, 50));
+  });
+  await pool(extras, e => api('POST', '/api/extra-fees', e), 4);
+  extraPays.sort((a, b) => a.date.localeCompare(b.date));
+  const lastRc = payments.length;
+  extraPays.forEach((p, k) => { p.receiptNo = `SPS-26-${pad(lastRc + k + 1, 6)}`; });
+  await pool(extraPays, p => api('POST', '/api/payments', p), 4);
+
   // Accounting vouchers (numbers from the same atomic counter the app uses)
   console.log('Vouchers…');
   const incomeCats = ['Donations', 'Canteen', 'Rent', 'Miscellaneous'], expCats = ['Salaries', 'Utilities (Electricity/Water)', 'Maintenance & Repairs', 'Stationery & Supplies', 'Transport Fuel', 'Miscellaneous'];
