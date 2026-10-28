@@ -103,6 +103,7 @@ async function safetyCheckAndWipe() {
   const tables = ['students','staff','staff_payroll','payments','student_discounts','student_extra_fees','attendance_records','holidays','exam_results','staff_attendance_records','acct_income','acct_expenses','comms_messages','subjects','exam_defs','admission_inquiries','website_gallery','user_notifications','notification_events','audit_log','deletion_requests','sessions','doc_counters','kv_store'];
   for (const t of tables) { try { await sql.query(`DELETE FROM ${t}`); } catch (e) { console.warn(`  (skip ${t}: ${e.message.slice(0, 60)})`); } }
   try { await sql.query('DELETE FROM users'); } catch (e) { console.warn('  (skip users)'); }
+  try { await sql.query('DELETE FROM branches WHERE is_main = 0'); } catch (e) {}
   try { await sql.query('DELETE FROM fee_structure'); } catch (e) {}
   try { await sql.query('DELETE FROM school_info'); } catch (e) {}
 }
@@ -442,11 +443,29 @@ async function main() {
     visible: {}, academics: {}, ratio: {}
   });
 
+  // A second campus, so the demo can show multi-branch: section B of classes 1-5 moves to "North Campus"
+  // (with its fees, attendance and marks), it gets its own stock list and its own branch-only login.
+  try {
+    const nb = await (await api('POST', '/api/branches', { name: 'Sunrise North Campus', code: 'NORTH', address: 'Plot 12, North Road', phone: '9876500300' })).json();
+    const moveIds = students.filter(s => s.section === 'B').map(s => s.id);
+    if (moveIds.length) await api('POST', '/api/branches/move-students', { studentIds: moveIds, toBranch: nb.id });
+    const hash = await bcrypt.hash(DEMO_PASSWORD, 10);
+    await sql`INSERT INTO users (id, name, username, password, role, linked_student_id, recovery_code, branch_id)
+      VALUES ('u_demo_branch', 'Demo North Accountant', 'demo.branch', ${hash}, 'Accountant', '', 'DEMOBRCH', ${nb.id})`;
+    await api('POST', '/api/branches/switch', { branchId: nb.id });
+    const NI = [['School Bag', 'Student Supplies', 'Bag', 'Piece', 320, 450, 25, 8], ['Uniform Shirt', 'Uniforms', 'Shirt', 'Piece', 280, 400, 60, 20], ['School Tie', 'Uniforms', 'Tie', 'Piece', 45, 80, 80, 20],
+      ['Long Notebook (200 pages)', 'Books', 'Notebook', 'Piece', 38, 55, 250, 60], ['Geometry Box', 'Stationery', 'Geometry Box', 'Box', 85, 130, 40, 10]];
+    await api('PUT', '/api/kv/inventory-items', NI.map((x, k) => ({ id: `item_north_${k}`, name: x[0], type: 'Sellable', category: x[1], subCategory: x[2], quantity: x[6], threshold: x[7], costPrice: x[4], sellingPrice: x[5],
+      unit: x[3], size: '', applicableClass: '', taxRate: 0, hsnCode: '', description: '', active: true, createdBy: 'Demo Admin' })));
+    await api('POST', '/api/branches/switch', { branchId: 'main' });
+    console.log('North Campus added with ' + moveIds.length + ' students.');
+  } catch (e) { console.warn('Branch demo data skipped:', e.message); }
+
   // Remove the temporary seeder login
   await sql`DELETE FROM sessions WHERE user_id = 'u_seeder'`;
   await sql`DELETE FROM users WHERE id = 'u_seeder'`;
   console.log('\nDone. Demo logins (password for all: ' + DEMO_PASSWORD + '):');
-  ['demo.admin', 'demo.principal', 'demo.accountant', 'demo.office', 'demo.teacher', 'demo.parent', 'demo.student'].forEach(u => console.log('  ' + u));
+  ['demo.admin', 'demo.principal', 'demo.accountant', 'demo.office', 'demo.teacher', 'demo.parent', 'demo.student', 'demo.branch'].forEach(u => console.log('  ' + u));
 }
 
 const _run = main();

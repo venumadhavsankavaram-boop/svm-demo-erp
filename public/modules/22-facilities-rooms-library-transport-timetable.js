@@ -2254,6 +2254,7 @@ const SYLLABUS_TAB_PERM_KEYS = { tracker:'syllabus_tracker', homework:'syllabus_
       password: document.getElementById('uPassword').value,
       role: document.getElementById('uRole').value,
       linkedStudentId: document.getElementById('uLinkedStudent').value,
+      branchId: (document.getElementById('uBranchField') && document.getElementById('uBranchField').style.display !== 'none') ? document.getElementById('uBranch').value : undefined,
       recoveryCode: document.getElementById('uRecoveryCode').value,
     };
     let linkedStaff = null;

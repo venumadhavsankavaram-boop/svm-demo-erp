@@ -21,6 +21,7 @@ import zlib from 'zlib';
 import bcrypt from 'bcryptjs';
 import { sql, nextDocSeq, reserveDocSeqRange, insertNotificationEventIfNew, addColumnIfMissing, createIndexIfMissing } from './db.js';
 import webpush from 'web-push';
+import { initBranches, ensureBranchSchema, installBranchRoutes, branchGuard, kvBranchRoute, kvBranchKeys, mergedKv, branchInfoForMe, resolveScope, canSeeStudent, inScopeRow, stampFromStudent } from './branches.js';
 // Fleet reporting + support-login — see ../reporting-client/ for the
 // canonical copies and full wiring docs (also README.md, "Reporting
 // Client"). Both are opt-in and fail silent: with VENDOR_DASHBOARD_URL /
@@ -1050,6 +1051,7 @@ async function seedDefaultAdminIfEmpty() {
 async function initDb() {
   console.log('Connecting to database and ensuring schema...');
   await ensureSchema();
+  try { await ensureBranchSchema(); } catch (e) { console.error('Branch schema not ready:', e.message); }
   try { await ensureDraftKeyTable(); } catch (e) { console.error('doc_draft_keys not created at startup (will retry on first use):', e.message); }
   console.log('Schema ready.');
   await migrateAccountingFromKv();
@@ -1231,6 +1233,7 @@ app.use(async (req, res, next) => {
     const newExpires = new Date(Math.min(now + SESSION_IDLE_MS, createdAt + SESSION_ABSOLUTE_MAX_MS));
     sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()}, last_seen_at = now() WHERE id = ${idHash}`.catch(() => {});
     req.authUser = { id: session.user_id, role: session.role, name: session.name };
+    req.sessionActiveBranch = session.active_branch || null;
     // "Require two-step sign-in" is on and this Admin/Principal has not set it up yet: only the set-up screen works.
     if (!session.impersonated_by && session.user_id !== 'vendor-support' && ['Admin', 'Principal'].includes(session.role)
         && req.path !== '/api/me' && req.path !== '/api/logout' && !req.path.startsWith('/api/account/2fa')
@@ -1357,6 +1360,7 @@ async function handleKv(req, res, key) {
     const allowed = await checkModuleAccess(req, res, KV_KEY_TO_MODULE[key]);
     if (!allowed) return; // checkModuleAccess already sent the 403
   }
+  { const bk = await kvBranchRoute(req, res, key); if (bk === null) return; key = bk; }
   if (req.method === 'GET') {
     const rows = await sql`SELECT value FROM kv_store WHERE \`key\` = ${key}`;
     return res.status(200).json(rows.length ? rows[0].value : {});
@@ -1400,10 +1404,13 @@ app.get('/api/kv-batch', async (req, res) => {
     }
     const out = {};
     if (allowed.length) {
-      const rows = await sql`SELECT \`key\` AS k, value FROM kv_store WHERE \`key\` IN (${allowed})`;
+      const bb = await kvBranchKeys(req, allowed);
+      const effKeys = Array.from(new Set(Object.values(bb.map)));
+      const rows = effKeys.length ? await sql`SELECT \`key\` AS k, value FROM kv_store WHERE \`key\` IN (${effKeys})` : [];
       const byKey = {};
       rows.forEach(r => { byKey[r.k] = r.value; });
-      allowed.forEach(k => { out[k] = (k in byKey) ? byKey[k] : {}; });
+      allowed.forEach(k => { if (bb.merged.includes(k)) return; const ek = bb.map[k]; out[k] = (ek in byKey) ? byKey[ek] : {}; });
+      for (const k of bb.merged) out[k] = await mergedKv(bb.scope, k);
     }
     return res.status(200).json(out);
   } catch (err) {
@@ -2611,6 +2618,7 @@ app.get('/api/student-media/:id', async (req, res) => {
       if (!allowed) allowed = defaults.includes('fees') || defaults.includes('attendance');
     }
     if (!allowed) return res.status(403).end();
+    if (!(await canSeeStudent(req, id))) return res.status(403).end();
     const rows = await sql.query('SELECT extra FROM students WHERE id = $1', [id]);
     if (!rows.length) return res.status(404).end();
     let extra = rows[0].extra;
@@ -2705,7 +2713,8 @@ async function handleHybrid(req, res, config) {
         if (cur[0] && studentAdmKey(cur[0].admission_no) === k) changed = false;
       }
       if (k && changed) {
-        const rows = await sql.query(`SELECT id, first_name, last_name, admission_no FROM students WHERE deleted_at IS NULL AND id <> $1`, [body.id]);
+        const rows0 = await sql.query(`SELECT id, branch_id, first_name, last_name, admission_no FROM students WHERE deleted_at IS NULL AND id <> $1`, [body.id]);
+        const rows = []; for (const r of rows0) { if (await inScopeRow(req, r.branch_id)) rows.push(r); }
         const hit = rows.find(r => studentAdmKey(r.admission_no) === k);
         if (hit) return res.status(409).json({ error: `Admission No ${body.admissionNo} already belongs to ${(hit.first_name || '')} ${(hit.last_name || '')}`.trim() + '. Use a different number or leave it blank.' });
       }
@@ -3190,7 +3199,9 @@ async function handleDeleteDuplicateStudents(req, res) {
   if (!req.authUser || !MANAGEMENT_ROLES.includes(req.authUser.role)) {
     return res.status(403).json({ error: 'Admin or Principal access required to delete duplicate students.' });
   }
-  const rows = await sql`SELECT * FROM students WHERE deleted_at IS NULL ORDER BY created_at ASC`;
+  const __bs = await resolveScope(req);
+  if (__bs.multi && __bs.all) return res.status(400).json({ error: 'Choose one branch first (top bar). Duplicates are cleaned up inside one branch at a time.', code: 'BRANCH_REQUIRED' });
+  const rows = (await sql`SELECT * FROM students WHERE deleted_at IS NULL ORDER BY created_at ASC`).filter(r => !__bs.multi || (r.branch_id || __bs.mainId) === __bs.branchId);
   // A "duplicate" must be the same PERSON, not just the same name: same name
   // (any order/case) AND same class, unless both have different, known dates of
   // birth (then they are two children). Same admission number also counts.
@@ -3669,6 +3680,7 @@ async function finalizeOnlinePayment(orderId, paymentId) {
         VALUES (${payRowId}, ${receiptNo}, ${row.student_id}, ${await studentFullName(row.student_id)}, ${row.category || 'fee'}, 'Online',
           ${row.amount}, 0, '', ${todayInSchoolTz()}, ${'Paid online via Razorpay — ' + paymentId},
           ${row.class_at_payment || ''}, ${row.extra_fee_name || null}, ${row.extra_fee_id || null})`;
+      await stampFromStudent('payments', payRowId, row.student_id);
     }
     if (row.extra_fee_id && !Number(row.extra_applied)) {
       await sql`UPDATE online_payments SET extra_applied = 1 WHERE order_id = ${orderId}`;
@@ -4778,7 +4790,7 @@ const PARENT_SHARED_REFERENCE_KV_KEYS = ['late-fee-settings', 'syllabus-topics',
 app.get('/api/demo-info', (req, res) => {
   if (!DEMO_MODE) return res.status(200).json({ demo: false });
   return res.status(200).json({ demo: true, password: process.env.DEMO_PASSWORD || 'Demo@123',
-    logins: [['demo.admin','Admin'],['demo.principal','Principal'],['demo.accountant','Accountant'],['demo.office','Office Assistant'],['demo.teacher','Teacher'],['demo.parent','Parent'],['demo.student','Student']] });
+    logins: [['demo.admin','Admin'],['demo.principal','Principal'],['demo.accountant','Accountant'],['demo.office','Office Assistant'],['demo.teacher','Teacher'],['demo.parent','Parent'],['demo.student','Student'],['demo.branch','Branch Accountant (North Campus only)']] });
 });
 
 app.post('/api/login', async (req, res) => {
@@ -5902,6 +5914,7 @@ app.get('/api/me', async (req, res) => {
     delete shaped.password;
     shaped.moduleAccess = getModuleAccess();
     shaped.mustSetup2fa = !req.authUser.impersonatedBy && ['Admin', 'Principal'].includes(rows[0].role) && await userNeeds2faSetup(req.authUser.id);
+    try { shaped.branch = await branchInfoForMe(req); } catch (_) { shaped.branch = { multi: false }; }
     return res.status(200).json(shaped);
   } catch (err) {
     console.error('me error:', err);
@@ -6274,6 +6287,8 @@ function validateAdmissionInquiry(body) {
 // This one route replaces the old api/[resource].js dynamic file — same
 // logic, just reading the resource name from Express's route parameter
 // (req.params.resource) instead of Vercel's automatic req.query.resource.
+initBranches({ MANAGEMENT_ROLES, PARENT_LOGIN_ROLES, auditNote, sessionHash: req => { const t = parseCookies(req).sid; return t ? hashSessionToken(t) : null; } });
+installBranchRoutes(app);
 app.all('/api/:resource', async (req, res) => {
   const { resource } = req.params;
   // Log every write centrally, right here, instead of inside each of the
@@ -6513,6 +6528,7 @@ app.all('/api/:resource', async (req, res) => {
     // 'users' is also in SIMPLE_RESOURCES (its column/field list is reused
     // by handleUsers above), but takes its own dedicated handler instead of
     // the generic one because of the password rules described there.
+    if (await branchGuard(req, res, resource)) return;
     if (resource === 'users') return await handleUsers(req, res);
     if (resource === 'deletion-requests') return await handleDeletionRequests(req, res);
     // Not listed in RESOURCE_TO_MODULE above — deliberately unrestricted by

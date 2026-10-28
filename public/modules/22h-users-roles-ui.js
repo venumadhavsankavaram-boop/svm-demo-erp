@@ -62,7 +62,7 @@ function urxUserRows(){
     return `<tr>
       <td data-l="User"><div class="urx-who"><span class="sf-avatar" aria-hidden="true">${escapeHtml(urxInitials(u.name))}</span>
         <span class="urx-who-t"><b>${escapeHtml(u.name)}${me ? ' <span class="sf-badge sf-badge--upcoming">You</span>' : ''}</b><small>@${escapeHtml(u.username)}</small></span></div></td>
-      <td data-l="Role"><span class="urx-role${u.role === 'Admin' ? ' urx-role--admin' : ''}">${escapeHtml(u.role)}</span></td>
+      <td data-l="Role"><span class="urx-role${u.role === 'Admin' ? ' urx-role--admin' : ''}">${escapeHtml(u.role)}</span>${typeof branchTag === 'function' ? branchTag(u) : ''}</td>
       <td data-l="Staff profile">${st
         ? `<span class="urx-link"><b>${escapeHtml(((st.firstName || '') + ' ' + (st.lastName || '')).trim() || 'Staff')}</b>${st.designation ? `<small>${escapeHtml(st.designation)}</small>` : ''}</span>`
         : '<span class="urx-mute">Not linked</span>'}</td>

@@ -4270,6 +4270,11 @@
               <option value="">Not linked</option>
             </select>
           </div>
+          <div class="f-field full" id="uBranchField" style="display:none;">
+            <label>Branch</label>
+            <select id="uBranch"></select>
+            <small style="color:var(--ink-soft)">A login tied to a branch sees only that branch. Only Admin and Principal logins can be left on "All branches".</small>
+          </div>
           <div class="f-field full">
             <label>Recovery Code <span style="font-weight:400; color:var(--ink-soft);">(used for "Forgot password?" on the login screen — share this with them privately)</span></label>
             <div style="display:flex; gap:10px; align-items:center;">
@@ -5020,6 +5025,7 @@
 <script src="modules/29-demo-mode.js"></script>
 <script src="modules/31-deleted-items.js"></script>
 <script src="modules/32-notification-center.js"></script>
+<script src="modules/33-branches.js"></script>
 
 <!-- PWA installability — registered standalone, after everything else, so a
      school whose deploy doesn't yet include sw.js/manifest.json just skips
