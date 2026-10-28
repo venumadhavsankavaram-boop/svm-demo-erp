@@ -6748,6 +6748,15 @@ const httpServer = app.listen(PORT, () => {
 // ---- Demo install only (DEMO_MODE=true): load the sample school if the database is empty,
 // and reload it every night at 02:00 IST so the demo never drifts. Does nothing on a real school.
 if (DEMO_MODE) {
+  // Visitors who arrive while the sample school is being reloaded get a polite page (see runDemoSeed).
+  { const listeners = httpServer.listeners('request'); httpServer.removeAllListeners('request');
+    httpServer.on('request', (req, res) => {
+      if (globalThis.__demoSeeding) {
+        res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '20', 'Cache-Control': 'no-store', 'Refresh': '20' });
+        return res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Demo is refreshing</title><body style="font-family:system-ui,sans-serif;text-align:center;padding:12vh 20px;color:#211a4e"><h2>The demo is refreshing its sample data</h2><p>This takes about two minutes. This page reloads by itself.</p></body>');
+      }
+      for (const l of listeners) l.call(httpServer, req, res);
+    }); }
   let seeding = false, lastNightly = '';
   // Re-load the sample school whenever demo/seed-demo.mjs changes (its fingerprint is kept in kv_store).
   const seedFingerprint = async () => {
@@ -6760,6 +6769,10 @@ if (DEMO_MODE) {
   };
   const runDemoSeed = () => {
     if (seeding) return; seeding = true;
+    // The in-process loader (light-my-request) re-parents Express's request/response prototypes for the whole process.
+    // While it runs, real visitors get a short "refreshing" page instead of reaching Express, and the prototypes are put
+    // back afterwards -- otherwise the first browser that disconnects crashes the server.
+    globalThis.__demoSeeding = true;
     // Run the seed inside this process, calling the app directly (no network):
     // the hosting sandbox refuses a connection from the app to its own port (EACCES).
     import('light-my-request').then(async ({ default: inject }) => {
@@ -6775,7 +6788,10 @@ if (DEMO_MODE) {
       await markSeeded();
       console.log('Demo seed finished OK');
     }).catch(e => console.error('SEED FAILED:', e && e.message, e && e.cause ? '(cause: ' + (e.cause.code || e.cause.message) + ')' : ''))
-      .finally(() => { seeding = false; delete globalThis.__demoFetch; });
+      .finally(async () => {
+        try { const h = await import('node:http'); Object.setPrototypeOf(Object.getPrototypeOf(app.request), h.IncomingMessage.prototype); Object.setPrototypeOf(Object.getPrototypeOf(app.response), h.ServerResponse.prototype); } catch (e) { console.error('Could not restore request prototypes:', e && e.message); }
+        seeding = false; delete globalThis.__demoFetch; delete globalThis.__demoSeeding;
+      });
   };
   setTimeout(async () => {
     try {
