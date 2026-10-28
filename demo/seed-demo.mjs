@@ -95,7 +95,11 @@ async function safetyCheckAndWipe() {
   const nStudents = (await sql`SELECT COUNT(*) AS n FROM students`)[0].n;
   let name = '';
   if (info.length) { try { name = (typeof info[0].data === 'string' ? JSON.parse(info[0].data) : info[0].data).name || ''; } catch (e) {} }
-  const isDemo = name === DEMO_NAME;
+  // The database counts as the demo if it carries the demo's name, the generic "Demo School" name, or the marker
+  // this seed leaves in kv_store after it has loaded the sample school once (so a renamed demo still reloads).
+  let seededBefore = false;
+  try { seededBefore = (await sql`SELECT 1 AS x FROM kv_store WHERE \`key\` = 'demo-seed-version'`).length > 0; } catch (e) {}
+  const isDemo = name === DEMO_NAME || name === 'Demo School' || seededBefore;
   if (!isDemo && Number(nStudents) > 0) {
     throw new Error(`Refusing to wipe: this database holds "${name || 'a school'}" with ${nStudents} students, not the demo school.`);
   }
