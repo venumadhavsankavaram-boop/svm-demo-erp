@@ -450,7 +450,7 @@ async function main() {
   // A second campus, so the demo can show multi-branch: section B of classes 1-5 moves to "North Campus"
   // (with its fees, attendance and marks), it gets its own stock list and its own branch-only login.
   try {
-    const nb = await (await api('POST', '/api/branches', { name: 'Sunrise North Campus', code: 'NORTH', address: 'Plot 12, North Road', phone: '9876500300' })).json();
+    const nb = await (await api('POST', '/api/branches', { name: 'Sunrise North Campus', code: 'NORTH', address: 'Plot 12, North Road, North Town', phone: '9876500300', email: 'north@sunrise-demo.example.com' })).json();
     const moveIds = students.filter(s => s.section === 'B').map(s => s.id);
     if (moveIds.length) await api('POST', '/api/branches/move-students', { studentIds: moveIds, toBranch: nb.id });
     const hash = await bcrypt.hash(DEMO_PASSWORD, 10);

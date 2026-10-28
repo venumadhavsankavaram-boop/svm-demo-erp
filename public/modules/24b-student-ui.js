@@ -68,7 +68,7 @@ function paintStdRows(){
   tbody.innerHTML = rows.map(s => `
     <tr class="std-row" onclick="rowClickToProfile(event,'${s.id}')">
       <td class="std-roll">${escapeHtml(s.rollNo || '—')}</td>
-      <td><div class="std-who">${sfAvatar(s)}<span><b>${escapeHtml(s.firstName || '')} ${escapeHtml(s.lastName || '')}</b><small>${escapeHtml(s.admissionNo || '')}${s.email ? ' · ' + escapeHtml(s.email) : ''}</small></span></div></td>
+      <td><div class="std-who">${sfAvatar(s)}<span><b>${escapeHtml(s.firstName || '')} ${escapeHtml(s.lastName || '')}</b><small>${escapeHtml(s.admissionNo || '')}${s.email ? ' · ' + escapeHtml(s.email) : ''}${(typeof branchState === 'function' && branchState().all && typeof branchLabelFor === 'function' && branchLabelFor(s)) ? ' · 🏫 ' + escapeHtml(branchLabelFor(s)) : ''}</small></span></div></td>
       <td>${escapeHtml(s.fatherPhone || s.motherPhone || '—')}<small>${escapeHtml(s.fatherName || s.motherName || '')}</small></td>
             <td>${escapeHtml(s.admDate || '—')}</td>
       <td>${stdStatusBadge(s)}</td>
@@ -133,7 +133,7 @@ function renderProfile(body){
       ${s.photo ? `<img class="profile-photo" src="${s.photo}" alt="">` : `<div class="profile-photo">${initials(s)}</div>`}
       <div class="std-hero-main">
         <h2>${escapeHtml(s.firstName)} ${escapeHtml(s.lastName)}</h2>
-        <div class="p-meta">${escapeHtml(s.admissionNo || '')} · ${escapeHtml(s.className)} — Section ${escapeHtml(s.section)} · ${stdStatusBadge(s)}</div>
+        <div class="p-meta">${escapeHtml(s.admissionNo || '')} · ${escapeHtml(s.className)} — Section ${escapeHtml(s.section)} · ${stdStatusBadge(s)}${(typeof branchState === 'function' && branchState().multi && typeof branchLabelFor === 'function' && branchLabelFor(s)) ? ' · 🏫 ' + escapeHtml(branchLabelFor(s)) : ''}</div>
         <div class="std-chips">${chips}</div>
       </div>
       <div class="profile-actions">

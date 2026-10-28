@@ -117,6 +117,7 @@
 
   async function init(){
     await load();
+    wrapSchoolInfo();
     renderBar();
     menuEntry();
   }
@@ -294,6 +295,64 @@
   var _open = window.openUserModal, _edit = window.editUser;
   if(typeof _open === 'function') window.openUserModal = function(){ var r = _open.apply(this, arguments); fillUserBranch(null); return r; };
   if(typeof _edit === 'function') window.editUser = function(id){ var r = _edit.apply(this, arguments); var u = (typeof users !== 'undefined') ? users.find(function(x){ return x.id === id; }) : null; fillUserBranch(u); return r; };
+
+
+  // ------- Branch name, address and phone on receipts and printouts -------
+  // Every printout reads the school profile (name, address, phone, email). While you work in a branch other than the
+  // main one, those four details come from that branch instead (set in Branches > Edit). The saved school profile is
+  // never changed: the Setup > School Profile screen and every save always use the real profile.
+  var RAWSCHOOL = 0;
+  function activeBranch(){
+    if(RAWSCHOOL || !B.multi || B.all || !B.branchId || B.branchId === B.mainId) return null;
+    return B.branches.find(function(x){ return x.id === B.branchId; }) || null;
+  }
+  function wrapSchoolInfo(){
+    try{
+      if(typeof schoolInfo !== 'object' || !schoolInfo || schoolInfo.__isBrOverlay) return;
+      schoolInfo = new Proxy(schoolInfo, {
+        get: function(t, k){
+          if(k === '__isBrOverlay') return true;
+          if(k === 'toJSON') return function(){ return Object.assign({}, t); };
+          var b = activeBranch();
+          if(b){
+            if(k === 'name' && b.name) return b.name;
+            if(k === 'address' && b.address) return b.address;
+            if(k === 'phone' && b.phone) return b.phone;
+            if(k === 'email' && b.email) return b.email;
+          }
+          return t[k];
+        },
+        set: function(t, k, v){ t[k] = v; return true; }
+      });
+    }catch(e){}
+  }
+  function rawWrap(name){
+    var f = window[name];
+    if(typeof f !== 'function' || f.__brRaw) return;
+    var w = function(){
+      RAWSCHOOL++;
+      var r;
+      try{ r = f.apply(this, arguments); }catch(e){ RAWSCHOOL--; throw e; }
+      if(r && typeof r.then === 'function') return r.then(function(v){ RAWSCHOOL--; wrapSchoolInfo(); return v; }, function(e){ RAWSCHOOL--; wrapSchoolInfo(); throw e; });
+      RAWSCHOOL--; wrapSchoolInfo(); return r;
+    };
+    w.__brRaw = true; window[name] = w;
+  }
+  ['loadSchoolInfo', 'renderSchoolProfileTab', 'scxProfileItems', 'scxMeter', 'scxSaveProfile', 'saveSchoolProfile'].forEach(rawWrap);
+  // Anything that stores the school profile always stores the real one.
+  var _ss = window.storageSet;
+  if(typeof _ss === 'function' && !_ss.__brRaw){
+    window.storageSet = function(k, v){
+      if(k === 'school-info' && v && v.__isBrOverlay){ RAWSCHOOL++; try{ v = JSON.parse(JSON.stringify(v)); } finally { RAWSCHOOL--; } }
+      return _ss.apply(this, [k, v].concat(Array.prototype.slice.call(arguments, 2)));
+    };
+    window.storageSet.__brRaw = true;
+  }
+  // "All branches" / "Branch: North Campus" for the heading of reports. '' for a single-branch school.
+  window.branchScopeText = function(){
+    if(!B.multi) return '';
+    return B.all ? 'All branches' : ('Branch: ' + (nameOf(B.branchId) || ''));
+  };
 
   // Run once the app has loaded for the signed-in user.
   var _apply = window.applyRolePermissions;

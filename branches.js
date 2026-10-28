@@ -29,6 +29,9 @@ export const BRANCH_TABLES = {
   'extra-fees': { table: 'student_extra_fees', studentKey: 'studentId' },
   attendance: { table: 'attendance_records', studentKey: 'studentId' },
   'exam-results': { table: 'exam_results', studentKey: 'studentId' },
+  // Exam rooms are a campus's own rooms; hall-ticket numbers follow their student.
+  rooms: { table: 'rooms', own: true },
+  'exam-hall-tickets': { table: 'exam_hall_tickets', studentKey: 'studentId' },
   'acct-income': { table: 'acct_income', own: true },
   'acct-expenses': { table: 'acct_expenses', own: true },
   'admission-inquiries': { table: 'admission_inquiries', own: true },
@@ -448,6 +451,8 @@ export function installBranchRoutes(app) {
         for (const t of ['payments', 'student_discounts', 'student_extra_fees', 'fee_year_history', 'attendance_records', 'exam_results']) {
           await sql.query(`UPDATE ${t} SET branch_id = $1 WHERE student_id IN (${ph})`, [to, ...chunk]);
         }
+        // Hall-ticket numbers keep the student id inside the record, not in a column of its own.
+        try { await sql.query(`UPDATE exam_hall_tickets SET branch_id = $1 WHERE JSON_UNQUOTE(JSON_EXTRACT(extra, '$.studentId')) IN (${ph})`, [to, ...chunk]); } catch (e) { console.error('move hall tickets:', e.message); }
       }
       ctx.auditNote(req.authUser.name, req.authUser.role, 'MOVE', 'branches', to, 'moved ' + ids.length + ' student(s) to ' + target.name, null);
       res.json({ ok: true, moved: ids.length, toName: target.name });

@@ -27,6 +27,8 @@
   const todayISO = () => iso(new Date());
   const dmy = s => { const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : (s || ''); };
   const stamp = () => { const d = new Date(); return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+  const brAll = () => typeof branchState === 'function' && !!branchState().all;
+  const brOf = rec => (brAll() && typeof branchLabelFor === 'function') ? (branchLabelFor(rec) || '') : '';
   const natural = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
 
   // ---------- engine ----------
@@ -88,7 +90,7 @@
       return Object.assign({
         id: s.id, admissionNo: s.admissionNo || '', rollNo: s.rollNo || '', name: ((s.firstName || '') + ' ' + (s.lastName || '')).trim(),
         className: s.className || '', section: s.section || '', father: s.fatherName || '',
-        contact: s.fatherPhone || s.motherPhone || s.guardianPhone || s.contact || '', status: s.status || 'Active',
+        contact: s.fatherPhone || s.motherPhone || s.guardianPhone || s.contact || '', status: s.status || 'Active', branch: brOf(s),
       }, f);
     });
     const show = o.show || 'all';
@@ -136,7 +138,7 @@
       return {
         receiptNo: p.receiptNo || '', date: p.date || '', admissionNo: s.admissionNo || '', name: p.studentName || ((s.firstName || '') + ' ' + (s.lastName || '')).trim(),
         className: p.classAtPayment || s.className || '', section: s.section || '', category: (typeof feeLabelFor === 'function' ? feeLabelFor(p) : (RT()[p.category] || p.category)),
-        instalment: p.instalment || '', mode: p.mode || '', user: p.collectedBy || '—', amount: typeof payNet === 'function' ? payNet(p) : num(p.amount), discount: num(p.discount),
+        instalment: p.instalment || '', mode: p.mode || '', user: p.collectedBy || '—', branch: brOf(p.branchId ? p : s), amount: typeof payNet === 'function' ? payNet(p) : num(p.amount), discount: num(p.discount),
       };
     });
     rows.sort((a, b) => o.sort === 'receipt' ? natural(a.receiptNo, b.receiptNo) : (String(a.date).localeCompare(String(b.date)) || natural(a.receiptNo, b.receiptNo)));
@@ -158,6 +160,7 @@
     if(names.length !== Object.keys(RT()).length + 2) bits.push('Includes: ' + (names.join(', ') || 'nothing'));
     if(o.asOn && o.asOn < todayISO()) bits.push('As on ' + dmy(o.asOn));
     if(o.includeInactive) bits.push('Includes inactive students');
+    if(typeof branchScopeText === 'function' && branchScopeText()) bits.push(branchScopeText());
     if(extra) bits.push(extra);
     return bits.join('  ·  ');
   }
@@ -184,8 +187,8 @@
       const R = buildReceipts(filters, o);
       if(!R.rows.length){ showToast('No receipts found for these options.'); return; }
       const aoa = top();
-      aoa.push(['S.No', 'Receipt No', 'Date', 'Student ID', 'Name', 'Class', 'Section', 'Fee Type', 'Instalment', 'Mode', 'Collected By', 'Amount', 'Discount']);
-      R.rows.forEach((r, i) => aoa.push([i + 1, r.receiptNo, dmy(r.date), r.admissionNo, r.name, r.className, r.section, r.category, r.instalment, r.mode, r.user, r.amount, r.discount]));
+      aoa.push(['S.No', 'Receipt No', 'Date', 'Student ID', 'Name', 'Class', 'Section', 'Fee Type', 'Instalment', 'Mode', 'Collected By', 'Amount', 'Discount'].concat(brAll() ? ['Branch'] : []));
+      R.rows.forEach((r, i) => aoa.push([i + 1, r.receiptNo, dmy(r.date), r.admissionNo, r.name, r.className, r.section, r.category, r.instalment, r.mode, r.user, r.amount, r.discount].concat(brAll() ? [r.branch] : [])));
       aoa.push(['', '', '', '', 'Total (' + R.total.count + ' receipts)', '', '', '', '', '', '', R.total.amount, R.total.discount]);
       aoa.push([], ['Generated on ' + stamp()]);
       addSheet('Receipts', aoa, [6, 14, 12, 16, 28, 14, 8, 16, 12, 12, 16, 12, 10]);
@@ -214,6 +217,7 @@
     const cols = ['S.No', 'Student ID', 'Roll No.', 'Name', 'Class', 'Section', 'Contact No', 'Total Fee', 'Concession Fee', 'Payable Fee', 'Paid Fee', 'Due Amount'];
     cols.push('of which Old Balance Due', 'of which Extra Fee Due');
     if(withLast) cols.push('Last Paid On', 'Last Receipt No', 'Father Name');
+    if(brAll()) cols.push('Branch');
     const aoa = top(); aoa.push(cols);
     let n = 1;
     R.groups.forEach(g => {
@@ -221,6 +225,7 @@
       g.students.forEach(r => {
         const row = [n++, r.admissionNo, r.rollNo, r.name, r.className, r.section, r.contact, r.totalFee, r.concession, r.payable, r.paid, r.due, r.oldDue, r.extraDue];
         if(withLast) row.push(r.lastPaid ? dmy(r.lastPaid) : 'No payment', r.lastReceipt, r.father);
+        if(brAll()) row.push(r.branch);
         aoa.push(row);
       });
       aoa.push(['', '', '', 'Total:', '', '', '', g.subtotal.totalFee, g.subtotal.concession, g.subtotal.payable, g.subtotal.paid, g.subtotal.due, g.students.reduce((a, r) => a + r.oldDue, 0), g.students.reduce((a, r) => a + r.extraDue, 0)]);
@@ -254,9 +259,9 @@
     if(id === 'fee_receipts_between'){
       const R = buildReceipts(filters, o);
       if(!R.rows.length){ showToast('No receipts found for these options.'); return; }
-      body = `<table><thead><tr><th>S.No</th><th>Receipt No</th><th>Date</th><th>Student ID</th><th>Name</th><th>Class</th><th>Fee Type</th><th>Instalment</th><th>Mode</th><th>Collected By</th><th class="n">Amount</th><th class="n">Discount</th></tr></thead><tbody>
-        ${R.rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.receiptNo)}</td><td>${dmy(r.date)}</td><td>${esc(r.admissionNo)}</td><td>${esc(r.name)}</td><td>${esc(r.className)}${r.section ? '-' + esc(r.section) : ''}</td><td>${esc(r.category)}</td><td>${esc(r.instalment)}</td><td>${esc(r.mode)}</td><td>${esc(r.user)}</td><td class="n">${inr(r.amount)}</td><td class="n">${inr(r.discount)}</td></tr>`).join('')}
-        <tr class="grand"><td colspan="10">Total (${R.total.count} receipts)</td><td class="n">${inr(R.total.amount)}</td><td class="n">${inr(R.total.discount)}</td></tr></tbody></table>
+      body = `<table><thead><tr><th>S.No</th><th>Receipt No</th><th>Date</th><th>Student ID</th><th>Name</th><th>Class</th><th>Fee Type</th><th>Instalment</th><th>Mode</th><th>Collected By</th><th class="n">Amount</th><th class="n">Discount</th>${brAll() ? '<th>Branch</th>' : ''}</tr></thead><tbody>
+        ${R.rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.receiptNo)}</td><td>${dmy(r.date)}</td><td>${esc(r.admissionNo)}</td><td>${esc(r.name)}</td><td>${esc(r.className)}${r.section ? '-' + esc(r.section) : ''}</td><td>${esc(r.category)}</td><td>${esc(r.instalment)}</td><td>${esc(r.mode)}</td><td>${esc(r.user)}</td><td class="n">${inr(r.amount)}</td><td class="n">${inr(r.discount)}</td>${brAll() ? `<td>${esc(r.branch)}</td>` : ''}</tr>`).join('')}
+        <tr class="grand"><td colspan="10">Total (${R.total.count} receipts)</td><td class="n">${inr(R.total.amount)}</td><td class="n">${inr(R.total.discount)}</td>${brAll() ? '<td></td>' : ''}</tr></tbody></table>
         <table style="width:60%"><thead><tr><th>Mode</th><th class="n">Receipts</th><th class="n">Amount</th></tr></thead><tbody>${R.byMode.map(g => `<tr><td>${esc(g.key)}</td><td class="n">${g.count}</td><td class="n">${inr(g.amount)}</td></tr>`).join('')}</tbody></table>
         <table style="width:60%"><thead><tr><th>Collected By</th><th class="n">Receipts</th><th class="n">Amount</th></tr></thead><tbody>${R.byUser.map(g => `<tr><td>${esc(g.key)}</td><td class="n">${g.count}</td><td class="n">${inr(g.amount)}</td></tr>`).join('')}</tbody></table>`;
     } else {
@@ -271,9 +276,9 @@
         let n = 1;
         const lastCol = id === 'fee_due_list';
         body = R.groups.map(g => `<div class="cls">Class : ${esc(g.className)}</div>
-          <table><thead><tr><th>S.No.</th><th>Student ID</th><th>Roll No.</th><th>Name</th><th>Contact No</th><th class="n">Total Fee</th><th class="n">Concession</th><th class="n">Payable Fee</th><th class="n">Paid Fee</th><th class="n">Due Amount</th>${lastCol ? '<th>Last Paid</th>' : ''}</tr></thead><tbody>
-          ${g.students.map(r => `<tr><td>${n++}</td><td>${esc(r.admissionNo)}</td><td>${esc(r.rollNo)}</td><td>${esc(r.name)}${(r.oldDue || r.extraDue) ? `<div class="note">Due includes${r.oldDue ? ' old balance ' + inr(r.oldDue) : ''}${r.oldDue && r.extraDue ? ',' : ''}${r.extraDue ? ' extra fees ' + inr(r.extraDue) : ''}</div>` : ''}${r.excess > 0 ? `<div class="note">Paid ${inr(r.excess)} more than payable</div>` : ''}</td><td>${esc(r.contact)}</td><td class="n">${inr(r.totalFee)}</td><td class="n">${inr(r.concession)}</td><td class="n">${inr(r.payable)}</td><td class="n">${inr(r.paid)}</td><td class="n due">${inr(r.due)}</td>${lastCol ? `<td>${r.lastPaid ? dmy(r.lastPaid) : 'No payment'}</td>` : ''}</tr>`).join('')}
-          <tr class="sub"><td colspan="5">Total:</td><td class="n">${inr(g.subtotal.totalFee)}</td><td class="n">${inr(g.subtotal.concession)}</td><td class="n">${inr(g.subtotal.payable)}</td><td class="n">${inr(g.subtotal.paid)}</td><td class="n">${inr(g.subtotal.due)}</td>${lastCol ? '<td></td>' : ''}</tr></tbody></table>`).join('')
+          <table><thead><tr><th>S.No.</th><th>Student ID</th><th>Roll No.</th><th>Name</th><th>Contact No</th><th class="n">Total Fee</th><th class="n">Concession</th><th class="n">Payable Fee</th><th class="n">Paid Fee</th><th class="n">Due Amount</th>${lastCol ? '<th>Last Paid</th>' : ''}${brAll() ? '<th>Branch</th>' : ''}</tr></thead><tbody>
+          ${g.students.map(r => `<tr><td>${n++}</td><td>${esc(r.admissionNo)}</td><td>${esc(r.rollNo)}</td><td>${esc(r.name)}${(r.oldDue || r.extraDue) ? `<div class="note">Due includes${r.oldDue ? ' old balance ' + inr(r.oldDue) : ''}${r.oldDue && r.extraDue ? ',' : ''}${r.extraDue ? ' extra fees ' + inr(r.extraDue) : ''}</div>` : ''}${r.excess > 0 ? `<div class="note">Paid ${inr(r.excess)} more than payable</div>` : ''}</td><td>${esc(r.contact)}</td><td class="n">${inr(r.totalFee)}</td><td class="n">${inr(r.concession)}</td><td class="n">${inr(r.payable)}</td><td class="n">${inr(r.paid)}</td><td class="n due">${inr(r.due)}</td>${lastCol ? `<td>${r.lastPaid ? dmy(r.lastPaid) : 'No payment'}</td>` : ''}${brAll() ? `<td>${esc(r.branch)}</td>` : ''}</tr>`).join('')}
+          <tr class="sub"><td colspan="5">Total:</td><td class="n">${inr(g.subtotal.totalFee)}</td><td class="n">${inr(g.subtotal.concession)}</td><td class="n">${inr(g.subtotal.payable)}</td><td class="n">${inr(g.subtotal.paid)}</td><td class="n">${inr(g.subtotal.due)}</td>${lastCol ? '<td></td>' : ''}${brAll() ? '<td></td>' : ''}</tr></tbody></table>`).join('')
           + `<table><tbody><tr class="grand"><td>Grand Total (${R.grand.count} students${R.grand.defaulters ? ', ' + R.grand.defaulters + ' with due' : ''})</td><td class="n">Total Fee ${inr(R.grand.totalFee)}</td><td class="n">Concession ${inr(R.grand.concession)}</td><td class="n">Payable ${inr(R.grand.payable)}</td><td class="n">Paid ${inr(R.grand.paid)}</td><td class="n">Due ${inr(R.grand.due)}</td></tr></tbody></table>`;
       }
     }
