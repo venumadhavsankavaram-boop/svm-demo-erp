@@ -24,12 +24,80 @@
   const money = n => frcMoney(n);
   const inr0 = n => '₹' + (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 
-  /* ------------------------------ settings ------------------------------ */
-  window.styleSettingsHtml = function(canEdit){
+  /* ------------------------------ settings tab: Manage Fee > Receipt & Counter ------------------------------ */
+  window.renderReceiptTab = async function(body){
+    const canEdit = canSub('managefee_late', 'managefee', 'edit');
     const dis = canEdit ? '' : 'disabled';
     const opts = (map, cur) => Object.keys(map).map(k => `<option value="${k}" ${k === cur ? 'selected' : ''}>${map[k]}</option>`).join('');
-    return `<label class="ft-field"><span>Fee counter screen</span><select class="input" id="rsDesk" ${dis}>${opts(DESKS, deskStyle())}</select></label>
-      <label class="ft-field"><span>Printed receipt style</span><select class="input" id="rsRcpt" ${dis}>${opts(RECEIPTS, rcptStyle())}</select></label>`;
+    body.innerHTML = `<div class="ft-grid">
+      <section class="sf-card ft-card">
+        ${ftCardHead('Receipt numbering', 'Switching over from another system? Set where receipt numbers should continue (if your last printed receipt was 001666, enter 1667).')}
+        <div class="ft-form">
+          <label class="ft-field"><span>Next receipt starts at</span><input type="number" min="1" class="input" id="rsStart" ${dis} value="${Number(receiptSettings.startNumber) || 1}"></label>
+        </div>
+      </section>
+      <section class="sf-card ft-card">
+        ${ftCardHead('Fee counter & receipt style', 'Choose how the fee counter screen and the printed receipt look. The current screen and receipt stay until you change these.')}
+        <div class="ft-form">
+          <label class="ft-field"><span>Fee counter screen</span><select class="input" id="rsDesk" ${dis} onchange="rsPreview()">${opts(DESKS, deskStyle())}</select></label>
+          <label class="ft-field"><span>Printed receipt style</span><select class="input" id="rsRcpt" ${dis} onchange="rsPreview()">${opts(RECEIPTS, rcptStyle())}</select></label>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          ${canEdit ? sfBtn('primary', 'check', 'Save receipt settings', 'saveReceiptSettings()') : ''}
+          ${sfBtn('secondary', 'receipt', 'Preview this receipt style', 'previewReceiptStyle()')}
+        </div>
+      </section>
+      <section class="sf-card ft-card" style="grid-column:1/-1">
+        ${ftCardHead('Preview', 'Updates as soon as you change a choice. Nothing is saved or printed until you press Save.')}
+        <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">
+          <div style="flex:1;min-width:300px"><div style="font-weight:700;margin-bottom:6px">Fee counter screen</div><div id="rsPrevDesk"></div></div>
+          <div style="flex:1;min-width:300px"><div style="font-weight:700;margin-bottom:6px">Printed receipt <span id="rsPrevNote" style="font-weight:400;color:#667;font-size:12px"></span></div>
+            <div id="rsPrevBox" style="width:100%;max-width:520px;height:360px;overflow:hidden;border:1px solid #dde3ee;border-radius:10px;background:#dfe1ea;position:relative"><iframe id="rsPrevFrame" title="Receipt preview" style="width:820px;height:600px;border:0;transform-origin:0 0;position:absolute;left:0;top:0"></iframe></div></div>
+        </div>
+      </section>
+    </div>`;
+    rsPreview();
+  };
+  const DESK_PIC = (() => {
+    const b = (w, h, bg, extra) => `<div style="width:${w};height:${h};background:${bg};border-radius:4px;${extra || ''}"></div>`;
+    const frame = inner => `<div style="border:1px solid #dde3ee;border-radius:10px;background:#f6f7fb;padding:8px;height:200px;max-width:520px;overflow:hidden;font:600 9px sans-serif;color:#fff">${inner}</div>`;
+    const bar = `<div style="height:16px;background:#14213d;border-radius:4px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;padding:0 6px"><span>Fee counter</span><span style="background:#1f7a52;padding:1px 5px;border-radius:3px">Last receipt issued</span></div>`;
+    const head = '<div style="height:20px;background:#fff;border:1px solid #dde3ee;border-radius:5px;margin-bottom:4px"></div>';
+    return {
+      classic: frame(`<div style="height:22px;background:#fff;border:1px solid #dde3ee;border-radius:5px;margin-bottom:6px"></div><div style="display:flex;gap:5px;margin-bottom:6px">${b('25%','30px','#fff','border:1px solid #dde3ee')}${b('25%','30px','#fff','border:1px solid #dde3ee')}${b('25%','30px','#fff','border:1px solid #dde3ee')}${b('25%','30px','#fff','border:1px solid #dde3ee')}</div>${head}${head}<div style="height:26px;background:#fff;border:1px solid #dde3ee;border-radius:5px;display:flex;justify-content:flex-end;align-items:center;padding:0 6px"><span style="background:#4b3fa8;padding:3px 8px;border-radius:4px">Record Payment(s)</span></div>`),
+      cashier: frame(`${bar}<div style="display:flex;gap:6px"><div style="width:45%;background:#fff;border:1px solid #dde3ee;border-radius:6px;padding:5px">${head}${head}<div style="height:22px;border:1px solid #c9d1e0;border-radius:4px;margin-bottom:4px"></div><div style="display:flex;gap:3px;margin-bottom:4px">${b('20%','10px','#e6e9f2')}${b('20%','10px','#e6e9f2')}${b('20%','10px','#e6e9f2')}</div><div style="display:flex;margin-bottom:5px">${b('25%','14px','#14213d','border-radius:3px 0 0 3px')}${b('25%','14px','#e6e9f2','border-radius:0')}${b('25%','14px','#e6e9f2','border-radius:0')}</div><div style="height:18px;background:#1f7a52;border-radius:5px;text-align:center;line-height:18px">Save &amp; print receipt</div></div><div style="flex:1;display:flex;flex-direction:column;gap:5px"><div style="display:flex;gap:4px">${b('33%','24px','#fff','border:1px solid #dde3ee')}${b('33%','24px','#fff','border:1px solid #dde3ee')}${b('33%','24px','#fff','border:1px solid #dde3ee')}</div>${b('100%','52px','#fff','border:1px solid #dde3ee')}${b('100%','40px','#fff','border:1px solid #dde3ee')}</div></div>`),
+      modern: frame(`<div style="display:flex;gap:6px"><div style="flex:1;display:flex;flex-direction:column;gap:5px"><div style="display:flex;gap:4px">${b('33%','22px','#fff','border:1px solid #dde3ee')}${b('33%','22px','#fff','border:1px solid #dde3ee')}${b('33%','22px','#fff','border:1px solid #dde3ee')}</div>${b('100%','28px','#fff','border:1px solid #dde3ee;border-radius:12px')}${b('100%','28px','#fff','border:1px solid #dde3ee;border-radius:12px')}${b('100%','28px','#fff','border:1px solid #dde3ee;border-radius:12px')}</div><div style="width:42%;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.12);padding:6px;color:#231f3d">Make a receipt${head}${head}<div style="height:18px;background:#b0105f;border-radius:99px;margin-top:4px;color:#fff;text-align:center;line-height:18px">Save &amp; print receipt</div></div></div>`)
+    };
+  })();
+  function noAutoPrint(html){ return html.replace(/window\.onload\s*=\s*function\(\)\s*\{\s*setTimeout\(function\(\)\s*\{\s*window\.print\(\)\s*;?\s*\}\s*,\s*250\s*\)\s*;?\s*\}\s*;?/g, ''); }
+  function sampleRecs(){
+    const p = (payments || []).filter(x => !x.voided && x.receiptNo).sort((a, b) => String(b.receiptNo).localeCompare(String(a.receiptNo)))[0];
+    if(p){ const r = payments.filter(x => x.receiptNo === p.receiptNo && !x.voided); if(r.length) return { recs: r, real: true }; }
+    const st = (students || [])[0]; if(!st) return null;
+    return { real: false, recs: [{ studentId: st.id, receiptNo: 'SAMPLE-000001', date: new Date().toISOString().slice(0, 10), mode: 'Cash', amount: 5500, category: 'fee', instalment: 'Instalment 1' }] };
+  }
+  window.rsPreview = function(){
+    const rc = document.getElementById('rsRcpt'), dk = document.getElementById('rsDesk'); if(!rc || !dk) return;
+    const pd = document.getElementById('rsPrevDesk'); if(pd) pd.innerHTML = DESK_PIC[dk.value] || '';
+    const fr = document.getElementById('rsPrevFrame'), box = document.getElementById('rsPrevBox'); if(!fr) return;
+    const sm = sampleRecs(); if(!sm) return;
+    const keep = receiptSettings.receiptStyle; receiptSettings.receiptStyle = rc.value;
+    let html = ''; try { html = frcDocHtml(frcBuildData(sm.recs)); } finally { receiptSettings.receiptStyle = keep; }
+    fr.srcdoc = noAutoPrint(html);
+    const sc = rc.value === 'thermal' ? 0.9 : Math.min(1, (box.clientWidth || 520) / 820);
+    fr.style.transform = 'scale(' + sc + ')'; fr.style.width = (rc.value === 'thermal' ? 420 : 820) + 'px'; fr.style.height = Math.round(360 / sc) + 'px';
+    const n = document.getElementById('rsPrevNote'); if(n) n.textContent = sm.real ? '(shown with your latest receipt)' : '(sample)';
+  };
+  window.previewReceiptStyle = function(){
+    const sel = document.getElementById('rsRcpt'); if(!sel) return;
+    const p = (payments || []).filter(x => !x.voided && x.receiptNo).sort((a, b) => String(b.receiptNo).localeCompare(String(a.receiptNo)))[0];
+    if(!p){ showToast('Make one receipt first, then you can preview the styles.'); return; }
+    const recs = payments.filter(x => x.receiptNo === p.receiptNo && !x.voided);
+    const keep = receiptSettings.receiptStyle; receiptSettings.receiptStyle = sel.value;
+    let html; try { html = frcDocHtml(frcBuildData(recs)); } finally { receiptSettings.receiptStyle = keep; }
+    html = noAutoPrint(html);
+    const w = window.open('', '_blank'); if(!w){ showToast('Allow pop-ups to preview.'); return; }
+    w.document.write(html); w.document.close();
   };
 
   /* ------------------------------ screen styles ------------------------------ */
