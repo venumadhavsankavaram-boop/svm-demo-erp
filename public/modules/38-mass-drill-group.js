@@ -1,5 +1,5 @@
 /* ============================================================================
-   Timetable: Mass Drill (MD) / Bala Vikas for a group - give it to many classes in one go.
+   Timetable: subjects taken by several classes at once (Mass Drill, Bala Vikas, ...) - editable school list + group tool.
    Pick day + period + teacher, tick the classes (or use the Primary / High school
    buttons), and every ticked class gets Mass Drill in that slot. A class that already
    has another subject there is skipped and listed. Needs an MD / Mass Drill subject in each class.
@@ -9,7 +9,11 @@
   const canEdit = () => { try { return ['Admin', 'Principal'].includes(currentUser.role); } catch(e){ return false; } };
   const shared = n => typeof ttIsSharedSubject === 'function' && ttIsSharedSubject(n);
   const kindOf = n => typeof ttSharedKind === 'function' ? ttSharedKind(n) : '';
-  const KIND_LABEL = { md: 'Mass Drill (MD)', balavikas: 'Bala Vikas' };
+  const KEY = 'timetable-shared-subjects';
+  try { OBJECT_BACKED_KEYS[KEY] = '/api/kv/' + KEY; } catch(e){}
+  const groups = () => ttSharedGroups();
+  const labelOf = k => { const g = groups().find(x => x.id === k); return g ? g.label : ''; };
+  const KIND_LABEL = new Proxy({}, { get: (_, k) => labelOf(String(k)) });
   let curKind = '';
   const primaryIdx = () => { const i = CLASS_LEVELS.indexOf('5th Class'); return i < 0 ? 8 : i; };
   const isPrimary = cls => CLASS_LEVELS.indexOf(cls) <= primaryIdx();
@@ -44,7 +48,7 @@
     if(typeof timetableTab !== 'undefined' && timetableTab !== 'class') return;
     if(!canEdit()) return;
     const bar = document.createElement('div'); bar.className = 'md-bar';
-    bar.innerHTML = `<span>🏃 <b>Mass Drill (MD) and Bala Vikas</b> for many classes in one go</span><button type="button" class="btn btn-ghost" onclick="openMdGroup()">Set for a group of classes</button>`;
+    bar.innerHTML = `<span>🏃 <b>Subjects taken by several classes at once</b> (${esc(groups().map(g => g.label).join(', '))}) in one go</span><button type="button" class="btn btn-ghost" onclick="openMdGroup()">Set for a group of classes</button>`;
     body.prepend(bar);
   }
   if(typeof renderTimetableBody === 'function'){
@@ -63,8 +67,8 @@
   window.closeMdGroup = function(){ const o = document.getElementById('mdGroupOverlay'); if(o) o.classList.remove('open'); };
 
   window.openMdGroup = function(kind){
-    const kinds = ['md', 'balavikas'].filter(k => subjectsList.some(s => kindOf(s.name) === k));
-    curKind = (typeof kind === 'string' && kinds.includes(kind)) ? kind : (kinds.includes(curKind) ? curKind : (kinds[0] || 'md'));
+    const kinds = groups().map(g => g.id).filter(k => subjectsList.some(s => kindOf(s.name) === k));
+    curKind = (typeof kind === 'string' && kinds.includes(kind)) ? kind : (kinds.includes(curKind) ? curKind : (kinds[0] || (groups()[0] ? groups()[0].id : 'md')));
     const T = targets();
     const days = activeTimetableDays(), periods = timetablePeriods.filter(p => !p.isBreak);
     const mdIds = new Set(); subjectsList.filter(s => kindOf(s.name) === curKind).forEach(s => (s.staffIds || []).forEach(i => mdIds.add(i)));
@@ -87,7 +91,7 @@
       + '<button type="button" onclick="mdPick(\'all\')">All classes</button><button type="button" onclick="mdPick(\'none\')">Clear ticks</button></div>'
       + '<div class="md-grid">' + boxes + '</div>' + missNote + '<div id="mdPreview"></div>'
       + '<div class="modal-actions"><button type="button" class="btn btn-ghost" onclick="closeMdGroup()">Cancel</button><button type="button" class="btn btn-primary" id="mdApplyBtn" onclick="applyMdGroup()" disabled>Set it</button></div>';
-    const empty = '<div class="md-note md-warn">No class has a Mass Drill (MD) or Bala Vikas subject yet. In Manage Subjects, add a subject named "MD", "Mass Drill" or "Bala Vikas" to the classes that take it, then come back here.</div>';
+    const empty = '<div class="md-note md-warn">None of your classes has a subject from the "taken by several classes at once" list yet (' + groups().map(g => esc(g.label)).join(', ') + '). Add the subject in Manage Subjects, or add other subject names to the list under Timetable > Periods Setup.</div>';
     overlay();
     document.getElementById('mdGroupBody').innerHTML = '<h2>' + esc(KIND_LABEL[curKind] || 'Mass Drill') + ' for a group</h2><p class="modal-sub">One teacher takes this subject with several classes together in the same period.</p>' + kindSel + (T.length ? form : empty);
     document.getElementById('mdGroupOverlay').classList.add('open');
@@ -188,6 +192,93 @@
       await storageSet(TIMETABLE_KEY, timetableEntries);
       renderTimetableBody();
       showToast('Repeated on ' + added + ' more day' + (added === 1 ? '' : 's') + (skipped.length ? '. Skipped: ' + skipped.join(', ') : '.'), 'burst');
+      return r;
+    };
+  }
+
+  /* ---- The school's list: which subjects one teacher may take with several classes at once ---- */
+  const normName = n => (typeof ttNormName === 'function' ? ttNormName(n) : String(n || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const slug = n => normName(n) || ('g' + Date.now());
+  function cleanGroups(v){
+    if(!Array.isArray(v)) return null;
+    const out = [];
+    v.forEach(g => {
+      if(!g || !g.label) return;
+      const names = Array.from(new Set([g.label].concat(Array.isArray(g.names) ? g.names : []).map(x => String(x || '').trim()).filter(Boolean)));
+      if(names.length) out.push({ id: String(g.id || slug(g.label)), label: String(g.label).trim(), names });
+    });
+    return out;
+  }
+  let gLoaded = 0;
+  async function loadGroups(force){
+    try {
+      if(typeof currentUser === 'undefined' || !currentUser) return;
+      if(!force && Date.now() - gLoaded < 60000) return;
+      const v = await storageGet(KEY, null);
+      gLoaded = Date.now();
+      const g = cleanGroups(v);
+      window.ttSharedGroupsData = (g && g.length) || (Array.isArray(v) && !v.length) ? g : null;   // null = use the built-in default
+    } catch(e){}
+  }
+  if(typeof switchView === 'function'){
+    const o = switchView;
+    window.switchView = function(view){ const r = o.apply(this, arguments); if(view === 'timetable') loadGroups(false).then(() => { try { renderTimetableBody(); } catch(e){} }); return r; };
+  }
+  setTimeout(() => loadGroups(true), 3000);
+
+  async function saveGroups(list){
+    if(!(typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'Admin')){ showToast('Only the Admin can change this list.'); return false; }
+    const ok = await storageSet(KEY, list);
+    if(ok === false){ showToast('Could not save. Check the connection and try again.'); return false; }
+    window.ttSharedGroupsData = list; gLoaded = Date.now();
+    return true;
+  }
+  function paintCard(){
+    const box = document.getElementById('ttSharedCard'); if(!box) return;
+    const chips = groups().map((g, i) => `<span class="md-chip"><b>${esc(g.label)}</b>${g.names.length > 1 ? '<small> · ' + esc(g.names.join(', ')) + '</small>' : ''}<button type="button" aria-label="Remove ${esc(g.label)}" onclick="ttSharedRemove(${i})">×</button></span>`).join('') || '<span style="color:#5b6784">No subjects on the list. Every subject needs its own teacher in each period.</span>';
+    box.innerHTML = `<h4 style="margin:0 0 4px">Subjects taken by several classes at once</h4>
+      <p style="margin:0 0 10px;font-size:.82rem;color:#4a5878">One teacher may take these with many classes in the same period (for example a combined Mass Drill or Bala Vikas period). Every other subject still needs a different teacher in each class. This list only affects the timetable. It never changes subjects, exams, marks or results.</p>
+      <div class="md-chips">${chips}</div>
+      <div class="md-add"><input id="ttSharedInput" class="input" placeholder="Subject name, e.g. Yoga  (other spellings after commas)" onkeydown="if(event.key==='Enter'){ttSharedAdd()}"><button type="button" class="btn btn-primary" onclick="ttSharedAdd()">Add</button><button type="button" class="btn btn-ghost" onclick="ttSharedReset()">Reset to default</button></div>
+      <div id="ttSharedMsg" style="font-size:.8rem;margin-top:6px"></div>`;
+  }
+  const say = (t, bad) => { const m = document.getElementById('ttSharedMsg'); if(m){ m.textContent = t; m.style.color = bad ? '#8a0b4f' : '#14532d'; } };
+  window.ttSharedAdd = async function(){
+    const inp = document.getElementById('ttSharedInput'); const parts = (inp ? inp.value : '').split(',').map(x => x.trim()).filter(Boolean);
+    if(!parts.length){ say('Type the subject name first.', true); return; }
+    if(parts.some(p => normName(p).length < 2)){ say('That name is too short.', true); return; }
+    const taken = parts.find(p => ttSharedKind(p));
+    if(taken){ say('"' + taken + '" is already on the list.', true); return; }
+    const list = groups().map(g => ({ ...g, names: g.names.slice() }));
+    let id = slug(parts[0]); while(list.some(g => g.id === id)) id += 'x';
+    list.push({ id, label: parts[0], names: parts });
+    if(await saveGroups(list)){ paintCard(); say('Added "' + parts[0] + '".'); }
+  };
+  window.ttSharedRemove = async function(i){
+    const g = groups()[i]; if(!g) return;
+    const inUse = typeof timetableEntries !== 'undefined' ? timetableEntries.filter(e => ttSharedKind(e.subject) === g.id).length : 0;
+    if(!await showConfirmDialog('Remove "' + g.label + '" from the list?' + (inUse ? ' ' + inUse + ' timetable period' + (inUse === 1 ? ' uses' : 's use') + ' it now. They stay as they are, but if one teacher is in several classes in the same period it will show as a clash.' : ''))) return;
+    const list = groups().filter((_, k) => k !== i).map(x => ({ ...x }));
+    if(await saveGroups(list)){ paintCard(); say('Removed.'); }
+  };
+  window.ttSharedReset = async function(){
+    if(!await showConfirmDialog('Put the list back to the default (Mass Drill and Bala Vikas)?')) return;
+    const list = TT_SHARED_DEFAULT.map(g => ({ ...g, names: g.names.slice() }));
+    if(await saveGroups(list)){ paintCard(); say('List reset.'); }
+  };
+  const st2 = document.createElement('style');
+  st2.textContent = '.md-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}.md-chip{display:inline-flex;align-items:center;gap:6px;background:#eef1fb;border-radius:999px;padding:5px 6px 5px 12px;font-size:.84rem}.md-chip small{color:#5b6784}.md-chip button{border:0;background:#d9deee;border-radius:50%;width:22px;height:22px;cursor:pointer;line-height:1}.md-add{display:flex;gap:8px;flex-wrap:wrap}.md-add input{flex:1 1 260px}#ttSharedCard{margin-top:18px;padding:16px;border:1px solid #dde3ee;border-radius:14px;background:#fff}';
+  document.head.appendChild(st2);
+  if(typeof renderTimetablePeriodsTab === 'function'){
+    const origP = renderTimetablePeriodsTab;
+    window.renderTimetablePeriodsTab = function(body){
+      const r = origP.apply(this, arguments);
+      try {
+        if(body && currentUser && currentUser.role === 'Admin' && !document.getElementById('ttSharedCard')){
+          const card = document.createElement('div'); card.id = 'ttSharedCard'; body.appendChild(card);
+          loadGroups(true).then(paintCard); paintCard();
+        }
+      } catch(e){}
       return r;
     };
   }
