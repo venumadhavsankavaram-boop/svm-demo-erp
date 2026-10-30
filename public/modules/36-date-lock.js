@@ -66,9 +66,14 @@
   st.textContent = '.dl-locked{background:#f1f3f8 !important;color:#33405c;cursor:not-allowed;pointer-events:none}.dl-tag{display:inline-block;margin-left:8px;font-size:12px;font-weight:600;color:#4a5878}';
   document.head.appendChild(st);
 
+  // Receipt & Counter tab belongs to Admin only.
+  function hideReceiptTab(){
+    const b = document.getElementById('mftab-receipt');
+    if(b && loggedIn()) b.style.display = isAdmin() ? '' : 'none';
+  }
   // Forms are drawn when they are opened, so watch for the date boxes appearing.
   let t = null;
-  new MutationObserver(() => { clearTimeout(t); t = setTimeout(() => { scan(document.body); attendanceToToday(); }, 30); }).observe(document.body, { childList: true, subtree: true });
+  new MutationObserver(() => { hideReceiptTab(); clearTimeout(t); t = setTimeout(() => { scan(document.body); attendanceToToday(); hideReceiptTab(); }, 30); }).observe(document.body, { childList: true, subtree: true });
 
   // The attendance page remembers the date it was last on; when locked it must show today.
   function attendanceToToday(){
@@ -90,29 +95,32 @@
   function cardHtml(){
     const rows = Object.keys(AREAS).map(a => {
       const on = policy[a] !== false;
-      return `<label class="dl-row"><input type="checkbox" id="dl_${a}" ${on ? 'checked' : ''}><span><b>${AREAS[a].label}</b><br><small>${on ? 'Anyone with access can change the date' : 'Locked: everyone except Admin gets today\'s date'}</small></span></label>`;
+      return `<label class="dl-row"><input type="checkbox" id="dl_${a}" ${on ? 'checked' : ''} onchange="saveDateLockSettings(true)"><span><b>${AREAS[a].label}</b><br><small>${on ? 'Anyone with access can change the date' : 'Locked: everyone except Admin gets today\'s date'}</small></span></label>`;
     }).join('');
     return `<section class="sf-card ft-card" id="dlCard" style="grid-column:1/-1">
       ${ftCardHead('Dates on new entries', 'Keep a box ticked while you are entering old data from earlier in the year. When that work is done, untick it: everyone except Admin will then see today\'s date on new entries and cannot change it. Admin can always change dates.')}
       <div class="dl-rows">${rows}</div>
+      <div style="margin-top:10px;padding:8px 12px;border-radius:10px;background:#fff6dc;font-size:13px;color:#5a4710">You are logged in as Admin, so you can always change dates yourself. To see the lock working, sign in as a teacher or accountant.</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">${sfBtn('primary', 'check', 'Save date settings', 'saveDateLockSettings()')}<span id="dlMsg" style="font-size:12px;color:#4a5878"></span></div>
     </section>
     <style>.dl-rows{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px}.dl-row{display:flex;gap:10px;align-items:flex-start;border:1px solid #dde3ee;border-radius:10px;padding:10px 12px;cursor:pointer;background:#fff}.dl-row input{margin-top:3px;width:18px;height:18px}.dl-row small{color:#4a5878}</style>`;
   }
-  window.saveDateLockSettings = async function(){
+  window.saveDateLockSettings = async function(auto){
     if(!isAdmin()){ showToast('Only the Admin can change this.'); return; }
     const next = {};
     Object.keys(AREAS).forEach(a => { const c = document.getElementById('dl_' + a); next[a] = c ? c.checked : true; });
     const ok = await storageSet(KEY, next);
     if(ok === false){ showToast('Could not save. Check the connection and try again.'); return; }
     policy = next; loadedAt = Date.now();
-    showToast('Date settings saved.', 'burst');
+    showToast('Date settings saved.', auto ? undefined : 'burst');
     const m = document.getElementById('dlMsg'); if(m) m.textContent = 'Saved.';
+    if(auto){ document.querySelectorAll('.dl-row small').forEach((el, i) => { const k = Object.keys(AREAS)[i]; el.textContent = next[k] ? 'Anyone with access can change the date' : 'Locked: everyone except Admin gets today\'s date'; }); return; }
     const card = document.getElementById('dlCard'); if(card){ const tmp = document.createElement('div'); tmp.innerHTML = cardHtml(); card.replaceWith(...Array.from(tmp.children)); }
   };
   if(typeof window.renderReceiptTab === 'function'){
     const orig = window.renderReceiptTab;
     window.renderReceiptTab = async function(body){
+      if(!isAdmin()){ body.innerHTML = '<div class="empty-state"><b>Admin access only</b>Receipt and counter settings can be changed by the Admin.</div>'; return; }
       const r = await orig.apply(this, arguments);
       if(isAdmin()){
         await load(true);
