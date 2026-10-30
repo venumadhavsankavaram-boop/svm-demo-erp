@@ -13,8 +13,8 @@
    and saving are the same code as before. Nothing changes until Admin picks a style.
    ========================================================================== */
 (function(){
-  const DESKS = { classic: 'Classic (current screen)', cashier: 'Cashier desk', modern: 'Modern two-pane' };
-  const RECEIPTS = { existing: 'Existing receipt (current)', formal: 'Formal (serif, bordered)', modern: 'Modern (colour header)', slip: 'Compact slip', thermal: 'Thermal roll (80 mm)' };
+  const DESKS = { classic: 'Classic (current screen)', cashier: 'Cashier desk', modern: 'Modern two-pane', table: 'Fee table (compact rows)', quick: 'Quick collect (one bar on top)' };
+  const RECEIPTS = { existing: 'Existing receipt (current)', formal: 'Formal (serif, bordered)', modern: 'Modern (colour header)', slip: 'Compact slip', thermal: 'Thermal roll (80 mm)', bw: 'Black & white simple', bank: 'Bank voucher style', minimal: 'Minimal clean', preprinted: 'For pre-printed school paper (black & white)' };
   window.DESK_STYLES = DESKS; window.RECEIPT_STYLES = RECEIPTS;
   const deskStyle = () => { const v = (typeof receiptSettings !== 'undefined' && receiptSettings && receiptSettings.deskStyle) || 'classic'; return DESKS[v] ? v : 'classic'; };
   const rcptStyle = () => { const v = (typeof receiptSettings !== 'undefined' && receiptSettings && receiptSettings.receiptStyle) || 'existing'; return RECEIPTS[v] ? v : 'existing'; };
@@ -42,6 +42,11 @@
           <label class="ft-field"><span>Fee counter screen</span><select class="input" id="rsDesk" ${dis} onchange="rsPreview()">${opts(DESKS, deskStyle())}</select></label>
           <label class="ft-field"><span>Printed receipt style</span><select class="input" id="rsRcpt" ${dis} onchange="rsPreview()">${opts(RECEIPTS, rcptStyle())}</select></label>
         </div>
+        <div class="ft-form" id="rsPreBox" style="${rcptStyle() === 'preprinted' ? '' : 'display:none'}">
+          <label class="ft-field"><span>Pre-printed paper size</span><select class="input" id="rsPaper" ${dis} onchange="rsPreview()">${Object.keys(PAPERS).map(k => `<option value="${k}" ${k === paperKey() ? 'selected' : ''}>${PAPERS[k][2]}</option>`).join('')}</select></label>
+          <label class="ft-field"><span>Blank space at top for your letterhead (mm)</span><input type="number" min="0" max="120" class="input" id="rsTop" ${dis} value="${topMm()}" oninput="rsPreview()"></label>
+          <p class="dk-pre-hint">Prints only the receipt details, in plain black, so it can go on paper that already has your school name, address and logo. Do a test print on plain paper first and adjust the blank space.</p>
+        </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           ${canEdit ? sfBtn('primary', 'check', 'Save receipt settings', 'saveReceiptSettings()') : ''}
           ${sfBtn('secondary', 'receipt', 'Preview this receipt style', 'previewReceiptStyle()')}
@@ -66,6 +71,8 @@
     return {
       classic: frame(`<div style="height:22px;background:#fff;border:1px solid #dde3ee;border-radius:5px;margin-bottom:6px"></div><div style="display:flex;gap:5px;margin-bottom:6px">${b('25%','30px','#fff','border:1px solid #dde3ee')}${b('25%','30px','#fff','border:1px solid #dde3ee')}${b('25%','30px','#fff','border:1px solid #dde3ee')}${b('25%','30px','#fff','border:1px solid #dde3ee')}</div>${head}${head}<div style="height:26px;background:#fff;border:1px solid #dde3ee;border-radius:5px;display:flex;justify-content:flex-end;align-items:center;padding:0 6px"><span style="background:#4b3fa8;padding:3px 8px;border-radius:4px">Record Payment(s)</span></div>`),
       cashier: frame(`${bar}<div style="display:flex;gap:6px"><div style="width:45%;background:#fff;border:1px solid #dde3ee;border-radius:6px;padding:5px">${head}${head}<div style="height:22px;border:1px solid #c9d1e0;border-radius:4px;margin-bottom:4px"></div><div style="display:flex;gap:3px;margin-bottom:4px">${b('20%','10px','#e6e9f2')}${b('20%','10px','#e6e9f2')}${b('20%','10px','#e6e9f2')}</div><div style="display:flex;margin-bottom:5px">${b('25%','14px','#14213d','border-radius:3px 0 0 3px')}${b('25%','14px','#e6e9f2','border-radius:0')}${b('25%','14px','#e6e9f2','border-radius:0')}</div><div style="height:18px;background:#1f7a52;border-radius:5px;text-align:center;line-height:18px">Save &amp; print receipt</div></div><div style="flex:1;display:flex;flex-direction:column;gap:5px"><div style="display:flex;gap:4px">${b('33%','24px','#fff','border:1px solid #dde3ee')}${b('33%','24px','#fff','border:1px solid #dde3ee')}${b('33%','24px','#fff','border:1px solid #dde3ee')}</div>${b('100%','52px','#fff','border:1px solid #dde3ee')}${b('100%','40px','#fff','border:1px solid #dde3ee')}</div></div>`),
+      table: frame(`${bar}<div style="display:flex;gap:6px"><div style="width:48%;background:#fff;border:1px solid #dde3ee;border-radius:6px;padding:5px"><div style="border:1px solid #dde3ee;border-radius:4px;margin-bottom:5px">${[1,2,3,4].map(() => `<div style="height:13px;border-bottom:1px solid #edf0f6;display:flex;align-items:center;gap:4px;padding:0 4px"><span style="width:8px;height:8px;border:1px solid #9aa6c0;border-radius:2px"></span><span style="flex:1;height:5px;background:#e6e9f2"></span><span style="width:26px;height:7px;background:#eef2fb"></span></div>`).join('')}</div><div style="height:22px;border:1px solid #c9d1e0;border-radius:4px;margin-bottom:4px"></div><div style="height:16px;background:#0b6b4a;border-radius:4px;text-align:center;line-height:16px">Save &amp; print receipt</div></div><div style="flex:1;display:flex;flex-direction:column;gap:5px"><div style="display:flex;gap:4px">${b('33%','24px','#fff','border:1px solid #dde3ee')}${b('33%','24px','#fff','border:1px solid #dde3ee')}${b('33%','24px','#fff','border:1px solid #dde3ee')}</div>${b('100%','80px','#fff','border:1px solid #dde3ee')}</div></div>`),
+      quick: frame(`${bar}<div style="background:#fff;border:1px solid #dde3ee;border-radius:6px;padding:5px;display:flex;gap:8px"><div style="flex:1.4">${[1,2,3].map(() => `<div style="height:13px;border:1px solid #dde3ee;border-radius:4px;margin-bottom:3px"></div>`).join('')}</div><div style="flex:1"><div style="height:22px;border:1px solid #c9d1e0;border-radius:4px;margin-bottom:3px"></div><div style="height:10px;background:#e6e9f2;border-radius:3px;width:60%"></div></div></div><div style="display:flex;gap:6px;margin:5px 0"><div style="flex:1;height:16px;border:1px solid #c9d1e0;border-radius:4px;background:#fff"></div><div style="flex:1;height:16px;border:1px solid #c9d1e0;border-radius:4px;background:#fff"></div><div style="width:34%;height:16px;background:#1f7a52;border-radius:4px;text-align:center;line-height:16px">Save &amp; print</div></div>${b('100%','54px','#fff','border:1px solid #dde3ee')}`),
       modern: frame(`<div style="display:flex;gap:6px"><div style="flex:1;display:flex;flex-direction:column;gap:5px"><div style="display:flex;gap:4px">${b('33%','22px','#fff','border:1px solid #dde3ee')}${b('33%','22px','#fff','border:1px solid #dde3ee')}${b('33%','22px','#fff','border:1px solid #dde3ee')}</div>${b('100%','28px','#fff','border:1px solid #dde3ee;border-radius:12px')}${b('100%','28px','#fff','border:1px solid #dde3ee;border-radius:12px')}${b('100%','28px','#fff','border:1px solid #dde3ee;border-radius:12px')}</div><div style="width:42%;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.12);padding:6px;color:#231f3d">Make a receipt${head}${head}<div style="height:18px;background:#b0105f;border-radius:99px;margin-top:4px;color:#fff;text-align:center;line-height:18px">Save &amp; print receipt</div></div></div>`)
     };
   })();
@@ -81,20 +88,33 @@
     const pd = document.getElementById('rsPrevDesk'); if(pd) pd.innerHTML = DESK_PIC[dk.value] || '';
     const fr = document.getElementById('rsPrevFrame'), box = document.getElementById('rsPrevBox'); if(!fr) return;
     const sm = sampleRecs(); if(!sm) return;
-    const keep = receiptSettings.receiptStyle; receiptSettings.receiptStyle = rc.value;
-    let html = ''; try { html = frcDocHtml(frcBuildData(sm.recs)); } finally { receiptSettings.receiptStyle = keep; }
+    const pb = document.getElementById('rsPreBox'); if(pb) pb.style.display = rc.value === 'preprinted' ? '' : 'none';
+    const keep = Object.assign({}, receiptSettings); receiptSettings.receiptStyle = rc.value;
+    const pp = document.getElementById('rsPaper'), pt = document.getElementById('rsTop'); if(pp) receiptSettings.preprintPaper = pp.value; if(pt) receiptSettings.preprintTopMm = Number(pt.value);
+    let html = ''; try { html = frcDocHtml(frcBuildData(sm.recs)); } finally { receiptSettings = keep; }
     fr.srcdoc = noAutoPrint(html);
     const sc = rc.value === 'thermal' ? 0.9 : Math.min(1, (box.clientWidth || 520) / 820);
     fr.style.transform = 'scale(' + sc + ')'; fr.style.width = (rc.value === 'thermal' ? 420 : 820) + 'px'; fr.style.height = Math.round(360 / sc) + 'px';
     const n = document.getElementById('rsPrevNote'); if(n) n.textContent = sm.real ? '(shown with your latest receipt)' : '(sample)';
+  };
+  window.saveReceiptSettings = async function(){
+    const g = id => document.getElementById(id);
+    receiptSettings = Object.assign({}, receiptSettings || {}, { startNumber: Number(g('rsStart').value) || 1 });
+    if(g('rsDesk')) receiptSettings.deskStyle = g('rsDesk').value;
+    if(g('rsRcpt')) receiptSettings.receiptStyle = g('rsRcpt').value;
+    if(g('rsPaper')) receiptSettings.preprintPaper = g('rsPaper').value;
+    if(g('rsTop')) receiptSettings.preprintTopMm = Math.max(0, Math.min(120, Number(g('rsTop').value) || 0));
+    await storageSet(RECEIPT_SETTINGS_KEY, receiptSettings);
+    showToast('Receipt settings saved.', 'burst');
   };
   window.previewReceiptStyle = function(){
     const sel = document.getElementById('rsRcpt'); if(!sel) return;
     const p = (payments || []).filter(x => !x.voided && x.receiptNo).sort((a, b) => String(b.receiptNo).localeCompare(String(a.receiptNo)))[0];
     if(!p){ showToast('Make one receipt first, then you can preview the styles.'); return; }
     const recs = payments.filter(x => x.receiptNo === p.receiptNo && !x.voided);
-    const keep = receiptSettings.receiptStyle; receiptSettings.receiptStyle = sel.value;
-    let html; try { html = frcDocHtml(frcBuildData(recs)); } finally { receiptSettings.receiptStyle = keep; }
+    const keep = Object.assign({}, receiptSettings); receiptSettings.receiptStyle = sel.value;
+    const pp = document.getElementById('rsPaper'), pt = document.getElementById('rsTop'); if(pp) receiptSettings.preprintPaper = pp.value; if(pt) receiptSettings.preprintTopMm = Number(pt.value);
+    let html; try { html = frcDocHtml(frcBuildData(recs)); } finally { receiptSettings = keep; }
     html = noAutoPrint(html);
     const w = window.open('', '_blank'); if(!w){ showToast('Allow pop-ups to preview.'); return; }
     w.document.write(html); w.document.close();
@@ -145,7 +165,26 @@
   .dk-left .sf-paybar-total,.dk-right .sf-paybar-total{text-align:left}
   .dk-left .sf-paybar,.dk-right .sf-paybar{position:static !important;inset:auto !important;transform:none !important;margin-top:12px}
   .dk-right,.dk-left{overflow:visible}
-  @media (max-width:1000px){.dk-grid{flex-direction:column}body.dk-cashier .dk-left,body.dk-modern .dk-right{width:100%}}
+  body.dk-table .dk-left{width:560px;flex:none}
+  body.dk-table .dk-opts{gap:0;border:1px solid #dde3ee;border-radius:8px;overflow:hidden;background:#fff}
+  body.dk-table .dk-opt{border:0;border-bottom:1px solid #edf0f6;border-radius:0;padding:8px 12px}
+  body.dk-table .dk-opt.on{border:0;border-bottom:1px solid #edf0f6;background:#eef2fb;padding:8px 12px}
+  body.dk-table .dk-sub{display:none}
+  body.dk-table .dk-left .sf-paybar{display:flex;flex-direction:column;gap:10px}
+  body.dk-table .dk-left .sf-paybar .sf-btn--lg,body.dk-table .dk-left .sf-paybar .btn-primary{width:100%;height:46px;background:#0b6b4a;border-color:#0b6b4a}
+  body.dk-quick .dk-grid{flex-direction:column}
+  body.dk-quick .dk-left,body.dk-quick .dk-right{width:100%}
+  body.dk-quick .dk-pick{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:4px 24px;align-items:start}
+  body.dk-quick .dk-pick>.dk-lab:first-child{grid-column:1}
+  body.dk-quick .dk-opts{grid-column:1;grid-row:2 / span 4;gap:4px}
+  body.dk-quick .dk-opt{padding:7px 12px}
+  body.dk-quick .dk-pick>label[for=dkAmt],body.dk-quick .dk-pick>#dkAmt,body.dk-quick .dk-pick>.dk-hint,body.dk-quick .dk-pick>.dk-chips{grid-column:2}
+  body.dk-quick .dk-left .sf-paybar{display:flex;flex-direction:row;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:10px}
+  body.dk-quick .dk-left .sf-paybar>*{width:auto;flex:1 1 200px}
+  body.dk-quick .dk-left .sf-paybar .sf-btn--lg,body.dk-quick .dk-left .sf-paybar .btn-primary{flex:0 0 240px;height:48px;background:#1f7a52;border-color:#1f7a52}
+  body.dk-quick .dk-seg{flex:1 1 260px}
+  .dk-pre-hint{font-size:12px;color:#667}
+  @media (max-width:1000px){.dk-grid{flex-direction:column}body.dk-table .dk-left{width:100%}body.dk-cashier .dk-left,body.dk-modern .dk-right{width:100%}}
   `;
   const st = document.createElement('style'); st.textContent = css; document.head.appendChild(st);
 
@@ -182,7 +221,7 @@
     const classicHeads = root.querySelector('.sf-heads'), classicQuick = root.querySelector('#quickPayAmt');
     const modeSel = root.querySelector('#ledgerPayMode');
     const money0 = n => '₹' + Math.round(n).toLocaleString('en-IN');
-    const wrap = document.createElement('div'); wrap.className = 'dk-pick';
+    const wrap = document.createElement('div'); wrap.className = 'dk-pick dk-pick-' + style;
     wrap.innerHTML = `<label class="dk-lab">Select the fee(s) being paid</label>
       <div class="dk-opts">${heads.map((h, k) => `<div class="dk-opt" data-k="${k}"><span class="dk-dot"></span><div style="flex:1;min-width:0"><b>${esc(h.label)}</b><div class="dk-sub">${esc([h.freq, h.state, 'due ' + money0(h.out)].filter(Boolean).join(' · '))}</div></div><input type="number" min="0" max="${h.out}" class="dk-row dk-mono" data-k="${k}" style="display:none" aria-label="Amount for ${esc(h.label)}"></div>`).join('')}</div>
       <label class="dk-lab" for="dkAmt">Total received (₹)</label>
@@ -272,11 +311,11 @@
     const grid = document.createElement('div'); grid.className = 'dk-grid';
     const L = document.createElement('div'); L.className = 'dk-left';
     const R = document.createElement('div'); R.className = 'dk-right';
-    const formCard = document.createElement('div'); formCard.className = style === 'cashier' ? 'dk-card' : '';
+    const formCard = document.createElement('div'); formCard.className = (style === 'modern') ? '' : 'dk-card';
     formParts.forEach(el => formCard.appendChild(el));
     const restWrap = document.createElement('div'); restWrap.style.cssText = 'display:flex;flex-direction:column;gap:16px;min-width:0';
     rest.forEach(el => restWrap.appendChild(el));
-    if(style === 'cashier'){
+    if(style !== 'modern'){
       L.appendChild(formCard); R.appendChild(restWrap);
       const t = document.createElement('div'); t.className = 'dk-card';
       t.innerHTML = `<h4>Today at the counter <span style="font-weight:400;color:#4a5878;font-size:13px">· latest first</span></h4>` +
@@ -294,7 +333,7 @@
     const orig = renderStudentLedger;
     renderStudentLedger = function(body){
       const r = orig.apply(this, arguments);
-      document.body.classList.remove('dk-cashier', 'dk-modern');
+      document.body.classList.remove('dk-cashier', 'dk-modern', 'dk-table', 'dk-quick');
       const style = deskStyle();
       if(style !== 'classic' && body){
         try { restyle(body, style); document.body.classList.add('dk-' + style); }
@@ -403,6 +442,7 @@
 
   function styledDoc(style, d){
     if(style === 'thermal') return thermalDoc(d);
+    if(style === 'preprinted') return preprintedDoc(d);
     const S = STYLES[style], c = ctx(d);
     return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${esc(d.receiptNo)}</title>
     <style id="frcPage">@page{size:A4;margin:0}</style><style>${SHARED}${S.css}</style></head><body data-mode="a4">
@@ -411,13 +451,94 @@
     <script>function m(x){document.getElementById('mA4').className=x==='a4'?'on':'';document.getElementById('mA5').className=x==='a5'?'on':'';document.getElementById('frcPage').textContent=x==='a5'?'@page{size:210mm 148mm;margin:0}':'@page{size:A4;margin:0}'}
     window.onload=function(){setTimeout(function(){window.print()},250)}<\/script></body></html>`;
   }
+
+  STYLES.bw = {
+    css: `.copy{font-family:Arial,Helvetica,sans-serif;color:#000;border:1.5px solid #000;padding:3mm;font-size:9px}
+      .w-h{text-align:center;border-bottom:1.5px solid #000;padding-bottom:4px}.w-h b{font-size:12.5px;display:block}.w-h span{font-size:7px}
+      .w-t{display:flex;justify-content:space-between;margin:5px 0 4px;font-weight:700;font-size:9.5px}
+      .w-g{display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;border:1px solid #000;padding:4px 6px;font-size:8px}
+      table{border-collapse:collapse;width:100%;margin-top:5px;font-size:8.5px}th,td{border:1px solid #000;padding:3px 4px;text-align:left}th{font-size:7px;text-transform:uppercase}
+      .a{text-align:right}.tot td{font-weight:700;font-size:10px}.w-w{margin-top:4px;font-size:8px}.w-s{margin-top:auto;display:flex;justify-content:space-between;font-size:7px;padding-top:14px}.w-s span{border-top:1px solid #000;padding-top:2px;width:34mm}`,
+    copy: (lab, d, c) => `<section class="copy"><div class="w-h"><b>${esc(c.school)}</b><span>${esc(c.addr)}${c.phone ? ' · Ph: ' + esc(c.phone) : ''}</span></div>
+      <div class="w-t"><span>FEE RECEIPT — ${esc(lab)}</span><span>No. ${esc(d.receiptNo)}</span></div>
+      <div class="w-g"><div>Student: <b>${esc(c.name)}</b></div><div>Date: <b>${esc(d.date)}</b></div><div>Class: <b>${esc(c.cls)}</b></div><div>Adm. no.: <b>${esc(d.s.admissionNo)}</b></div><div>${c.rel}: <b>${esc(d.parentName)}</b></div><div>Mode: <b>${esc(d.mode)}</b></div></div>
+      <table><thead><tr><th>#</th><th>Fee head</th><th>Period</th><th class="a">Amount (₹)</th></tr></thead><tbody>${itemsRows(d, true)}</tbody><tfoot>${d.disc > 0 ? `<tr><td colspan="3" class="a">Discount</td><td class="a">${money(d.disc)}</td></tr>` : ''}<tr class="tot"><td colspan="3" class="a">TOTAL</td><td class="a">₹ ${money(d.netPaid)}</td></tr></tfoot></table>
+      <div class="w-w">Rupees in words: <b>${esc(d.words.replace(/^Rupees /, ''))}</b></div><div class="w-w">Balance due after this receipt: <b>₹ ${money(d.due)}</b></div>
+      <div class="w-s"><span>Parent / guardian</span><span style="text-align:right">${esc(d.signer)}</span></div></section>`
+  };
+  STYLES.bank = {
+    css: `.copy{font-family:'Times New Roman',serif;color:#111;border:3px double #111;padding:3mm;font-size:9px}
+      .k-h{text-align:center}.k-h b{font-size:13px;display:block;letter-spacing:.5px}.k-h span{font:7px Arial}
+      .k-t{text-align:center;font:700 11px Arial;letter-spacing:2px;border:1px solid #111;margin:5px 0;padding:2px}
+      .k-r{display:flex;justify-content:space-between;font:8.5px Arial;margin:3px 0}
+      .k-l{margin:5px 0;font-size:9.5px;line-height:1.7}.k-l u{text-decoration:none;border-bottom:1px dotted #111;font-weight:700;padding:0 3px}
+      table{width:100%;border-collapse:collapse;font:8.5px Arial;margin-top:3px}th,td{border-top:1px solid #111;border-bottom:1px solid #111;padding:3px 3px;text-align:left}.a{text-align:right}
+      .k-b{display:flex;justify-content:space-between;align-items:center;margin-top:6px}.k-amt{border:1.5px solid #111;padding:3px 9px;font:700 12px Arial}
+      .k-s{margin-top:auto;display:flex;justify-content:space-between;font:7px Arial;padding-top:14px}.k-s span{border-top:1px solid #111;padding-top:2px;width:34mm}`,
+    copy: (lab, d, c) => `<section class="copy"><div class="k-h"><b>${esc(c.school)}</b><span>${esc(c.addr)}${c.phone ? ' · Ph: ' + esc(c.phone) : ''}</span></div><div class="k-t">RECEIPT — ${esc(lab)}</div>
+      <div class="k-r"><span>No. <b>${esc(d.receiptNo)}</b></span><span>Date: <b>${esc(d.date)}</b></span></div>
+      <div class="k-l">Received with thanks from <u>${esc(c.name)}</u> of class <u>${esc(c.cls)}</u> (Adm. no. <u>${esc(d.s.admissionNo)}</u>), ${c.rel.toLowerCase()} <u>${esc(d.parentName)}</u>, the sum of <u>${esc(d.words)}</u> by <u>${esc(d.mode)}</u> towards:</div>
+      <table><thead><tr><th>Particulars</th><th>Period</th><th class="a">₹</th></tr></thead><tbody>${d.recs.map(r => `<tr><td>${esc(feeLabelFor(r))}</td><td>${esc(frcInstalmentText(r))}</td><td class="a">${money(r.amount)}</td></tr>`).join('')}</tbody></table>
+      <div class="k-b"><span style="font:8px Arial">Balance due: ₹ ${money(d.due)}</span><span class="k-amt">₹ ${money(d.netPaid)}/-</span></div>
+      <div class="k-s"><span>Received by</span><span style="text-align:right">${esc(d.signer)}</span></div></section>`
+  };
+  STYLES.minimal = {
+    css: `.copy{font-family:'Helvetica Neue',Arial,sans-serif;color:#222;padding:5mm 4mm;font-size:9px}
+      .n-h{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:1px solid #222;padding-bottom:5px}.n-h b{font-size:12px;font-weight:600}.n-h span{font-size:7px;color:#666;display:block}
+      .n-n{font-size:7px;letter-spacing:.14em;text-transform:uppercase;color:#777;margin-top:8px}.n-v{font-size:13px;font-weight:600}
+      .n-g{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin:8px 0}.n-g small{display:block;font-size:6.5px;letter-spacing:.1em;text-transform:uppercase;color:#777}
+      table{width:100%;border-collapse:collapse;font-size:9px}td{padding:5px 0;border-bottom:1px solid #e2e2e2}.a{text-align:right}
+      .n-t{display:flex;justify-content:space-between;font-size:13px;font-weight:600;margin-top:8px;padding-top:6px;border-top:1px solid #222}.n-w{font-size:8px;color:#555;margin-top:3px}
+      .n-s{margin-top:auto;display:flex;justify-content:space-between;font-size:7px;color:#777;padding-top:14px}.n-s span{border-top:1px solid #aaa;padding-top:2px;width:32mm}`,
+    copy: (lab, d, c) => `<section class="copy"><div class="n-h"><div><b>${esc(c.school)}</b><span>${esc(c.addr)}${c.phone ? ' · ' + esc(c.phone) : ''}</span></div><span>${esc(lab)}</span></div>
+      <div class="n-n">Receipt</div><div class="n-v">${esc(d.receiptNo)} <span style="font-size:8px;font-weight:400;color:#666;display:inline">· ${esc(d.date)}</span></div>
+      <div class="n-g"><div><small>Student</small><b>${esc(c.name)}</b></div><div><small>Class</small>${esc(c.cls)}</div><div><small>Adm. no.</small>${esc(d.s.admissionNo)}</div><div><small>Paid by</small>${esc(d.mode)}</div></div>
+      <table><tbody>${d.recs.map(r => `<tr><td>${esc(feeLabelFor(r))} <span style="color:#777">· ${esc(frcInstalmentText(r))}</span></td><td class="a">${money(r.amount)}</td></tr>`).join('')}</tbody></table>
+      <div class="n-t"><span>Total</span><span>₹ ${money(d.netPaid)}</span></div><div class="n-w">${esc(d.words)} · Balance due ₹ ${money(d.due)}</div>
+      <div class="n-s"><span>Parent signature</span><span style="text-align:right">${esc(d.signer)}</span></div></section>`
+  };
+
+  // For schools that print on paper that already carries the school's name, address and logo.
+  // Only the receipt details are printed, in plain black; a blank band at the top is left for the letterhead.
+  const PAPERS = { a5l: ['210mm', '148mm', 'Half A4 / A5 landscape (210 x 148 mm)'], a5p: ['148mm', '210mm', 'A5 portrait (148 x 210 mm)'], a4: ['210mm', '297mm', 'Full A4 (210 x 297 mm)'] };
+  window.RECEIPT_PAPERS = PAPERS;
+  const paperKey = () => { const v = receiptSettings && receiptSettings.preprintPaper; return PAPERS[v] ? v : 'a5l'; };
+  const topMm = () => { const v = Number(receiptSettings && receiptSettings.preprintTopMm); return v >= 0 && v <= 120 ? v : 35; };
+  function preprintedDoc(d){
+    const c = ctx(d), pk = paperKey(), P = PAPERS[pk], top = topMm(), n = d.recs.length;
+    const fs = n > 9 ? 9 : n > 6 ? 10 : 11;
+    const rows = d.recs.map((r, i) => `<tr><td class="n">${i + 1}</td><td>${esc(feeLabelFor(r))}${r.note ? ' (' + esc(r.note) + ')' : ''}</td><td>${esc(frcInstalmentText(r))}</td><td class="a">${money(r.amount)}</td></tr>`).join('');
+    return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${esc(d.receiptNo)}</title>
+    <style id="frcPage">@page{size:${P[0]} ${P[1]};margin:0}</style>
+    <style>*{box-sizing:border-box}html,body{margin:0}body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#dfe1ea;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .bar{position:sticky;top:0;z-index:5;display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center;padding:8px;background:#222;color:#fff;font:13px Arial}.bar button{font:inherit;font-weight:700;border:0;border-radius:8px;padding:7px 14px;cursor:pointer;background:rgba(255,255,255,.16);color:#fff}.bar button.on{background:#fff;color:#000}.bar .go{background:#168a5f;color:#fff}
+    .page{width:${P[0]};height:${P[1]};margin:10px auto;background:#fff;position:relative;box-shadow:0 6px 24px rgba(0,0,0,.18);overflow:hidden}
+    .lh{position:absolute;left:8mm;right:8mm;top:4mm;height:${Math.max(0, top - 8)}mm;border:1px dashed #9aa;color:#9aa;font:11px Arial;display:flex;align-items:center;justify-content:center}
+    .body{position:absolute;left:10mm;right:10mm;top:${top}mm;bottom:8mm;font-size:${fs}px;line-height:1.35;display:flex;flex-direction:column}
+    .r1{display:flex;justify-content:space-between;font-weight:700;font-size:${fs + 1}px;margin-bottom:5px}
+    .st{border-top:1px solid #000;border-bottom:1px solid #000;padding:4px 0;margin-bottom:6px}.st div{margin:1px 0}
+    table{width:100%;border-collapse:collapse}th,td{border:1px solid #000;padding:3px 5px;text-align:left}th{font-size:${fs - 2}px;text-transform:uppercase}.n{width:22px}.a{text-align:right;white-space:nowrap}
+    .tot td{font-weight:700;font-size:${fs + 1}px}.ft{margin-top:6px}.ft div{margin:2px 0}
+    .sg{margin-top:auto;display:flex;justify-content:space-between;padding-top:18px}.sg span{border-top:1px solid #000;padding-top:2px;min-width:44mm;text-align:center;font-size:${fs - 2}px}
+    @media print{body{background:#fff}.bar{display:none}.page{margin:0;box-shadow:none}.lh{display:none}}</style></head><body>
+    <div class="bar"><span>Pre-printed paper · ${esc(P[2])} · ${top} mm left blank at the top</span><button id="cs" class="on" onclick="c('STUDENT COPY')">Student copy</button><button id="co" onclick="c('OFFICE COPY')">Office copy</button><button class="go" onclick="window.print()">🖨 Print</button></div>
+    <div class="page"><div class="lh">Space for your pre-printed school name, address and logo (not printed)</div>
+    <div class="body"><div class="r1"><span>FEE RECEIPT &nbsp; No. ${esc(d.receiptNo)}</span><span id="cl">STUDENT COPY</span><span>Date: ${esc(d.date)}</span></div>
+    <div class="st"><div>Received from: <b>${esc(c.name)}</b> &nbsp; Class: <b>${esc(c.cls)}</b> &nbsp; Adm. no.: <b>${esc(d.s.admissionNo)}</b></div><div>${c.rel}: <b>${esc(d.parentName)}</b> &nbsp; Mode: <b>${esc(d.mode)}</b>${d.detail ? ' (' + esc(d.detail) + ')' : ''}</div></div>
+    <table><thead><tr><th>#</th><th>Fee head</th><th>Period</th><th class="a">Amount (₹)</th></tr></thead><tbody>${rows}</tbody><tfoot>${d.disc > 0 ? `<tr><td colspan="3" class="a">Discount allowed</td><td class="a">${money(d.disc)}</td></tr>` : ''}<tr class="tot"><td colspan="3" class="a">TOTAL RECEIVED</td><td class="a">₹ ${money(d.netPaid)}</td></tr></tfoot></table>
+    <div class="ft"><div>Amount in words: <b>${esc(d.words)}</b></div><div>Balance due after this receipt: <b>₹ ${money(d.due)}</b></div></div>
+    <div class="sg"><span>Parent / guardian signature</span><span>${esc(d.signer)}${d.collector ? ' (' + esc(d.collector) + ')' : ''}</span></div></div></div>
+    <script>function c(t){document.getElementById('cl').textContent=t;document.getElementById('cs').className=t[0]==='S'?'on':'';document.getElementById('co').className=t[0]==='O'?'on':''}
+    window.onload=function(){setTimeout(function(){window.print()},250)}<\/script></body></html>`;
+  }
+
   window.frcStyledDoc = styledDoc;
 
   if(typeof frcDocHtml === 'function'){
     const origDoc = frcDocHtml;
     frcDocHtml = function(d){
       const s = rcptStyle();
-      if(s === 'existing' || !(s === 'thermal' || STYLES[s])) return origDoc.apply(this, arguments);
+      if(s === 'existing' || !(s === 'thermal' || s === 'preprinted' || STYLES[s])) return origDoc.apply(this, arguments);
       try { return styledDoc(s, d); } catch(e){ console.warn('Receipt style skipped:', e); return origDoc.apply(this, arguments); }
     };
     window.frcDocHtml = frcDocHtml;
