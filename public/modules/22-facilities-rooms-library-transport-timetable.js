@@ -863,12 +863,6 @@ const SYLLABUS_TAB_PERM_KEYS = { tracker:'syllabus_tracker', homework:'syllabus_
     // A stock-purchase sale to a student becomes its own `payments` row
     // (category:'extra') — must not push onto an unloaded array.
     await ensureDataLoaded('payments', loadPaymentsData);
-    if(invCheckoutBuyerType==='Student'){
-      // Only lines that actually receive money get a receipt number — reserve exactly that many.
-      let rem = Number((document.getElementById('invCheckoutPaidAmount') || {}).value) || 0, nRcpt = 0;
-      invCart.forEach(c => { const lp = Math.max(0, Math.min(rem, c.price*c.qty - c.discount)); rem -= lp; if(lp > 0) nRcpt++; });
-      if(nRcpt > 0) await rcEnsure(nRcpt);
-    }
     if(invCheckoutBuyerType==='Student' && !invCheckoutStudentId){ showToast('Select a student.'); return; }
     for(const c of invCart){
       const it = inventoryItems.find(x => x.id === c.itemId);
@@ -884,6 +878,13 @@ const SYLLABUS_TAB_PERM_KEYS = { tracker:'syllabus_tracker', homework:'syllabus_
     if(today > todayStr){ showToast("Sale date can't be in the future."); return; }
     const grandTotal = invCart.reduce((sum,c) => sum+c.price*c.qty-c.discount, 0);
     const buyerStudent = invCheckoutBuyerType==='Student' ? students.find(s => s.id===invCheckoutStudentId) : null;
+    // Receipt numbers are issued only now, after every check above passed.
+    if(invCheckoutBuyerType==='Student'){
+      // Only lines that actually receive money get a receipt number — reserve exactly that many.
+      let rem = Number((document.getElementById('invCheckoutPaidAmount') || {}).value) || 0, nRcpt = 0;
+      invCart.forEach(c => { const lp = Math.max(0, Math.min(rem, c.price*c.qty - c.discount)); rem -= lp; if(lp > 0) nRcpt++; });
+      if(nRcpt > 0) await rcEnsure(nRcpt);
+    }
     let remainingPaid = paidAmountInput;
     const _saleBefore = payments.length;
     invCart.forEach(c => {
@@ -1102,7 +1103,6 @@ const SYLLABUS_TAB_PERM_KEYS = { tracker:'syllabus_tracker', homework:'syllabus_
   async function submitInventoryReturnImpl(){
     // A cash refund on a return can push a new `payments` row too.
     await ensureDataLoaded('payments', loadPaymentsData);
-    { const cr = document.getElementById('invRetCashRefund'); if(cr && Number(cr.value) > 0) await rcEnsure(1); }
     const saleId = document.getElementById('invRetSaleId').value;
     const s = inventorySales.find(x => x.id === saleId);
     if(!s) return;
@@ -1124,6 +1124,9 @@ const SYLLABUS_TAB_PERM_KEYS = { tracker:'syllabus_tracker', homework:'syllabus_
     const today = retDateInput ? retDateInput.value : todayStr;
     if(!today){ showToast('Set a return date.'); return; }
     if(today > todayStr){ showToast("Return date can't be in the future."); return; }
+
+    // Issue the refund receipt number only now, after every check above passed.
+    if(cashRefunded > 0 && s.buyerType === 'Student' && s.sefId) await rcEnsure(1);
 
     // 1. Restock — the returned units are assumed resellable.
     const item = inventoryItems.find(x => x.id === s.itemId);
@@ -2254,7 +2257,6 @@ const SYLLABUS_TAB_PERM_KEYS = { tracker:'syllabus_tracker', homework:'syllabus_
       password: document.getElementById('uPassword').value,
       role: document.getElementById('uRole').value,
       linkedStudentId: document.getElementById('uLinkedStudent').value,
-      branchId: (document.getElementById('uBranchField') && document.getElementById('uBranchField').style.display !== 'none') ? document.getElementById('uBranch').value : undefined,
       recoveryCode: document.getElementById('uRecoveryCode').value,
     };
     let linkedStaff = null;
