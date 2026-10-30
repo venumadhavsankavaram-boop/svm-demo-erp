@@ -117,6 +117,16 @@
   .dk-seg{display:flex;border:1px solid #c9d1e0;border-radius:8px;overflow:hidden;margin:4px 0 8px}
   .dk-seg button{flex:1;padding:10px 0;border:0;border-right:1px solid #c9d1e0;background:#fff;font-weight:600;cursor:pointer}
   .dk-seg button:last-child{border-right:0}.dk-seg button.on{background:#14213d;color:#fff}
+  .dk-lab{display:block;font-size:12px;font-weight:600;color:#4a5878;margin:2px 0 6px;text-transform:uppercase;letter-spacing:.04em}
+  .dk-opts{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+  .dk-opt{display:flex;align-items:center;gap:12px;border:1px solid #dde3ee;border-radius:10px;padding:11px 14px;cursor:pointer;background:#fff}
+  .dk-opt.on{border:2px solid #14213d;padding:10px 13px;background:#f5f7fc}
+  .dk-dot{width:18px;height:18px;border-radius:5px;border:2px solid #9aa6c0;background:#fff;flex:none;box-sizing:border-box}
+  .dk-opt.on .dk-dot{border-color:#14213d;background:#14213d;box-shadow:inset 0 0 0 3px #fff}
+  .dk-sub{color:#4a5878;font-size:12px}
+  .dk-row{width:110px;height:38px;border:1px solid #c9d1e0;border-radius:6px;padding:0 8px;font-weight:600;text-align:right;flex:none}
+  .dk-amt{width:100%;box-sizing:border-box;height:54px;font-size:24px;font-weight:600;border:1px solid #c9d1e0;border-radius:8px;padding:0 12px}
+  .dk-hint{font-size:12px;color:#4a5878;margin-top:5px}
   .dk-note{font-size:12px;color:#4a5878;text-align:center;margin-top:8px}
   body.dk-cashier .dk-left{width:540px;flex:none}
   body.dk-cashier .dk-left .sf-heads{display:flex;flex-direction:column;gap:8px}
@@ -156,26 +166,77 @@
   }
   function nameOf(sid){ const s = (students || []).find(x => x.id === sid); return s ? (s.firstName + ' ' + (s.lastName || '')).trim() : '—'; }
 
+  // Pick the fee(s) being paid (tick the heads, like the top fee desks), then the amount for each is filled in
+  // and stays editable; the "Total received" box can also be typed and is shared across the ticked heads in order.
+  // The real amount boxes of the classic screen stay in the page (hidden) and are filled from here, so the
+  // saving, validation and receipt numbering are the same code as before.
   function addHelpers(root, style){
-    const amt = root.querySelector('#quickPayAmt');
+    const bar = root.querySelector('.sf-paybar'); if(!bar) return;
+    const heads = Array.from(root.querySelectorAll('article.sf-head')).map(a => {
+      const inp = a.querySelector('.ledger-pay-input'); if(!inp) return null;
+      const h4 = a.querySelector('h4');
+      const bd = a.querySelector('header [class*=badge], header .sf-badge, header .pill');
+      return { inp, label: h4 ? h4.textContent.trim() : 'Fee', freq: ((a.querySelector('.sf-freq') || {}).textContent || '').trim(),
+        state: bd ? bd.textContent.trim() : '', out: Number(inp.dataset.outstanding) || 0, on: false, amt: 0 };
+    }).filter(Boolean);
+    const classicHeads = root.querySelector('.sf-heads'), classicQuick = root.querySelector('#quickPayAmt');
     const modeSel = root.querySelector('#ledgerPayMode');
-    const bar = root.querySelector('.sf-paybar');
-    if(!bar) return;
-    if(amt){
-      const chips = document.createElement('div'); chips.className = 'dk-chips';
-      const vals = [['Full', null], ['₹3,000', 3000], ['₹2,000', 2000], ['₹1,000', 1000]];
-      vals.forEach(([lab, v]) => {
-        const b = document.createElement('button'); b.type = 'button'; b.className = 'dk-chip'; b.textContent = lab;
-        b.onclick = () => {
-          const full = v == null;
-          const val = full ? (window.__dkDue || 0) : v;
-          if(!val) return;
-          amt.value = val; if(typeof onQuickPayInput === 'function') onQuickPayInput();
-        };
-        chips.appendChild(b);
-      });
-      amt.closest('label').after(chips);
+    const money0 = n => '₹' + Math.round(n).toLocaleString('en-IN');
+    const wrap = document.createElement('div'); wrap.className = 'dk-pick';
+    wrap.innerHTML = `<label class="dk-lab">Select the fee(s) being paid</label>
+      <div class="dk-opts">${heads.map((h, k) => `<div class="dk-opt" data-k="${k}"><span class="dk-dot"></span><div style="flex:1;min-width:0"><b>${esc(h.label)}</b><div class="dk-sub">${esc([h.freq, h.state, 'due ' + money0(h.out)].filter(Boolean).join(' · '))}</div></div><input type="number" min="0" max="${h.out}" class="dk-row dk-mono" data-k="${k}" style="display:none" aria-label="Amount for ${esc(h.label)}"></div>`).join('')}</div>
+      <label class="dk-lab" for="dkAmt">Total received (₹)</label>
+      <input id="dkAmt" type="number" min="0" class="dk-amt dk-mono" inputmode="numeric">
+      <div class="dk-hint">Balance on the selected fee(s) after this: <b id="dkBal">—</b></div>
+      <div class="dk-chips"></div>`;
+    bar.before(wrap);
+    if(classicHeads) classicHeads.style.display = 'none';
+    if(classicQuick && classicQuick.closest('label')) classicQuick.closest('label').style.display = 'none';
+    const rows = Array.from(wrap.querySelectorAll('.dk-opt')), rowInps = Array.from(wrap.querySelectorAll('.dk-row'));
+    const box = wrap.querySelector('#dkAmt'), chips = wrap.querySelector('.dk-chips');
+    function pushToClassic(){
+      heads.forEach(h => { h.inp.value = h.on ? h.amt : 0; });
+      if(typeof onLedgerPayInput === 'function') onLedgerPayInput();
+      const sel = heads.filter(h => h.on), got = sel.reduce((a, h) => a + h.amt, 0), due = sel.reduce((a, h) => a + h.out, 0);
+      document.getElementById('dkBal').textContent = sel.length ? money0(Math.max(0, due - got)) : '—';
+      return { got, due };
     }
+    function drawChips(due){
+      chips.innerHTML = '';
+      if(!due) return;
+      const mk = (lab, v) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'dk-chip'; b.textContent = lab; b.onclick = () => { distribute(v); }; chips.appendChild(b); };
+      mk('Full ' + money0(due), due);
+      [3000, 2000, 1000, 500].filter(v => v < due).slice(0, 3).forEach(v => mk(money0(v), v));
+    }
+    function drawRows(){
+      heads.forEach((h, k) => { rows[k].classList.toggle('on', h.on); rowInps[k].style.display = h.on ? '' : 'none'; if(h.on && document.activeElement !== rowInps[k]) rowInps[k].value = h.amt; });
+    }
+    function refresh(keepBox){
+      drawRows(); const r = pushToClassic();
+      if(!keepBox) box.value = r.got || '';
+      drawChips(r.due);
+    }
+    function distribute(total){
+      let left = Math.max(0, Number(total) || 0);
+      heads.forEach(h => { if(h.on){ const t = Math.min(left, h.out); h.amt = t; left -= t; } });
+      refresh(false);
+    }
+    rows.forEach((el, k) => {
+      el.addEventListener('click', ev => {
+        if(ev.target.classList.contains('dk-row')) return;
+        const h = heads[k]; h.on = !h.on; h.amt = h.on ? h.out : 0; refresh(false);
+      });
+    });
+    rowInps.forEach((inp, k) => {
+      inp.addEventListener('input', () => { const h = heads[k]; h.amt = Math.max(0, Math.min(Number(inp.value) || 0, h.out)); refresh(false); });
+      inp.addEventListener('blur', () => { inp.value = heads[k].amt; });
+    });
+    box.addEventListener('input', () => {
+      let left = Math.max(0, Number(box.value) || 0);
+      heads.forEach(h => { if(h.on){ const t = Math.min(left, h.out); h.amt = t; left -= t; } });
+      drawRows(); const r = pushToClassic(); drawChips(r.due);
+    });
+    box.addEventListener('keydown', ev => { if(ev.key === 'Enter'){ const f = bar.querySelector('.sf-btn--lg,.btn-primary'); if(f) f.click(); } });
     if(modeSel){
       const seg = document.createElement('div'); seg.className = 'dk-seg';
       Array.from(modeSel.options).forEach(o => {
@@ -189,6 +250,7 @@
     const note = document.createElement('div'); note.className = 'dk-note';
     note.textContent = 'The receipt number is given when you press Save.';
     bar.appendChild(note);
+    if(heads.length){ heads[0].on = true; heads[0].amt = heads[0].out; refresh(false); }
   }
 
   function restyle(body, style){

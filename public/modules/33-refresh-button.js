@@ -34,8 +34,11 @@
   btn.addEventListener('click', refresh);
   document.body.appendChild(btn);
   function paint(){
-    try{ btn.style.display = (typeof currentUser !== 'undefined' && currentUser) ? 'inline-flex' : 'none'; }catch(e){ btn.style.display = 'none'; }
+    try{ const ov = document.getElementById('loginOverlay');
+      const onLogin = ov && getComputedStyle(ov).display !== 'none';
+      btn.style.display = (!onLogin && typeof currentUser !== 'undefined' && currentUser) ? 'inline-flex' : 'none'; }catch(e){ btn.style.display = 'none'; }
   }
+  paint();
   setInterval(paint, 1500);
   async function refresh(){
     if(busy) return;
