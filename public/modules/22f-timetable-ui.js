@@ -22,14 +22,22 @@ function ttxStaffName(id){
 function ttxShortDay(d){ return String(d).slice(0, 3); }
 function ttxTeachingPeriods(){ return timetablePeriods.filter(p => !p.isBreak); }
 
-/* Shared-period subjects: Mass Drill (MD) is taken by one teacher with several classes together,
-   so the same teacher may be in more than one class at that time. Every other subject still
+/* Shared-period subjects: Mass Drill (MD) and Bala Vikas are taken by one teacher with several classes together,
+   so the same teacher may be in more than one class at that time (MD with MD, Bala Vikas with Bala Vikas). Every other subject still
    blocks double-booking. A teacher is only "double-booked" if some entry in that slot is NOT a shared subject. */
-function ttIsSharedSubject(name){
+function ttSharedKind(name){
   const k = String(name == null ? '' : name).toLowerCase().replace(/[^a-z]/g, '');
-  return k === 'md' || k.indexOf('massdrill') === 0;
+  if(k === 'md' || k.indexOf('massdrill') === 0) return 'md';
+  if(k.indexOf('balavikas') === 0 || k.indexOf('balvikas') === 0) return 'balavikas';
+  return '';
 }
-function ttAllShared(list){ return list.length > 0 && list.every(e => ttIsSharedSubject(e.subject)); }
+function ttIsSharedSubject(name){ return ttSharedKind(name) !== ''; }
+// every entry in the slot is the same shared subject (all Mass Drill, or all Bala Vikas)
+function ttAllShared(list){
+  if(!list.length) return false;
+  const k = ttSharedKind(list[0].subject);
+  return k !== '' && list.every(e => ttSharedKind(e.subject) === k);
+}
 /* How many entries share one teacher + day + period (>1 means a clash). */
 function ttxClashMap(){
   const m = {};

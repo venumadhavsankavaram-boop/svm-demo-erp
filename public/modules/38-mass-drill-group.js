@@ -1,5 +1,5 @@
 /* ============================================================================
-   Timetable: "Mass Drill for a group" - give MD to many classes in one go.
+   Timetable: Mass Drill (MD) / Bala Vikas for a group - give it to many classes in one go.
    Pick day + period + teacher, tick the classes (or use the Primary / High school
    buttons), and every ticked class gets Mass Drill in that slot. A class that already
    has another subject there is skipped and listed. Needs an MD / Mass Drill subject in each class.
@@ -8,6 +8,9 @@
   const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const canEdit = () => { try { return ['Admin', 'Principal'].includes(currentUser.role); } catch(e){ return false; } };
   const shared = n => typeof ttIsSharedSubject === 'function' && ttIsSharedSubject(n);
+  const kindOf = n => typeof ttSharedKind === 'function' ? ttSharedKind(n) : '';
+  const KIND_LABEL = { md: 'Mass Drill (MD)', balavikas: 'Bala Vikas' };
+  let curKind = '';
   const primaryIdx = () => { const i = CLASS_LEVELS.indexOf('5th Class'); return i < 0 ? 8 : i; };
   const isPrimary = cls => CLASS_LEVELS.indexOf(cls) <= primaryIdx();
 
@@ -15,7 +18,7 @@
   function targets(){
     const out = [];
     CLASS_LEVELS.forEach(cls => {
-      const subs = subjectsList.filter(s => s.className === cls && shared(s.name));
+      const subs = subjectsList.filter(s => s.className === cls && kindOf(s.name) === curKind);
       const secs = new Set(); subs.forEach(s => (s.sections || []).forEach(x => secs.add(x)));
       Array.from(secs).sort().forEach(sec => { const s = subs.find(x => (x.sections || []).includes(sec)); out.push({ cls, sec, subject: s.name }); });
     });
@@ -41,7 +44,7 @@
     if(typeof timetableTab !== 'undefined' && timetableTab !== 'class') return;
     if(!canEdit()) return;
     const bar = document.createElement('div'); bar.className = 'md-bar';
-    bar.innerHTML = `<span>🏃 <b>Mass Drill (MD)</b> for many classes in one go</span><button type="button" class="btn btn-ghost" onclick="openMdGroup()">Set Mass Drill for a group</button>`;
+    bar.innerHTML = `<span>🏃 <b>Mass Drill (MD) and Bala Vikas</b> for many classes in one go</span><button type="button" class="btn btn-ghost" onclick="openMdGroup()">Set for a group of classes</button>`;
     body.prepend(bar);
   }
   if(typeof renderTimetableBody === 'function'){
@@ -59,19 +62,22 @@
   }
   window.closeMdGroup = function(){ const o = document.getElementById('mdGroupOverlay'); if(o) o.classList.remove('open'); };
 
-  window.openMdGroup = function(){
+  window.openMdGroup = function(kind){
+    const kinds = ['md', 'balavikas'].filter(k => subjectsList.some(s => kindOf(s.name) === k));
+    curKind = (typeof kind === 'string' && kinds.includes(kind)) ? kind : (kinds.includes(curKind) ? curKind : (kinds[0] || 'md'));
     const T = targets();
     const days = activeTimetableDays(), periods = timetablePeriods.filter(p => !p.isBreak);
-    const mdIds = new Set(); subjectsList.filter(s => shared(s.name)).forEach(s => (s.staffIds || []).forEach(i => mdIds.add(i)));
+    const mdIds = new Set(); subjectsList.filter(s => kindOf(s.name) === curKind).forEach(s => (s.staffIds || []).forEach(i => mdIds.add(i)));
     const act = staffList.filter(s => staffIsActive(s));
     const stOpt = s => `<option value="${s.id}">${esc(s.firstName)} ${esc(s.lastName)}</option>`;
     const boxes = T.map(t => `<label class="md-chk"><input type="checkbox" class="md-box" value="${esc(key(t))}" onchange="mdCheck()"> ${esc(t.cls)} ${esc(t.sec)}</label>`).join('');
     const missing = CLASS_LEVELS.filter(c => !T.some(t => t.cls === c));
+    const kindSel = kinds.length > 1 ? '<div class="f-field" style="margin-bottom:8px"><label>Subject</label><select onchange="openMdGroup(this.value)">' + kinds.map(k => '<option value="' + k + '"' + (k === curKind ? ' selected' : '') + '>' + esc(KIND_LABEL[k]) + '</option>').join('') + '</select></div>' : '';
     const mdStaff = act.filter(s => mdIds.has(s.id)), otherStaff = act.filter(s => !mdIds.has(s.id));
-    const staffOpts = '<option value="">Select teacher</option>' + (mdStaff.length ? '<optgroup label="Teaches Mass Drill">' + mdStaff.map(stOpt).join('') + '</optgroup>' : '') + '<optgroup label="Other staff">' + otherStaff.map(stOpt).join('') + '</optgroup>';
+    const staffOpts = '<option value="">Select teacher</option>' + (mdStaff.length ? '<optgroup label="Teaches ' + esc(KIND_LABEL[curKind] || 'this subject') + '">' + mdStaff.map(stOpt).join('') + '</optgroup>' : '') + '<optgroup label="Other staff">' + otherStaff.map(stOpt).join('') + '</optgroup>';
     const dayOpts = '<option value="*">Every day of the week</option>' + days.map(d => '<option>' + esc(d) + '</option>').join('');
     const perOpts = periods.map(p => '<option value="' + esc(p.id) + '">' + esc(p.label) + ' (' + esc(p.start) + '–' + esc(p.end) + ')</option>').join('');
-    const missNote = missing.length ? '<div class="md-note md-warn">No Mass Drill subject yet in: ' + missing.map(esc).join(', ') + '. Add an "MD" or "Mass Drill" subject in Manage Subjects to include them.</div>' : '';
+    const missNote = missing.length ? '<div class="md-note md-warn">No ' + esc(KIND_LABEL[curKind] || 'such') + ' subject yet in: ' + missing.map(esc).join(', ') + '. Add one in Manage Subjects to include them.</div>' : '';
     const form = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:8px">'
       + '<div class="f-field"><label>Day</label><select id="mdDay" onchange="mdCheck()">' + dayOpts + '</select></div>'
       + '<div class="f-field"><label>Period</label><select id="mdPer" onchange="mdCheck()">' + perOpts + '</select></div>'
@@ -80,10 +86,10 @@
       + '<button type="button" onclick="mdPick(\'high\')">High school (6th – ' + esc(CLASS_LEVELS[CLASS_LEVELS.length - 1]) + ')</button>'
       + '<button type="button" onclick="mdPick(\'all\')">All classes</button><button type="button" onclick="mdPick(\'none\')">Clear ticks</button></div>'
       + '<div class="md-grid">' + boxes + '</div>' + missNote + '<div id="mdPreview"></div>'
-      + '<div class="modal-actions"><button type="button" class="btn btn-ghost" onclick="closeMdGroup()">Cancel</button><button type="button" class="btn btn-primary" id="mdApplyBtn" onclick="applyMdGroup()" disabled>Set Mass Drill</button></div>';
-    const empty = '<div class="md-note md-warn">No class has a Mass Drill subject yet. In Manage Subjects, add a subject named "MD" or "Mass Drill" to the classes that take it, then come back here.</div>';
+      + '<div class="modal-actions"><button type="button" class="btn btn-ghost" onclick="closeMdGroup()">Cancel</button><button type="button" class="btn btn-primary" id="mdApplyBtn" onclick="applyMdGroup()" disabled>Set it</button></div>';
+    const empty = '<div class="md-note md-warn">No class has a Mass Drill (MD) or Bala Vikas subject yet. In Manage Subjects, add a subject named "MD", "Mass Drill" or "Bala Vikas" to the classes that take it, then come back here.</div>';
     overlay();
-    document.getElementById('mdGroupBody').innerHTML = '<h2>Mass Drill for a group</h2><p class="modal-sub">One teacher takes Mass Drill with several classes together in the same period.</p>' + (T.length ? form : empty);
+    document.getElementById('mdGroupBody').innerHTML = '<h2>' + esc(KIND_LABEL[curKind] || 'Mass Drill') + ' for a group</h2><p class="modal-sub">One teacher takes this subject with several classes together in the same period.</p>' + kindSel + (T.length ? form : empty);
     document.getElementById('mdGroupOverlay').classList.add('open');
     mdCheck();
   };
@@ -108,11 +114,11 @@
         const ex = timetableEntries.find(e => e.className === t.cls && e.section === t.sec && e.day === day && e.period === per);
         const label = t.cls + ' ' + t.sec + (dayList.length > 1 ? ' ' + String(day).slice(0, 3) : '');
         if(!ex) add.push({ t, day });
-        else if(shared(ex.subject)) (ex.staffId === staff ? same : add).push({ t, day });
+        else if(kindOf(ex.subject) === curKind) (ex.staffId === staff ? same : add).push({ t, day });
         else skip.push(label + ' (has ' + ex.subject + ')');
       });
-      // The teacher must not be teaching something that is not Mass Drill in this slot.
-      if(staff) timetableEntries.filter(e => e.day === day && e.period === per && e.staffId === staff && !shared(e.subject) && !T.some(t => t.cls === e.className && t.sec === e.section)).forEach(e => busy.push(e));
+      // The teacher must not be teaching something that is not this subject in this slot.
+      if(staff) timetableEntries.filter(e => e.day === day && e.period === per && e.staffId === staff && kindOf(e.subject) !== curKind && !T.some(t => t.cls === e.className && t.sec === e.section)).forEach(e => busy.push(e));
     });
     return { dayList, per, staff, T, add, same, skip, busy };
   }
@@ -120,11 +126,11 @@
     const pv = document.getElementById('mdPreview'), btn = document.getElementById('mdApplyBtn'); if(!pv) return;
     const p = plan(); let html = '', can = false;
     if(!p.staff) html = '<div class="md-note md-warn">Choose a teacher.</div>';
-    else if(!p.T.length) html = '<div class="md-note md-warn">Tick the classes that should have Mass Drill.</div>';
+    else if(!p.T.length) html = '<div class="md-note md-warn">Tick the classes that should have this subject.</div>';
     else if(p.busy.length) html = '<div class="md-note md-bad">⚠ This teacher is already teaching another subject at this time: ' + p.busy.map(e => esc(e.className) + ' ' + esc(e.section) + ' ' + esc(String(e.day).slice(0, 3)) + ' (' + esc(e.subject) + ')').join(', ') + '. Choose a different teacher or period.</div>';
     else {
       can = p.add.length > 0;
-      html = '<div class="md-note md-ok">Will set Mass Drill for <b>' + p.add.length + '</b> class-period' + (p.add.length === 1 ? '' : 's') + (p.dayList.length > 1 ? ' across ' + p.dayList.length + ' days' : '') + (p.same.length ? ' · ' + p.same.length + ' already set' : '') + '.</div>' +
+      html = '<div class="md-note md-ok">Will set ' + esc(KIND_LABEL[curKind] || 'it') + ' for <b>' + p.add.length + '</b> class-period' + (p.add.length === 1 ? '' : 's') + (p.dayList.length > 1 ? ' across ' + p.dayList.length + ' days' : '') + (p.same.length ? ' · ' + p.same.length + ' already set' : '') + '.</div>' +
         (p.skip.length ? '<div class="md-note md-warn"><b>' + p.skip.length + ' skipped</b>, they already have another subject in this period: ' + p.skip.map(esc).join('; ') + '. Clear that slot first if it should be Mass Drill.</div>' : '');
     }
     pv.innerHTML = html; if(btn) btn.disabled = !can;
@@ -140,7 +146,7 @@
     });
     await storageSet(TIMETABLE_KEY, timetableEntries);
     closeMdGroup(); renderTimetableBody();
-    showToast('Mass Drill set for ' + p.add.length + ' class-period' + (p.add.length === 1 ? '' : 's') + (p.skip.length ? ' (' + p.skip.length + ' skipped)' : '') + '.', 'burst');
+    showToast((KIND_LABEL[curKind] || 'Subject') + ' set for ' + p.add.length + ' class-period' + (p.add.length === 1 ? '' : 's') + (p.skip.length ? ' (' + p.skip.length + ' skipped)' : '') + '.', 'burst');
   };
 
   /* ---- Any subject: repeat the same period on every day of the week (class timetable cell) ---- */
@@ -168,12 +174,12 @@
       if(!rep || !subject || !staffId) return r;
       const here = timetableEntries.find(e => e.className === cls && e.section === sec && e.day === day0 && e.period === per && e.subject === subject && e.staffId === staffId);
       if(!here) return r;                       // the normal save was refused (teacher clash): nothing to repeat
-      const isMd = shared(subject);
+      const kind = kindOf(subject);
       let added = 0; const skipped = [];
       activeTimetableDays().filter(d => d !== day0).forEach((d, i) => {
         const ex = timetableEntries.find(e => e.className === cls && e.section === sec && e.day === d && e.period === per);
         if(ex && ex.subject !== subject) { skipped.push(String(d).slice(0, 3) + ' (has ' + ex.subject + ')'); return; }
-        const clash = timetableEntries.find(e => e.day === d && e.period === per && e.staffId === staffId && !(e.className === cls && e.section === sec) && !(isMd && shared(e.subject)));
+        const clash = timetableEntries.find(e => e.day === d && e.period === per && e.staffId === staffId && !(e.className === cls && e.section === sec) && !(kind && kindOf(e.subject) === kind));
         if(clash) { skipped.push(String(d).slice(0, 3) + ' (teacher busy in ' + clash.className + ' ' + clash.section + ')'); return; }
         const data = { className: cls, section: sec, day: d, period: per, subject, staffId };
         if(ex) Object.assign(ex, data); else timetableEntries.push({ id: 'tt_' + Date.now() + '_r' + i, ...data });
