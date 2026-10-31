@@ -1231,7 +1231,9 @@ app.use(async (req, res, next) => {
     // Sliding renewal, capped at the absolute 12-hour ceiling from login —
     // fire-and-forget so a slow write here never delays the actual request.
     const newExpires = new Date(Math.min(now + SESSION_IDLE_MS, createdAt + SESSION_ABSOLUTE_MAX_MS));
-    sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()}, last_seen_at = now() WHERE id = ${idHash}`.catch(() => {});
+    // Calls the app makes by itself (page hidden or untouched for a while) check the login but do not renew it,
+    // so an app left running in the background still signs out after the idle time.
+    if (req.headers['x-background'] !== '1') sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()}, last_seen_at = now() WHERE id = ${idHash}`.catch(() => {});
     req.authUser = { id: session.user_id, role: session.role, name: session.name };
     req.sessionActiveBranch = session.active_branch || null;
     // "Require two-step sign-in" is on and this Admin/Principal has not set it up yet: only the set-up screen works.
