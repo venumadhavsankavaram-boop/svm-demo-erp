@@ -465,13 +465,6 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     };
   }
 
-  function generateRecoveryCode(){
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let code = '';
-    for(let i=0;i<8;i++) code += chars[Math.floor(Math.random()*chars.length)];
-    return code;
-  }
-
   async function loadUsers(){
     // The default admin account is seeded server-side on first run (server.js),
     // with a random password printed once to the server console — this used to
@@ -480,9 +473,6 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     // of whether anyone had actually changed it since. Nothing here fabricates
     // a login anymore; this only loads whatever accounts already exist.
     let stored = await storageGet(USERS_KEY, null) || [];
-    let changed = false;
-    stored.forEach(u => { if(!u.recoveryCode){ u.recoveryCode = generateRecoveryCode(); changed = true; } });
-    if(changed) await storageSet(USERS_KEY, stored);
     users = stored;
   }
 
@@ -511,39 +501,18 @@ const CUSTOM_ROLES_KEY = "custom-roles";
   async function resetPasswordWithCode(e){
     e.preventDefault();
     const uname = document.getElementById('fpUsername').value.trim();
-    const code = document.getElementById('fpCode').value.trim().toUpperCase();
-    const pw1 = document.getElementById('fpNewPassword').value;
-    const pw2 = document.getElementById('fpConfirmPassword').value;
     const errEl = document.getElementById('forgotError');
     const okEl = document.getElementById('forgotSuccess');
     errEl.style.display = 'none';
     okEl.style.display = 'none';
-
-    const u = users.find(x => x.username.toLowerCase() === uname.toLowerCase() && (x.recoveryCode||'').toUpperCase() === code);
-    if(!u){
-      errEl.textContent = 'Username and recovery code do not match any account.';
-      errEl.style.display = 'block';
-      return false;
-    }
-    if(!pw1 || pw1.length < 6){
-      errEl.textContent = 'New password must be at least 6 characters.';
-      errEl.style.display = 'block';
-      return false;
-    }
-    if(pw1 !== pw2){
-      errEl.textContent = 'Passwords do not match.';
-      errEl.style.display = 'block';
-      return false;
-    }
-    u.password = pw1;
-    await storageSet(USERS_KEY, users);
-    okEl.textContent = 'Password updated. You can sign in now.';
-    okEl.style.display = 'block';
-    document.getElementById('loginUsername').value = u.username;
-    document.getElementById('fpNewPassword').value = '';
-    document.getElementById('fpConfirmPassword').value = '';
-    document.getElementById('fpCode').value = '';
-    setTimeout(() => toggleForgotPassword(false), 1400);
+    if(!uname){ errEl.textContent = 'Enter your username.'; errEl.style.display = 'block'; return false; }
+    try{
+      const res = await fetch('/api/password-reset-request', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: uname }) });
+      const d = await res.json().catch(() => ({}));
+      if(!res.ok){ errEl.textContent = d.error || 'Could not send the request.'; errEl.style.display = 'block'; return false; }
+      okEl.textContent = d.message || 'Request sent to the school office.';
+      okEl.style.display = 'block';
+    }catch(err){ errEl.textContent = 'Could not reach the server. Try again.'; errEl.style.display = 'block'; }
     return false;
   }
 
@@ -613,6 +582,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
       currentUser = u;
       moduleAccess = u.moduleAccess || { restricted: false, enabledKeys: [] };
       sessionStorage.setItem('rgv_current_user', u.id);
+      if(u.mustChangePassword && !u.impersonating){ await showForcedPasswordChange(); location.reload(); return; }
       if(u.mustSetup2fa && !u.impersonating){ loginLoaderStop(); hideLoginScreen(); await showForcedTwofaSetup(); location.reload(); return; }
       loginLoaderStart('Restoring your session…', 0);
       loginLoaderStage('Loading students, fees and records…', 0, true);
@@ -626,6 +596,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
       startIdleWatcher();
       maybeSubscribeToPush();
       startApprovalsWatcher();
+      if(u.impersonating) showViewingAsBar(u.impersonating.byName);
     }else{
       currentUser = null;
       sessionStorage.removeItem('rgv_current_user');
@@ -786,6 +757,13 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     currentUser = u;
     moduleAccess = u.moduleAccess || { restricted: false, enabledKeys: [] };
     sessionStorage.setItem('rgv_current_user', u.id);
+    if(u.mustChangePassword){
+      loginLoaderStop();
+      if(submitBtn) submitBtn.disabled = false;
+      await showForcedPasswordChange();
+      location.reload();
+      return false;
+    }
     if(u.mustSetup2fa){
       loginLoaderStop();
       if(submitBtn) submitBtn.disabled = false;
@@ -830,10 +808,13 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     // be reused even if it were somehow still sitting in the browser. Not
     // awaited: there's nothing useful to do differently if this fails, and
     // the local sign-out above already happened.
-    fetch('/api/logout', { method:'POST' }).catch(()=>{});
+    // Start the next sign-in from a clean page: otherwise marks, fees, etc. loaded for the
+    // previous user (e.g. a teacher's limited list) stay in memory and the next user sees them.
+    const _lo = fetch('/api/logout', { method:'POST' }).catch(()=>{});
     document.getElementById('loginUsername').value = '';
     document.getElementById('loginPassword').value = '';
     showLoginScreen();
+    Promise.race([_lo, new Promise(r => setTimeout(r, 1500))]).then(() => { try{ location.reload(); }catch(e){} });
   }
 
   // ---------- Idle auto-logout ----------
