@@ -31,6 +31,9 @@ const FATHERS = ['Ramesh','Suresh','Venkatesh','Srinivas','Mahesh','Naresh','Gan
 const MOTHERS = ['Sita','Latha','Padma','Radha','Sunitha','Anitha','Vani','Jyothi','Rekha','Usha','Swapna','Geetha'];
 const CLASSES = ['Baby Class','LKG','UKG','1st Class','2nd Class','3rd Class','4th Class','5th Class','6th Class','7th Class','8th Class','9th Class','10th Class'];
 const TWO_SECTIONS = new Set(['1st Class','2nd Class','3rd Class','4th Class','5th Class']);
+// Class-teacher slots (18 teachers): every class-section has exactly one class teacher.
+const CLASS_SLOTS = CLASSES.flatMap(c => (TWO_SECTIONS.has(c) ? ['A', 'B'] : ['A']).map(sec => [c, sec]));
+const DEMO_TEACHER_IDX = CLASS_SLOTS.findIndex(([c, sec]) => c === '5th Class' && sec === 'A'); // the "Demo Teacher" login
 const FEES = { 'Baby Class':9000,'LKG':10000,'UKG':11000,'1st Class':12000,'2nd Class':13000,'3rd Class':14000,'4th Class':15000,'5th Class':16000,'6th Class':19000,'7th Class':20000,'8th Class':21000,'9th Class':22000,'10th Class':25000 };
 const ADMISSION = c => (['6th Class','7th Class','8th Class','9th Class','10th Class'].includes(c) ? 1500 : 1000);
 const SUBJECTS_LOW = ['TELUGU','ENGLISH','MATHS','EVS','HINDI','COMPUTERS'];
@@ -64,10 +67,11 @@ const daysAgo = n => { const d = new Date(today); d.setDate(d.getDate() - n); re
 // hands this script an in-process fetch (globalThis.__demoFetch). Standalone runs use real HTTP.
 const doFetch = globalThis.__demoFetch || fetch;
 let cookie = '';
-async function api(method, path, body, { allow = [] } = {}) {
+let DEMO_STUDENT_ID = '';
+async function api(method, path, body, { allow = [], as = null } = {}) {
   const res = await doFetch(BASE + path, {
     method,
-    headers: { 'Content-Type': 'application/json', Cookie: cookie, 'X-Actor-Name': 'Demo%20Seeder', 'X-Actor-Role': 'Admin' },
+    headers: { 'Content-Type': 'application/json', Cookie: as || cookie, 'X-Actor-Name': 'Demo%20Seeder', 'X-Actor-Role': 'Admin' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok && !allow.includes(res.status)) {
@@ -104,7 +108,7 @@ async function safetyCheckAndWipe() {
     throw new Error(`Refusing to wipe: this database holds "${name || 'a school'}" with ${nStudents} students, not the demo school.`);
   }
   console.log('Wiping demo tables…');
-  const tables = ['students','staff','staff_payroll','payments','student_discounts','student_extra_fees','attendance_records','holidays','exam_results','staff_attendance_records','acct_income','acct_expenses','comms_messages','subjects','exam_defs','admission_inquiries','website_gallery','user_notifications','notification_events','audit_log','deletion_requests','sessions','doc_counters','kv_store'];
+  const tables = ['students','staff','staff_payroll','payments','student_discounts','student_extra_fees','attendance_records','holidays','exam_results','staff_attendance_records','acct_income','acct_expenses','comms_messages','subjects','exam_defs','admission_inquiries','website_gallery','user_notifications','notification_events','audit_log','deletion_requests','sessions','doc_counters','kv_store','exam_plans','online_attempts','online_exams','study_material','homework_items','student_submissions','student_concerns','staff_leave_requests'];
   for (const t of tables) { try { await sql.query(`DELETE FROM ${t}`); } catch (e) { console.warn(`  (skip ${t}: ${e.message.slice(0, 60)})`); } }
   try { await sql.query('DELETE FROM users'); } catch (e) { console.warn('  (skip users)'); }
   try { await sql.query('DELETE FROM branches WHERE is_main = 0'); } catch (e) {}
@@ -125,7 +129,8 @@ async function createLogins(students, staff) {
   await mk('u_demo_accountant', 'Demo Accountant', 'demo.accountant', 'Accountant');
   await mk('u_demo_office', 'Demo Office', 'demo.office', 'Office Assistant');
   await mk('u_demo_teacher', 'Demo Teacher', 'demo.teacher', 'Teacher');
-  const s = students.find(x => x.className === '5th Class') || students[0];
+  const s = students.find(x => x.className === '5th Class' && x.section === 'A') || students[0];
+  DEMO_STUDENT_ID = s.id;
   await mk('u_demo_parent', `Parent of ${s.firstName}`, 'demo.parent', 'Parent', s.id);
   await mk('u_demo_student', s.name, 'demo.student', 'Student', s.id);
 }
@@ -193,14 +198,17 @@ function buildStaff() {
   mk(1, 'Sunitha', 'Rao', 'Female', 'Administration', 'Principal', ['Administration'], 45000);
   mk(2, 'Ramesh', 'Babu', 'Male', 'Administration', 'Office Assistant', ['Administration'], 18000);
   mk(3, 'Padma', 'Kumari', 'Female', 'Accounts', 'Accountant', ['Administration'], 25000);
-  const names = [['Lakshmi','Devi','Female'],['Srinivas','Reddy','Male'],['Anitha','Varma','Female'],['Mahesh','Naidu','Male'],['Jyothi','Sharma','Female'],['Kiran','Kumar','Male'],['Vani','Patel','Female'],['Suresh','Goud','Male'],['Radha','Singh','Female'],['Venkat','Chowdary','Male'],['Geetha','Raju','Female'],['Prakash','Yadav','Male'],['Usha','Das','Female'],['Naresh','Menon','Male'],['Swapna','Prasad','Female'],['Anil','Rao','Male']];
+  const names = [['Lakshmi','Devi','Female'],['Srinivas','Reddy','Male'],['Anitha','Varma','Female'],['Mahesh','Naidu','Male'],['Jyothi','Sharma','Female'],['Kiran','Kumar','Male'],['Vani','Patel','Female'],['Suresh','Goud','Male'],['Radha','Singh','Female'],['Venkat','Chowdary','Male'],['Geetha','Raju','Female'],['Prakash','Yadav','Male'],['Usha','Das','Female'],['Naresh','Menon','Male'],['Swapna','Prasad','Female'],['Anil','Rao','Male'],['Bhavani','Reddy','Female'],['Ramu','Naidu','Male']];
+  // 18 teachers: one class teacher for every class-section (Baby..UKG, 1st-5th A/B, 6th..10th).
   names.forEach((n, k) => {
-    const cls = CLASSES[Math.min(k + 2, 12)];
-    mk(4 + k, n[0], n[1], n[2], 'Teaching', k < 8 ? 'Primary Teacher' : 'Subject Teacher', ['Teaching'], int(18, 32) * 1000, { classTeacherClass: cls, classTeacherSection: 'A' });
+    const [cls, sec] = CLASS_SLOTS[k];
+    const demo = k === DEMO_TEACHER_IDX;
+    mk(4 + k, demo ? 'Demo' : n[0], demo ? 'Teacher' : n[1], demo ? 'Female' : n[2], 'Teaching', cls === 'Baby Class' || CLASSES.indexOf(cls) < 8 ? 'Primary Teacher' : 'Subject Teacher', ['Teaching'], int(18, 32) * 1000,
+      { classTeacherClass: cls, classTeacherSection: sec, ...(demo ? { linkedUserId: 'u_demo_teacher', loginUsername: 'demo.teacher' } : {}) });
   });
-  mk(20, 'Mohan', 'Lal', 'Male', 'Transport', 'Driver', ['Transport'], 14000);
-  mk(21, 'Shankar', 'Das', 'Male', 'Transport', 'Driver', ['Transport'], 14000);
-  mk(22, 'Savitri', 'Bai', 'Female', 'Support', 'Attender', ['Support'], 9000);
+  mk(22, 'Mohan', 'Lal', 'Male', 'Transport', 'Driver', ['Transport'], 14000);
+  mk(23, 'Shankar', 'Das', 'Male', 'Transport', 'Driver', ['Transport'], 14000);
+  mk(24, 'Savitri', 'Bai', 'Female', 'Support', 'Attender', ['Support'], 9000);
   return rows;
 }
 
@@ -230,35 +238,78 @@ async function main() {
   console.log('Students…');   await pool(students, s => api('POST', '/api/students', s));
   console.log('Staff…');      await pool(staff, s => api('POST', '/api/staff', s));
 
-  // Subjects + one exam with marks for classes 6–10
+  // Subjects: every subject of every class has a named teacher per section (this is what limits a Teacher login
+  // to "my classes" and fills Teaching Assignments, the timetable and the exam screens).
   const teachers = staff.filter(s => s.department === 'Teaching');
-  console.log('Subjects & exam…');
-  const subjectRows = []; const classSubjects = {};
+  const demoT = teachers[DEMO_TEACHER_IDX];
+  const classTeacher = (cls, sec) => teachers[CLASS_SLOTS.findIndex(([c, x]) => c === cls && x === sec)];
+  const HI_POOL = teachers.filter((t, i) => i !== DEMO_TEACHER_IDX && i < 16);
+  const subjectsOf = cls => (CLASSES.indexOf(cls) >= 8 ? SUBJECTS_HIGH : SUBJECTS_LOW);
+  const teacherFor = (cls, sec, nm) => {
+    const ci = CLASSES.indexOf(cls);
+    if (ci < 8) return nm === 'HINDI' ? teachers[16] : nm === 'COMPUTERS' ? teachers[17] : classTeacher(cls, sec);
+    const hc = ci - 8, j = SUBJECTS_HIGH.indexOf(nm);
+    if (nm === 'MATHS' && (hc === 0 || hc === 2)) return demoT;          // Demo Teacher also teaches Maths in 6th and 8th
+    return HI_POOL[(hc * 3 + j * 2) % HI_POOL.length];
+  };
+  console.log('Subjects & exams…');
+  const subjectRows = [];
   CLASSES.slice(3).forEach((cls, ci) => {
-    const list = ci >= 3 ? SUBJECTS_HIGH : SUBJECTS_LOW;
-    const t = teachers[ci % teachers.length];
     const sections = TWO_SECTIONS.has(cls) ? ['A', 'B'] : ['A'];
-    list.forEach((nm, k) => {
+    subjectsOf(cls).forEach((nm, k) => {
+      const sectionStaff = Object.fromEntries(sections.map(sec => [sec, [teacherFor(cls, sec, nm).id]]));
       subjectRows.push({ id: `msub_demo_${ci}_${k}`, className: cls, name: nm, code: `${cls.split(' ')[0].replace(/\D/g, '') || cls[0]}-${nm.slice(0, 3)}`, countable: 1, elective: 0,
-        sections, staffIds: [t.id], sectionStaff: Object.fromEntries(sections.map(s => [s, [t.id]])) });
+        sections, staffIds: [...new Set(Object.values(sectionStaff).flat())], sectionStaff });
     });
-    if (ci >= 3) {
-      sections.forEach(sec => { classSubjects[`${cls}||${sec}`] = list.map((nm, k) => ({ code: `${cls[0]}-${nm.slice(0, 3)}`, name: nm, maxMarks: 50, internalMax: 10, countable: true, elective: false, date: isoDay(daysAgo(20 - k)), staffIds: [t.id] })); });
-    }
   });
   await pool(subjectRows, s => api('POST', '/api/subjects', s));
-  const examId = 'exam_demo_fa1';
-  await api('POST', '/api/exam-defs', { id: examId, name: 'FA1-HIGH', examType: 'FA - HIGH SCHOOL', startDate: isoDay(daysAgo(21)), endDate: isoDay(daysAgo(15)), classSubjects });
+
+  // Exams: FA1 (finished, marks entered and RELEASED) and FA2 (coming up: dates set, no marks, nothing released),
+  // each for the primary block (1st–5th) and the high-school block (6th–10th).
+  const nextSchoolDay = d => { while (d.getDay() === 0) d.setDate(d.getDate() + 1); return d; };
+  const classSubjectsFor = (classes, startOffsetDays) => {
+    const cs = {};
+    classes.forEach(cls => {
+      const sections = TWO_SECTIONS.has(cls) ? ['A', 'B'] : ['A'];
+      sections.forEach(sec => {
+        const d = new Date(today); d.setDate(d.getDate() + startOffsetDays);
+        cs[`${cls}||${sec}`] = subjectsOf(cls).map((nm, k) => {
+          nextSchoolDay(d); const date = isoDay(d); d.setDate(d.getDate() + 1);
+          return { code: `${cls[0]}-${nm.slice(0, 3)}`, name: nm, maxMarks: 50, internalMax: 10, countable: true, elective: false, date, staffIds: [teacherFor(cls, sec, nm).id] };
+        });
+      });
+    });
+    return cs;
+  };
+  const PRI = CLASSES.slice(3, 8), HIGH = CLASSES.slice(8);
+  const exams = [
+    { id: 'exam_demo_fa1p', name: 'FA1-PRIMARY', examType: 'FA - PRIMARY', classes: PRI, off: -21, marks: true },
+    { id: 'exam_demo_fa1', name: 'FA1-HIGH', examType: 'FA - HIGH SCHOOL', classes: HIGH, off: -21, marks: true },
+    { id: 'exam_demo_fa2p', name: 'FA2-PRIMARY', examType: 'FA - PRIMARY', classes: PRI, off: 12, marks: false },
+    { id: 'exam_demo_fa2', name: 'FA2-HIGH', examType: 'FA - HIGH SCHOOL', classes: HIGH, off: 12, marks: false },
+  ];
+  for (const ex of exams) {
+    ex.classSubjects = classSubjectsFor(ex.classes, ex.off);
+    const dates = Object.values(ex.classSubjects).flat().map(x => x.date).sort();
+    ex.start = dates[0]; ex.end = dates[dates.length - 1];
+    await api('POST', '/api/exam-defs', { id: ex.id, name: ex.name, examType: ex.examType, startDate: ex.start, endDate: ex.end, classSubjects: ex.classSubjects });
+  }
   const results = [];
-  students.filter(s => CLASSES.indexOf(s.className) >= 8).forEach(s => {
-    const strength = 0.45 + rnd() * 0.5;
-    SUBJECTS_HIGH.forEach(nm => {
-      const written = Math.max(0, Math.min(40, Math.round(40 * Math.min(1, strength + (rnd() - 0.5) * 0.3))));
-      const internal = Math.max(0, Math.min(10, Math.round(10 * Math.min(1, strength + (rnd() - 0.5) * 0.2))));
-      results.push({ id: `res_${examId}_${s.id}_${nm}`, examId, studentId: s.id, subject: nm, marks: written + internal, written, internal, absent: false });
+  exams.filter(e => e.marks).forEach(ex => {
+    students.filter(s => ex.classes.includes(s.className)).forEach(s => {
+      const strength = 0.45 + rnd() * 0.5;
+      subjectsOf(s.className).forEach(nm => {
+        const written = Math.max(0, Math.min(40, Math.round(40 * Math.min(1, strength + (rnd() - 0.5) * 0.3))));
+        const internal = Math.max(0, Math.min(10, Math.round(10 * Math.min(1, strength + (rnd() - 0.5) * 0.2))));
+        results.push({ id: `res_${ex.id}_${s.id}_${nm}`, examId: ex.id, studentId: s.id, subject: nm, marks: written + internal, written, internal, absent: false });
+      });
     });
   });
   await pool(results, r => api('POST', '/api/exam-results', r));
+  // FA1 marks are released to students/parents; FA2 is not (so the Release tab has something to show).
+  const released = {}; const relAt = new Date().toISOString();
+  exams.filter(e => e.marks).forEach(ex => ex.classes.forEach(c => { released[`${ex.id}|${c}`] = { at: relAt, by: 'Demo Principal' }; }));
+  await api('PUT', '/api/kv/exam-releases', { legacy: [], released, revised: {} });
 
   // Fees + receipts. SPS-26-000001 upward. A mix: paid in full, part paid, unpaid.
   console.log('Fee receipts…');
@@ -266,7 +317,7 @@ async function main() {
   const modes = ['Cash', 'UPI', 'Cash', 'Bank Transfer'];
   students.forEach((s, i) => {
     const fee = FEES[s.className], adm = ADMISSION(s.className);
-    const r = rnd();
+    let r = rnd(); if (s.id === DEMO_STUDENT_ID) r = 0.6; // Demo Student/Parent: part-paid, so the admit-card fee message is visible
     const mkPay = (cat, amount, daysBack) => payments.push({
       id: `pay_demo_${pad(i, 4)}_${cat}`, receiptNo: `SPS-26-${pad(++rc, 6)}`, studentId: s.id, studentName: s.name, category: cat, mode: pick(modes),
       amount, discount: 0, instalment: '', date: isoDay(daysAgo(daysBack)), note: '', classAtPayment: s.className,
@@ -278,27 +329,6 @@ async function main() {
   payments.sort((a, b) => a.date.localeCompare(b.date));
   payments.forEach((p, k) => { p.receiptNo = `SPS-26-${pad(k + 1, 6)}`; });
   await pool(payments, p => api('POST', '/api/payments', p), 4);
-
-  // One-off extra fees (previous-year dues, late fees, a trip) so the Dashboard's Grand Total has real rows.
-  console.log('Extra fees and old balances…');
-  const extras = [], extraPays = [];
-  students.forEach((s, i) => {
-    const mkExtra = (key, name, amount, paidFrac, daysBack) => {
-      const paid = Math.round(amount * paidFrac / 50) * 50;
-      const id = `sef_demo_${pad(i, 4)}_${key}`;
-      extras.push({ id, studentId: s.id, name, amount, paid: paid >= amount, paidAmount: paid, date: isoDay(daysAgo(daysBack)), kind: '', addedBy: 'Demo Accountant' });
-      if (paid > 0) extraPays.push({ id: `pay_demo_${pad(i, 4)}_x_${key}`, studentId: s.id, studentName: s.name, category: 'extra', extraFeeName: name, extraFeeId: id, mode: pick(modes),
-        amount: paid, discount: 0, instalment: '', date: isoDay(daysAgo(Math.max(1, daysBack - int(1, 10)))), note: '', classAtPayment: s.className });
-    };
-    if (i % 7 === 0) mkExtra('ob', 'Previous Year Dues', int(2, 9) * 500, [0, 0.5, 1][i % 3], int(60, 120));
-    if (i % 11 === 0) mkExtra('late', 'Late Fee', int(1, 4) * 100, [1, 0][i % 2], int(5, 40));
-    if (i % 13 === 0) mkExtra('trip', 'Annual Day Costume', 600, 1, int(10, 50));
-  });
-  await pool(extras, e => api('POST', '/api/extra-fees', e), 4);
-  extraPays.sort((a, b) => a.date.localeCompare(b.date));
-  const lastRc = payments.length;
-  extraPays.forEach((p, k) => { p.receiptNo = `SPS-26-${pad(lastRc + k + 1, 6)}`; });
-  await pool(extraPays, p => api('POST', '/api/payments', p), 4);
 
   // Accounting vouchers (numbers from the same atomic counter the app uses)
   console.log('Vouchers…');
@@ -358,27 +388,16 @@ async function main() {
   ];
   const classPeriods = PERIODS.filter(x => !x.isBreak);
   const busy = new Set(); const tt = [];
-  const sectionsOf = cls => (TWO_SECTIONS.has(cls) ? ['A', 'B'] : ['A']);
-  let rot = 0;
-  DAYS.forEach((day, di) => {
-    classPeriods.forEach((per, pi) => {
-      CLASSES.forEach((cls, ci) => {
-        const list = ci >= 3 ? SUBJECTS_HIGH : SUBJECTS_LOW;
-        sectionsOf(cls).forEach((sec, si) => {
-          const subj = list[(pi + di + ci + si) % list.length];
-          for (let tries = 0; tries < teachers.length; tries++) {
-            const t = teachers[(ci + si + rot + tries) % teachers.length];
-            const key = `${day}|${per.id}|${t.id}`;
-            if (busy.has(key)) continue;
-            busy.add(key);
-            tt.push({ id: `tt_demo_${tt.length}`, className: cls, section: sec, day, period: per.id, subject: subj, staffId: t.id });
-            break;
-          }
-          rot++;
-        });
-      });
-    });
-  });
+  // Each slot uses the real subject teacher of that class-section (no teacher in two classes at once).
+  DAYS.forEach((day, di) => classPeriods.forEach((per, pi) => CLASS_SLOTS.forEach(([cls, sec], si) => {
+    if (CLASSES.indexOf(cls) < 3) return;
+    const subs = subjectsOf(cls);
+    for (let t = 0; t < subs.length; t++) {
+      const nm = subs[(di + pi + si + t) % subs.length]; const tch = teacherFor(cls, sec, nm); const key = `${day}|${per.id}|${tch.id}`;
+      if (busy.has(key)) continue;
+      busy.add(key); tt.push({ id: `tt_demo_${tt.length}`, className: cls, section: sec, day, period: per.id, subject: nm, staffId: tch.id }); break;
+    }
+  })));
   await api('PUT', '/api/kv/timetable-periods', PERIODS);
   await api('PUT', '/api/kv/timetable-days', DAYS);
   await api('PUT', '/api/kv/timetable-entries', tt);
@@ -467,6 +486,55 @@ async function main() {
     results: { label: 'Class 10 — 2025', pass: '100%' },
     visible: {}, academics: {}, ratio: {}
   });
+
+  // Fee hold for admit cards: ON; the Demo Student/Parent have a balance (banner shows), one classmate is "Allowed" by the Principal.
+  await api('PUT', '/api/kv/admit-card-policy', { hold: true, minDue: 500 });
+  const heldPeer = students.find(x => x.className === '5th Class' && x.section === 'A' && x.id !== DEMO_STUDENT_ID);
+  if (heldPeer) await api('PUT', '/api/kv/admit-card-exceptions', { [`exam_demo_fa2p|${heldPeer.id}`]: { by: 'Demo Principal', role: 'Principal', at: new Date().toISOString(), reason: 'Parent requested — will pay by the 15th', due: 5000 } });
+
+  // Work done AS the Demo Teacher (so it follows the real "only my classes" rules)
+  console.log('Teacher work (plans, online exam, material, homework)…');
+  const tl = await doFetch(BASE + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'demo.teacher', password: DEMO_PASSWORD, audience: 'staff' }) });
+  if (!tl.ok) throw new Error('Demo teacher login failed: ' + tl.status);
+  const tck = (tl.headers.getSetCookie ? tl.headers.getSetCookie() : [tl.headers.get('set-cookie') || '']).map(c => c.split(';')[0]).join('; ');
+  const fa2p = exams.find(e => e.id === 'exam_demo_fa2p').classSubjects['5th Class||A'];
+  const dateOf = nm => (fa2p.find(x => x.name === nm) || fa2p[0]).date;
+  const mkPlan = async (nm, syllabus, mm, time, dur, action) => {
+    const r = await (await api('POST', '/api/exam-plans', { examId: 'exam_demo_fa2p', examName: 'FA2-PRIMARY', className: '5th Class', section: 'A', subject: nm, syllabus, maxMarks: mm, examDate: dateOf(nm), startTime: time, durationMin: dur, instructions: 'Bring your own pencil box. No calculators.' }, { as: tck })).json();
+    if (action) await api('POST', `/api/exam-plans/${r.id}/review`, { action }, {});
+  };
+  await mkPlan('MATHS', 'Ch 4 Fractions, Ch 5 Decimals, Ch 6 Perimeter and Area', 50, '09:30', 90, 'approve');
+  await mkPlan('EVS', 'Ch 3 Our Environment, Ch 4 Water and Sanitation', 50, '09:30', 90, 'approve');
+  await mkPlan('ENGLISH', 'Unit 3 Poem, Unit 4 Story, Grammar: Tenses and Articles', 50, '09:30', 90, null); // waits for Principal review
+  const nowMs = Date.now();
+  const mkQuiz = async (title, subject, qs, action) => {
+    const r = await (await api('POST', '/api/online-exams', { title, className: '5th Class', section: 'A', subject, durationMin: 20, startMs: nowMs - 86400000, endMs: nowMs + 30 * 86400000, instructions: 'Answer all questions. You have one attempt.', questions: qs, showKey: 1 }, { as: tck })).json();
+    if (action) await api('POST', `/api/online-exams/${r.id}/review`, { action });
+  };
+  await mkQuiz('Maths Quiz — Fractions', 'MATHS', [
+    { type: 'mcq', text: 'What is 1/2 + 1/4?', options: ['1/6', '3/4', '2/6', '1/8'], answer: 1, marks: 2 },
+    { type: 'mcq', text: 'Which fraction is the largest?', options: ['1/8', '1/4', '1/3', '1/2'], answer: 3, marks: 2 },
+    { type: 'tf', text: '3/3 is equal to 1.', answer: 0, marks: 1 },
+    { type: 'mcq', text: 'Write 0.5 as a fraction.', options: ['1/5', '5/10', '1/10', '2/5'], answer: 1, marks: 2 },
+    { type: 'short', text: 'Explain in one line what a numerator is.', keyAnswer: 'The top number of a fraction; it tells how many parts are taken.', marks: 3 },
+  ], 'approve');
+  await mkQuiz('English Grammar Quiz — Tenses', 'ENGLISH', [
+    { type: 'mcq', text: 'She ___ to school every day.', options: ['go', 'goes', 'going', 'gone'], answer: 1, marks: 2 },
+    { type: 'tf', text: '"Yesterday I played cricket" is in the past tense.', answer: 0, marks: 1 },
+    { type: 'short', text: 'Write one sentence in the future tense.', keyAnswer: 'Any correct future-tense sentence, e.g. I will visit my uncle tomorrow.', marks: 3 },
+  ], null); // waits for Principal approval
+  // Study material (a tiny real PDF)
+  const pdfTxt = '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length 62>>stream\nBT /F1 14 Tf 20 100 Td (Sample study notes - demo school) Tj ET\nendstream\nendobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R/Size 6>>\n%%EOF\n';
+  const pdfUrl = 'data:application/pdf;base64,' + Buffer.from(pdfTxt, 'latin1').toString('base64');
+  for (const [nm, title, desc] of [['MATHS', 'Fractions — Revision Notes', 'Key rules and solved examples for FA2.'], ['ENGLISH', 'Tenses — Practice Sheet', 'Fill in the blanks and rewrite the sentences.'], ['EVS', 'Water and Sanitation — Chapter Summary', 'Read before the FA2 test.']])
+    await api('POST', '/api/study-material', { className: '5th Class', section: 'A', subject: nm, title, description: desc, fileName: title.replace(/[^A-Za-z]+/g, '_') + '.pdf', mime: 'application/pdf', dataUrl: pdfUrl }, { as: tck });
+  // Homework (assigned by the Demo Teacher; two older, one due soon)
+  const hw = [['MATHS', 'Exercise 4.2 — Fractions', 'Solve questions 1 to 10 in your notebook.', -2, 3], ['ENGLISH', 'Write a paragraph: My Favourite Festival', 'Eight to ten lines, neat handwriting.', -1, 4], ['EVS', 'Draw and label the water cycle', 'Use colours. Bring it to class.', 0, 5], ['MATHS', 'Multiplication tables 11 to 15', 'Learn by heart; oral test on Monday.', -6, -1]];
+  for (let k = 0; k < hw.length; k++) {
+    const [nm, title, desc, a, d] = hw[k];
+    await api('POST', '/api/homework-items', { id: `hw_demo_${k}`, className: '5th Class', section: 'A', subject: nm, title, description: desc, assignedDate: isoDay(daysAgo(-a)), dueDate: isoDay(daysAgo(-d)), staffId: demoT.id, attachments: [] }, { as: tck });
+  }
+  await sql`DELETE FROM sessions WHERE user_id = 'u_demo_teacher'`;
 
   // A second campus, so the demo can show multi-branch: section B of classes 1-5 moves to "North Campus"
   // (with its fees, attendance and marks), it gets its own stock list and its own branch-only login.
