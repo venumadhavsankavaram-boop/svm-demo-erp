@@ -168,6 +168,7 @@ function buildStudents() {
           fatherPhone: phone, motherPhone: '9' + String(int(100000000, 999999999)), contact: phone,
           email: `${first}.${last}${n}@example.com`.toLowerCase(), fatherAddress: `${int(1, 99)}-${int(1, 99)}, Main Road, Sunrise Nagar`,
           admDate: `${2026 - Math.min(idx, 6)}-06-${pad(int(1, 20))}`, needsTransport: rnd() < 0.3 ? 'Yes' : 'No',
+          photo: avatarSvg(first[0] + last[0], (n * 37) % 360),
         });
       }
     }
@@ -536,6 +537,8 @@ async function main() {
   }
   await sql`DELETE FROM sessions WHERE user_id = 'u_demo_teacher'`;
 
+  await seedRichData({ students, staff, exams, demoT, classTeacher, PDF_URL: pdfUrl });
+
   // A second campus, so the demo can show multi-branch: section B of classes 1-5 moves to "North Campus"
   // (with its fees, attendance and marks), it gets its own stock list and its own branch-only login.
   try {
@@ -559,6 +562,160 @@ async function main() {
   await sql`DELETE FROM users WHERE id = 'u_seeder'`;
   console.log('\nDone. Demo logins (password for all: ' + DEMO_PASSWORD + '):');
   ['demo.admin', 'demo.principal', 'demo.accountant', 'demo.office', 'demo.teacher', 'demo.parent', 'demo.student', 'demo.branch'].forEach(u => console.log('  ' + u));
+}
+
+
+// ---------- 4. Richer sample data, so every screen a tester opens has something in it ----------
+// All fictional. Runs after the core data above, before the second campus is created.
+async function loginAs(username, audience) {
+  const r = await doFetch(BASE + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password: DEMO_PASSWORD, audience }) });
+  if (!r.ok) throw new Error(`login ${username} failed: ${r.status}`);
+  return (r.headers.getSetCookie ? r.headers.getSetCookie() : [r.headers.get('set-cookie') || '']).map(c => c.split(';')[0]).join('; ');
+}
+const svgUrl = svg => 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64');
+function avatarSvg(initials, hue) {
+  return svgUrl(`<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="hsl(${hue},55%,82%)"/><circle cx="48" cy="38" r="17" fill="hsl(${hue},45%,62%)"/><ellipse cx="48" cy="92" rx="30" ry="26" fill="hsl(${hue},45%,62%)"/><text x="48" y="56" font-family="Arial" font-size="0" fill="none">${initials}</text></svg>`);
+}
+function galleryPic(label, hue) {
+  return svgUrl(`<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue},65%,70%)"/><stop offset="1" stop-color="hsl(${(hue + 50) % 360},65%,45%)"/></linearGradient></defs><rect width="640" height="420" fill="url(#g)"/><circle cx="500" cy="110" r="46" fill="#fff" opacity=".55"/><path d="M0 330 Q160 250 320 320 T640 300 V420 H0Z" fill="#fff" opacity=".35"/><text x="32" y="380" font-family="Arial" font-size="30" font-weight="700" fill="#fff">${label}</text></svg>`);
+}
+
+async function seedRichData({ students, staff, exams, demoT, classTeacher, PDF_URL }) {
+  console.log('More sample data…');
+  const iso = daysAgo, put = (p, b, o) => api('PUT', p, b, o), post = (p, b, o) => api('POST', p, b, o);
+  const adminName = 'Demo Admin';
+
+
+  // Holidays across the academic year (a school calendar)
+  const y = today.getFullYear();
+  const HOL = [[`${y}-01-14`, 'Bhogi / Makar Sankranti', 'Festival'], [`${y}-01-26`, 'Republic Day', 'National Holiday'], [`${y}-03-30`, 'Ugadi', 'Festival'], [`${y}-04-14`, 'Dr. B. R. Ambedkar Jayanti', 'Public Holiday'],
+    [`${y}-08-15`, 'Independence Day', 'National Holiday'], [`${y}-09-07`, 'Vinayaka Chavithi', 'Religious'], [`${y}-10-02`, 'Gandhi Jayanti', 'National Holiday'], [`${y}-10-20`, 'Dussehra', 'Festival'],
+    [`${y}-11-08`, 'Diwali', 'Festival'], [`${y}-12-25`, 'Christmas', 'Religious'], [`${y}-12-20`, 'Annual Day (school function)', 'Custom']];
+  await pool(HOL, (h, k) => post('/api/holidays', { id: `hol_demo_${HOL.indexOf(h)}`, date: h[0], name: h[1], type: h[2], note: h[2] === 'Custom' ? 'School open for the function only' : '' }), 4);
+
+  // Admission enquiries (the website enquiry form fills this) — a spread of statuses
+  const ENQ = [['Ramesh Kumar', 'Aarav Kumar', '1st Class', 'New'], ['Sneha Reddy', 'Diya Reddy', 'LKG', 'New'], ['Prakash Naidu', 'Harsha Naidu', '6th Class', 'Contacted'], ['Fatima Begum', 'Zoya Begum', '3rd Class', 'Contacted'],
+    ['Suresh Babu', 'Nikhil Babu', '8th Class', 'Visited'], ['Kavitha Rao', 'Ishita Rao', 'UKG', 'Visited'], ['Mahesh Goud', 'Rohan Goud', '4th Class', 'Admitted'], ['Lalitha Devi', 'Tanvi Devi', '2nd Class', 'Admitted'],
+    ['Venkat Rao', 'Karthik Rao', '9th Class', 'New'], ['Anjali Sharma', 'Aditi Sharma', '5th Class', 'Contacted'], ['Imran Khan', 'Sameer Khan', '7th Class', 'Not Interested'], ['Padma Latha', 'Sai Latha', 'Nursery', 'New']];
+  await pool(ENQ, (e, k) => post('/api/admission-inquiries', { id: `enq_demo_${ENQ.indexOf(e)}`, parentName: e[0], parentEmail: e[0].split(' ')[0].toLowerCase() + '@example.com', parentPhone: '98' + String(int(10000000, 99999999)),
+    studentName: e[1], applyingGrade: e[2], notes: e[3] === 'Visited' ? 'Visited the campus with parents; fee structure shared.' : e[3] === 'Admitted' ? 'Seat confirmed; admission fee paid.' : 'Asked about transport and timings.', submittedDate: isoDay(iso(1 + ENQ.indexOf(e) * 4)), status: e[3] }), 4);
+
+  // Website gallery
+  const GAL = [['campus', 'Main building', 200], ['campus', 'Science lab', 160], ['campus', 'Playground', 120], ['event', 'Annual Day', 320], ['event', 'Independence Day parade', 20], ['event', 'Sankranti celebrations', 40], ['trip', 'Visit to the Science Museum', 260], ['trip', 'Nature walk, Class 4', 100], ['achieve', 'District Kabaddi winners', 50], ['achieve', 'Class 10 toppers', 290]];
+  await pool(GAL, g => post('/api/website-gallery', { id: `gal_demo_${GAL.indexOf(g)}`, dataUrl: galleryPic(g[1], g[2]), category: g[0], caption: g[1], uploadedDate: isoDay(iso(5 + GAL.indexOf(g) * 9)), uploadedBy: adminName }), 3);
+
+  // Exam rooms and hall-ticket numbers for the coming FA2 exams
+  const ROOMS = [['Room 1 (Class 6A)', 30], ['Room 2 (Class 6B)', 30], ['Room 3 (Class 7)', 30], ['Room 4 (Class 8A)', 32], ['Hall (Class 9-10)', 60]];
+  await pool(ROOMS, r => post('/api/rooms', { id: `examroom_demo_${ROOMS.indexOf(r)}`, name: r[0], capacity: r[1] }), 3);
+  const fa2 = exams.find(e => e.id === 'exam_demo_fa2');
+  let htn = 0;
+  await pool(students.filter(s => fa2.classes.includes(s.className)), s => post('/api/exam-hall-tickets', { id: `ht_exam_demo_fa2_${s.id}`, examId: 'exam_demo_fa2', studentId: s.id, htNumber: 'HT26' + String(++htn).padStart(4, '0') }), 6);
+
+  // Fee discounts (sibling / merit / staff child; some waiting for approval) and extra fees (trips, exam fee)
+  const DISC = [['Sibling concession', 'fee', 'percent', 10, 'Approved'], ['Merit scholarship', 'fee', 'amount', 2000, 'Approved'], ['Staff child concession', 'fee', 'percent', 25, 'Approved'], ['Hardship waiver', 'fee', 'amount', 3000, 'Pending'], ['Sibling concession', 'fee', 'percent', 10, 'Pending'], ['Sports quota', 'fee', 'amount', 1500, 'Rejected']];
+  const picks = students.filter(s => CLASSES.indexOf(s.className) >= 3);
+  await pool(DISC, d => { const i = DISC.indexOf(d), st = picks[(i * 17 + 5) % picks.length];
+    return post('/api/discounts', { id: `disc_demo_${i}`, batchId: `batch_demo_${i}`, studentId: st.id, type: d[0], appliesTo: d[1], mode: d[2], value: d[3], note: `${d[0]} — sample`, status: d[4], requestedBy: 'Demo Accountant', requestedRole: 'Accountant',
+      requestedDate: isoDay(iso(10 + i * 3)), approverName: 'Demo Principal', approvedBy: d[4] === 'Approved' ? 'Demo Principal' : '', approvedDate: d[4] === 'Approved' ? isoDay(iso(8 + i * 3)) : '' }); }, 3);
+  const XF = [['Educational trip — Science Museum', 450], ['Annual Day costume', 300], ['Exam fee (FA1)', 150], ['Lab fee', 250], ['Sports day kit', 350]];
+  await pool(picks.slice(0, 30), (st) => { const k = picks.indexOf(st), x = XF[k % XF.length], paidAll = k % 3 !== 0;
+    return post('/api/extra-fees', { id: `xfee_demo_${k}`, studentId: st.id, name: x[0], amount: x[1], paid: paidAll, paidAmount: paidAll ? x[1] : 0, date: isoDay(iso(5 + k)), kind: 'extra', addedBy: 'Demo Accountant' }); }, 4);
+
+  // Staff leave requests (all three states) and payroll (two months approved, this month draft)
+  const tIds = staff.filter(s => s.department === 'Teaching');
+  const LEAVE = [['Approved', 12, 1, 'Fever and rest advised by doctor'], ['Approved', 30, 2, 'Family function out of town'], ['Pending', -3, 1, 'Medical check-up'], ['Pending', -6, 2, 'Sister\'s wedding'], ['Rejected', 20, 1, 'Personal work during exam week'], ['Approved', 45, 1, 'Child unwell']];
+  for (let i = 0; i < LEAVE.length; i++) {
+    const [stt, back, len, reason] = LEAVE[i], st = tIds[(i * 3 + 1) % tIds.length], from = isoDay(iso(back)), to = isoDay(iso(back - len + 1));
+    await sql`INSERT INTO staff_leave_requests (id, staff_id, staff_name, from_date, to_date, session, reason, status, requested_by, requested_by_name, decided_by, decided_by_name, decision_note)
+      VALUES (${'stflv_demo_' + i}, ${st.id}, ${st.firstName + ' ' + st.lastName}, ${from}, ${to}, NULL, ${reason}, ${stt}, ${'u_demo_teacher'}, ${st.firstName}, ${stt === 'Pending' ? null : 'u_demo_principal'}, ${stt === 'Pending' ? null : 'Demo Principal'}, ${stt === 'Rejected' ? 'Exam week — please reschedule' : null})`;
+  }
+  const month = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  const m0 = new Date(today), m1 = new Date(today.getFullYear(), today.getMonth() - 1, 15), m2 = new Date(today.getFullYear(), today.getMonth() - 2, 15);
+  const pay = [];
+  for (const [d, status] of [[m2, 'Approved'], [m1, 'Approved'], [m0, 'Draft']]) for (const st of staff) {
+    const basic = Number(st.salary) || 0, lop = (st.id.length + d.getMonth()) % 9 === 0 ? 1 : 0, perDay = basic / 30, lopDeduction = Math.round(perDay * lop * 100) / 100;
+    const gross = basic, ded = lopDeduction, net = Math.round((gross - ded) * 100) / 100;
+    pay.push({ id: `pay_${st.id}_${month(d)}`, staffId: st.id, month: month(d), basic, quota: 1, leaveDays: lop ? 2 : 0, lopDays: lop, lopDeduction, epfEmployee: 0, epfEmployer: 0, esiEmployee: 0, esiEmployer: 0, epfManual: false, esiManual: false,
+      otherDeductions: 0, bonus: 0, grossSalary: gross, totalDeductions: ded, netSalary: net, status, generatedDate: isoDay(new Date(d.getFullYear(), d.getMonth(), 27)),
+      ...(status === 'Approved' ? { approvedBy: 'Demo Principal', approvedDate: isoDay(new Date(d.getFullYear(), d.getMonth(), 28)) } : {}) });
+  }
+  await pool(pay, p => post('/api/staff-payroll', p), 6);
+
+  // Longer attendance history (about 90 more school days) — direct inserts, same row format as the app
+  const rows = [], srows = [];
+  let counted = 0;
+  for (let back = 22; counted < 90 && back < 160; back++) {
+    const d = daysAgo(back); if (d.getDay() === 0) continue; counted++;
+    const ds = isoDay(d);
+    students.forEach(s => rows.push([`att_${s.id}_${ds}_Morning`, s.id, ds, rnd() < 0.92 ? 'Present' : (rnd() < 0.7 ? 'Absent' : 'Leave')]));
+    if (counted <= 60) staff.forEach(s => srows.push([`satt_${s.id}_${ds}`, s.id, ds, rnd() < 0.95 ? 'Present' : 'Leave']));
+  }
+  for (let i = 0; i < rows.length; i += 400) {
+    const ch = rows.slice(i, i + 400);
+    await sql.query(`INSERT INTO attendance_records (id, student_id, date, status, session, branch_id) VALUES ${ch.map(() => "(?,?,?,?,'Morning','main')").join(',')}`.replace(/\?/g, (m => { let n = 0; return () => '$' + (++n); })()), ch.flat());
+  }
+  for (let i = 0; i < srows.length; i += 400) {
+    const ch = srows.slice(i, i + 400);
+    await sql.query(`INSERT INTO staff_attendance_records (id, staff_id, date, status, session) VALUES ${ch.map(() => "(?,?,?,?,'Morning')").join(',')}`.replace(/\?/g, (m => { let n = 0; return () => '$' + (++n); })()), ch.flat());
+  }
+
+  // More notices, homework and study material across other classes
+  const NOT = [['Annual Day rehearsals', 'Rehearsals for Annual Day start next week after school hours. Please send your child with a snack.', 'Event'], ['Science exhibition', 'Classes 6 to 10 will present projects at the science exhibition on the second Friday.', 'Event'],
+    ['Holiday on Diwali', 'The school will remain closed on Diwali. Classes resume the next working day.', 'Holiday'], ['Transport route change', 'Bus Route 2 will pick up from the new stop near the market from Monday.', 'Announcement'],
+    ['Library week', 'Library week begins Monday. Students may borrow two books each.', 'Announcement'], ['Vaccination camp', 'A health check-up and vaccination camp will be held for Classes 1 to 5.', 'Event']];
+  await pool(NOT, n => { const k = NOT.indexOf(n); return post('/api/comms-messages', { id: `msg_demo_x${k}`, title: n[0], body: n[1], type: n[2], channels: ['In-App'], audienceLabel: 'All parents', link: '', sentBy: adminName, sentDate: isoDay(iso(2 + k * 5)) }); }, 3);
+
+  const tCk = await loginAs('demo.teacher', 'staff');
+  const HWX = [['6th Class', 'A', 'MATHS', 'Exercise 5.1 — Integers', 'Solve all questions in your notebook.'], ['8th Class', 'A', 'MATHS', 'Algebra worksheet', 'Complete the worksheet; show every step.']];
+  for (let i = 0; i < HWX.length; i++) {
+    const [c, s, nm, t, d] = HWX[i];
+    await api('POST', '/api/homework-items', { id: `hw_demo_x${i}`, className: c, section: s, subject: nm, title: t, description: d, assignedDate: isoDay(iso(1 + i)), dueDate: isoDay(iso(-3 - i)), staffId: demoT.id, attachments: [] }, { as: tCk });
+  }
+  for (const [c, s, nm, t, d] of [['6th Class', 'A', 'MATHS', 'Integers — Revision Notes', 'Rules for adding and subtracting integers.'], ['8th Class', 'A', 'MATHS', 'Linear Equations — Solved Examples', 'Ten solved problems with steps.']])
+    await api('POST', '/api/study-material', { className: c, section: s, subject: nm, title: t, description: d, fileName: t.replace(/[^A-Za-z]+/g, '_') + '.pdf', mime: 'application/pdf', dataUrl: PDF_URL }, { as: tCk });
+
+  // Parent logins for the whole of 5th Class A (the demo Parent is one of them) and a real online-exam round
+  console.log('Parent logins, concerns, submissions, quiz attempts…');
+  const adm = await (await api('POST', '/api/student-logins/bulk', { className: '5th Class', section: 'A', password: DEMO_PASSWORD, forceChange: false })).json();
+  const parents = (adm.created || []).slice(0, 12);
+  const qlist = await (await api('GET', '/api/online-exams', undefined, {})).json();
+  const quiz = (Array.isArray(qlist) ? qlist : (qlist.exams || [])).find(q => /Fractions/.test(q.title) && q.status === 'Approved');
+  const KEY = { 'What is 1/2 + 1/4?': 1, 'Which fraction is the largest?': 3, '3/3 is equal to 1.': 0, 'Write 0.5 as a fraction.': 1 };
+  if (quiz) {
+    let ix = 0;
+    for (const p of parents) {
+      try {
+        const ck = await loginAs(p.username, 'parent'); const strong = (ix++ % 4) !== 3;
+        const st = await (await doFetch(BASE + `/api/online-exams/${quiz.id}/start`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: ck }, body: '{}' })).json();
+        const answers = {};
+        (st.questions || []).forEach(q => { const k = KEY[q.text]; if (q.type === 'short') answers[q.id] = strong ? 'The top number of a fraction; it shows how many parts are taken.' : 'a number';
+          else if (k !== undefined) answers[q.id] = strong || (q.text.length % 2) ? k : (k + 1) % (q.options ? q.options.length : 2); });
+        await doFetch(BASE + `/api/online-exams/${quiz.id}/finish`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: ck }, body: JSON.stringify({ answers, leaves: 0 }) });
+      } catch (e) { console.warn('  quiz attempt skipped:', e.message); }
+    }
+  }
+  // Concerns and homework submissions from the demo Parent (to the class teacher and to management), then replies/reviews
+  try {
+    const pck = await loginAs('demo.parent', 'parent');
+    const ct = classTeacher('5th Class', 'A');
+    const mkc = async (rec, msg) => (await (await doFetch(BASE + '/api/concerns', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: pck }, body: JSON.stringify({ ...rec, message: msg }) })).json()).id;
+    const c1 = await mkc({ recipientType: 'class_teacher', recipientStaffId: ct.id, recipientName: `${ct.firstName} ${ct.lastName}` }, 'My child is finding fractions difficult. Could you suggest some extra practice?');
+    await mkc({ recipientType: 'management', recipientName: 'Management' }, 'Please share the bus timings for Route 2 after the change.');
+    const c3 = await mkc({ recipientType: 'class_teacher', recipientStaffId: ct.id, recipientName: `${ct.firstName} ${ct.lastName}` }, 'Thank you for the support during the test week.');
+    const mks = async (title, desc, hwId) => (await (await doFetch(BASE + '/api/submissions', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: pck }, body: JSON.stringify({ recipientType: 'class_teacher', recipientStaffId: ct.id, recipientName: `${ct.firstName} ${ct.lastName}`, homeworkId: hwId, title, description: desc, attachments: [] }) })).json()).id;
+    const s1 = await mks('Exercise 4.2 — Fractions (done)', 'Solved all ten questions. Photo of the notebook attached to class WhatsApp group.', 'hw_demo_0');
+    await mks('Draw and label the water cycle', 'Completed with colours.', 'hw_demo_2');
+    const prCk = await loginAs('demo.principal', 'staff');
+    await api('PUT', `/api/concerns/${c1}/reply`, { replyMessage: 'Please try the fractions practice sheet in Study Material. I will also give extra practice in class this week.' }, { as: prCk }).catch(() => {});
+    await api('PUT', `/api/concerns/${c3}/status`, { resolved: true }, { as: prCk }).catch(() => {});
+    await api('PUT', `/api/submissions/${s1}/review`, { status: 'reviewed', feedback: 'Well done. Neat work — check question 7 again.', marks: '9/10' }, { as: prCk }).catch(() => {});
+  } catch (e) { console.warn('  concerns/submissions skipped:', e.message); }
+
+  // Certificates issued (study / character / transfer) through the app's own route
+  const certKids = picks.slice(40, 46);
+  const CT = ['Study', 'Study', 'Character', 'Character', 'Transfer', 'Study'];
+  await pool(certKids, s => { const i = certKids.indexOf(s); return api('POST', '/api/certificates', { type: CT[i], resource: 'students', recordId: s.id, conduct: 'Good', purpose: CT[i] === 'Transfer' ? 'Transfer to another school' : 'Bank account opening', academicYear: '2026-27',
+    details: CT[i] === 'Transfer' ? { dateOfLeaving: isoDay(iso(10)), reasonForLeaving: 'Parent transferred to another city', qualifiedForPromotion: 'Yes', workingDays: '180', daysPresent: '168', feesPaidUpTo: 'Term 2', duesStatus: 'No dues', remarks: '' } : {} }); }, 2);
 }
 
 const _run = main();
