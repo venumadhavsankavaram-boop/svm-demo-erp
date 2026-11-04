@@ -185,6 +185,13 @@ function buildStudents() {
     const r = rooms[0]; fill[r.id]++;
     st.isBoarder = 'Yes'; st.hostelRoomId = r.id; st.needsTransport = 'No'; delete st.transportRouteId; delete st.transportStopId;
   });
+  // Sibling families (same parents): the Demo Parent has a second child in 3rd Class A (linked into one login below),
+  // and two more 5th Class A pairs are left as "likely siblings" for the Link siblings screen.
+  const same = (a, b) => { ['lastName', 'fatherName', 'motherName', 'parent', 'fatherPhone', 'motherPhone', 'contact', 'fatherAddress'].forEach(k => { b[k] = a[k]; }); b.name = `${b.firstName} ${b.lastName}`; b.email = `${b.firstName}.${b.lastName}${b.admissionNo.slice(-3)}@example.com`.toLowerCase(); };
+  const f5 = out.filter(x => x.className === '5th Class' && x.section === 'A'), f3 = out.filter(x => x.className === '3rd Class' && x.section === 'A'), f2 = out.filter(x => x.className === '2nd Class' && x.section === 'A');
+  if (f5[0] && f3[0]) same(f5[0], f3[0]);
+  if (f5[2] && f2[0]) same(f5[2], f2[0]);
+  if (f5[3] && f3[1]) same(f5[3], f3[1]);
   return out;
 }
 function buildStaff() {
@@ -677,6 +684,8 @@ async function seedRichData({ students, staff, exams, demoT, classTeacher, PDF_U
   // Parent logins for the whole of 5th Class A (the demo Parent is one of them) and a real online-exam round
   console.log('Parent logins, concerns, submissions, quiz attempts…');
   const adm = await (await api('POST', '/api/student-logins/bulk', { className: '5th Class', section: 'A', password: DEMO_PASSWORD, forceChange: false })).json();
+  const sib3 = students.find(x => x.className === '3rd Class' && x.section === 'A');
+  if (sib3) await api('POST', '/api/student-logins/link-siblings', { studentIds: [DEMO_STUDENT_ID, sib3.id], keepStudentId: DEMO_STUDENT_ID, disableExtraLogins: true }, { allow: [400] });
   const parents = (adm.created || []).slice(0, 12);
   const qlist = await (await api('GET', '/api/online-exams', undefined, {})).json();
   const quiz = (Array.isArray(qlist) ? qlist : (qlist.exams || [])).find(q => /Fractions/.test(q.title) && q.status === 'Approved');
