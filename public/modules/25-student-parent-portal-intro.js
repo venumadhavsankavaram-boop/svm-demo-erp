@@ -807,7 +807,7 @@ let myProfileTab = 'notifications';
 
       <div class="dash-section-title"><div><h3>Payment History &amp; Receipts</h3></div></div>
       <div class="table-wrap"><table class="fee-stack"><thead><tr><th>Date</th><th>Category</th><th>Mode</th><th>Amount</th><th></th></tr></thead><tbody>
-        ${studentPayments.length ? studentPayments.map(p => `<tr><td data-l="Date">${p.date||'—'}</td><td data-l=""><span class="pill">${feeLabelFor(p)}</span></td><td data-l="Mode">${p.mode||'—'}</td><td data-l="Amount">${fmtMoney(p.amount)}</td><td data-l="">${canSub('managefee_collection','managefee','print') ? `<button class="btn-edit-text" onclick="printReceipt('${p.id}')">Print Receipt</button>` : ''}</td></tr>`).join('') : `<tr><td colspan="5"><div class="empty-state"><b>No payments yet</b></div></td></tr>`}
+        ${studentPayments.length ? studentPayments.map(p => `<tr><td data-l="Date">${p.date||'—'}</td><td data-l=""><span class="pill">${feeLabelFor(p)}</span></td><td data-l="Mode">${p.mode||'—'}</td><td data-l="Amount">${fmtMoney(p.amount)}${(typeof payRefunded === 'function' && payRefunded(p) > 0) ? `<br><small style="color:#b3261e;">Refunded ${fmtMoney(payRefunded(p))} · net ${fmtMoney(payNet(p))}</small>` : ''}</td><td data-l="">${canSub('managefee_collection','managefee','print') ? `<button class="btn-edit-text" onclick="printReceipt('${p.id}')">Print Receipt</button>` : ''}</td></tr>`).join('') : `<tr><td colspan="5"><div class="empty-state"><b>No payments yet</b></div></td></tr>`}
       </tbody></table></div>
     `;
   }
