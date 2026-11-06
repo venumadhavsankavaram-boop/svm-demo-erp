@@ -192,7 +192,7 @@ let myProfileTab = 'notifications';
       <div class="profile-head">
         ${s.photo ? `<img class="profile-photo" src="${s.photo}">` : `<div class="profile-photo">${initials(s)}</div>`}
         <div>
-          <h2>${s.firstName} ${s.lastName}</h2>
+          <h2>${s.lastName} ${s.firstName}</h2>
           <div class="p-meta">${s.admissionNo} · ${s.className} — Section ${s.section} · <span class="pill">${s.status||'Active'}</span></div>
         </div>
       </div>
@@ -841,7 +841,7 @@ let myProfileTab = 'notifications';
 
       <div class="dash-section-title"><div><h3>Payment History &amp; Receipts</h3></div></div>
       <div class="table-wrap"><table class="fee-stack"><thead><tr><th>Date</th><th>Category</th><th>Mode</th><th>Amount</th><th></th></tr></thead><tbody>
-        ${studentPayments.length ? studentPayments.map(p => `<tr><td data-l="Date">${p.date||'—'}</td><td data-l=""><span class="pill">${feeLabelFor(p)}</span></td><td data-l="Mode">${p.mode||'—'}</td><td data-l="Amount">${fmtMoney(p.amount)}${(typeof payRefunded === 'function' && payRefunded(p) > 0) ? `<br><small style="color:#b3261e;">Refunded ${fmtMoney(payRefunded(p))} · net ${fmtMoney(payNet(p))}</small>` : ''}</td><td data-l="">${canSub('managefee_collection','managefee','print') ? `<button class="btn-edit-text" onclick="printReceipt('${p.id}')">Print Receipt</button>` : ''}</td></tr>`).join('') : `<tr><td colspan="5"><div class="empty-state"><b>No payments yet</b></div></td></tr>`}
+        ${studentPayments.length ? studentPayments.map(p => `<tr><td data-l="Date">${p.date||'—'}</td><td data-l=""><span class="pill">${feeLabelFor(p)}</span></td><td data-l="Mode">${p.mode||'—'}</td><td data-l="Amount">${fmtMoney(p.amount)}${(typeof payRefunded === 'function' && payRefunded(p) > 0) ? `<br><small style="color:#b3261e;">Refunded ${fmtMoney(payRefunded(p))} · net ${fmtMoney(payNet(p))}</small>` : ''}</td><td data-l="">${(currentUser.role!=='Student' && currentUser.role!=='Parent' && canSub('managefee_collection','managefee','print')) ? `<button class="btn-edit-text" onclick="printReceipt('${p.id}')">Print Receipt</button>` : ''}</td></tr>`).join('') : `<tr><td colspan="5"><div class="empty-state"><b>No payments yet</b></div></td></tr>`}
       </tbody></table></div>
     `;
   }
@@ -873,7 +873,7 @@ let myProfileTab = 'notifications';
       amount: order.amount,
       currency: order.currency,
       name: schoolInfo.name || 'School Fees',
-      description: `${label} — ${s.firstName} ${s.lastName}`,
+      description: `${label} — ${s.lastName} ${s.firstName}`,
       prefill: { name: currentUser.name || '' },
       theme: { color: '#1f3a63' },
       handler: async function(response){
@@ -891,7 +891,7 @@ let myProfileTab = 'notifications';
           // The server has already recorded the payment and updated any extra-fee balance; just show it here.
           if(!payments.some(x => x.id === result.paymentId)){
             payments.push({
-              id: result.paymentId, receiptNo: result.receiptNo, studentId: s.id, studentName: `${s.firstName} ${s.lastName}`,
+              id: result.paymentId, receiptNo: result.receiptNo, studentId: s.id, studentName: `${s.lastName} ${s.firstName}`,
               category: type==='extra' ? 'extra' : key, mode:'Online', amount, discount:0, instalment:'',
               date: new Date().toISOString().slice(0,10), note:'Paid online via Razorpay', classAtPayment: s.className,
               extraFeeName: type==='extra' ? label : undefined, extraFeeId: type==='extra' ? key : undefined,
@@ -927,7 +927,7 @@ let myProfileTab = 'notifications';
           <h4 style="margin:0 0 4px;">${ex.name}</h4>
           <p style="font-size:0.78rem; color:var(--ink-soft); margin:0;">${ex.examType||''}${ex.startDate?` · ${ex.startDate}${ex.endDate?' – '+ex.endDate:''}`:''}</p>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="printMyReportCard('${ex.id}')">🖨️ View / Print Marks Card</button>
+        <button class="btn btn-primary btn-sm" onclick="printMyReportCard('${ex.id}')">👁️ View Marks Card</button>
       </div>
     `).join('');
   }
@@ -940,15 +940,15 @@ let myProfileTab = 'notifications';
     const logoEl = document.querySelector('.sb-brand img');
     const logoSrc = logoEl ? logoEl.src : '';
     // Shown inside the page (not a pop-up window): phones and many browsers block pop-ups, which left parents with a button that did nothing.
-    const docHtml = `<html><head><title>Marks Card - ${s.firstName} ${s.lastName}</title>
-      <style>${reportCardPrintCss()}</style></head>
+    const docHtml = `<html><head><title>Marks Card - ${s.lastName} ${s.firstName}</title>
+      <style>${reportCardPrintCss()}</style><style>@media print{body{display:none!important}}</style></head>
       <body>${reportCardPageHtml(s, exam, logoSrc, template)}</body></html>`;
     const old = document.getElementById('myCardOverlay'); if(old) old.remove();
     const ov = document.createElement('div'); ov.id = 'myCardOverlay';
     ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(15,20,35,.72);display:flex;flex-direction:column;';
     ov.innerHTML = `<div style="display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 14px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.2);">
         <b style="font-size:.95rem;">${exam.name} — Marks Card</b>
-        <span><button class="btn btn-primary btn-sm" id="myCardClose">✕ Close</button></span>
+        <span><button class="btn btn-ghost btn-sm" id="myCardClose">✕ Close</button></span>
       </div><iframe id="myCardFrame" style="flex:1;border:0;background:#fff;width:100%;"></iframe>`;
     document.body.appendChild(ov);
     const fr = document.getElementById('myCardFrame'); fr.srcdoc = docHtml;
@@ -1003,7 +1003,7 @@ let myProfileTab = 'notifications';
       <div class="sg-item" onmousedown="selectSuggestion('${s.id}')">
         <div class="sg-avatar">${s.photo ? `<img src="${s.photo}">` : initials(s)}</div>
         <div>
-          <div class="sg-name">${s.firstName} ${s.lastName}</div>
+          <div class="sg-name">${s.lastName} ${s.firstName}</div>
           <div class="sg-meta">${s.admissionNo} · ${s.className} — Section ${s.section}</div>
         </div>
       </div>
@@ -1040,7 +1040,7 @@ let myProfileTab = 'notifications';
     const tableRows = rows.map(s => `
       <tr onclick="openProfile('${s.id}')" style="cursor:pointer;">
         <td class="id-cell">${s.admissionNo}</td>
-        <td class="name-cell">${s.firstName} ${s.lastName}</td>
+        <td class="name-cell">${s.lastName} ${s.firstName}</td>
         <td><span class="pill">${s.className}</span></td>
         <td>${s.section}</td>
         <td>${s.email||'—'}</td>

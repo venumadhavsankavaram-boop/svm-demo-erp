@@ -88,7 +88,7 @@
     let rows = list.map(s => {
       const f = studentFigures(s, o);
       return Object.assign({
-        id: s.id, admissionNo: s.admissionNo || '', rollNo: s.rollNo || '', name: ((s.firstName || '') + ' ' + (s.lastName || '')).trim(),
+        id: s.id, admissionNo: s.admissionNo || '', rollNo: s.rollNo || '', name: ((s.lastName || '') + ' ' + (s.firstName || '')).trim(),
         className: s.className || '', section: s.section || '', father: s.fatherName || '',
         contact: s.fatherPhone || s.motherPhone || s.guardianPhone || s.contact || '', status: s.status || 'Active', branch: brOf(s),
       }, f);
@@ -136,7 +136,7 @@
     const rows = list.map(p => {
       const s = byId.get(p.studentId) || {};
       return {
-        receiptNo: p.receiptNo || '', date: p.date || '', admissionNo: s.admissionNo || '', name: p.studentName || ((s.firstName || '') + ' ' + (s.lastName || '')).trim(),
+        receiptNo: p.receiptNo || '', date: p.date || '', admissionNo: s.admissionNo || '', name: p.studentName || ((s.lastName || '') + ' ' + (s.firstName || '')).trim(),
         className: p.classAtPayment || s.className || '', section: s.section || '', category: (typeof feeLabelFor === 'function' ? feeLabelFor(p) : (RT()[p.category] || p.category)),
         instalment: p.instalment || '', mode: p.mode || '', user: p.collectedBy || '—', branch: brOf(p.branchId ? p : s), amount: typeof payNet === 'function' ? payNet(p) : num(p.amount), discount: num(p.discount),
       };

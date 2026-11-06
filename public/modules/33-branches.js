@@ -93,7 +93,7 @@
     var cur = nameOf(B.branchId);
     if(B.locked){
       bar.className = 'br-bar';
-      bar.innerHTML = '<span class="br-ic">🏫</span><span>Branch: <b>' + esc(cur) + '</b></span><span class="br-note">You work in this branch only.</span>';
+      bar.innerHTML = '<span class="br-ic">🏫</span><span>Branch: <b>' + esc(cur) + '</b></span><span class="br-note">' + ((window.currentUser || (typeof currentUser !== 'undefined' && currentUser) || {}).role === 'Parent' || (typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'Student') ? 'Your school branch.' : 'You work in this branch only.') + '</span>';
       return;
     }
     var opts = B.branches.map(function(b){ return '<option value="' + esc(b.id) + '"' + (!B.all && b.id === B.branchId ? ' selected' : '') + '>' + esc(b.name) + '</option>'; }).join('') +
