@@ -1172,6 +1172,7 @@ async function createSession(req, res, user) {
     // staff: remember the last sign-in so the Users & Roles screen can show it
     sql`UPDATE users SET last_login_at = now() WHERE id = ${user.id}`.catch(() => {});
   }
+  if (DEMO_MODE) demoTrialTouch(user.id);
   const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
   res.setHeader('Set-Cookie', `sid=${token}; HttpOnly${secureFlag}; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_ABSOLUTE_MAX_MS / 1000)}`);
 }
@@ -1270,6 +1271,11 @@ app.use(async (req, res, next) => {
       await sql`DELETE FROM sessions WHERE id = ${idHash}`.catch(() => {});
       return res.status(401).json({ error: 'Session expired. Please log in again.' });
     }
+    // Demo trial logins: stop working the moment the trial ends or is switched off.
+    if (DEMO_MODE && demoTrialEnded(session.user_id)) {
+      await sql`DELETE FROM sessions WHERE id = ${idHash}`.catch(() => {});
+      return res.status(401).json({ error: 'This trial has ended. Please contact SVM EdTech for a new one.' });
+    }
     // Sliding renewal, capped at the absolute 12-hour ceiling from login —
     // fire-and-forget so a slow write here never delays the actual request.
     const newExpires = new Date(Math.min(now + SESSION_IDLE_MS, createdAt + SESSION_ABSOLUTE_MAX_MS));
@@ -1277,6 +1283,10 @@ app.use(async (req, res, next) => {
     // so an app left running in the background still signs out after the idle time.
     if (req.headers['x-background'] !== '1') sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()}, last_seen_at = now() WHERE id = ${idHash}`.catch(() => {});
     req.authUser = { id: session.user_id, role: session.role, name: session.name };
+    // A trial login may look around and try things, but cannot lock out the shared demo accounts or other trials.
+    if (DEMO_MODE && demoIsTrial(session.user_id) && /^\/api\/users(\/|$)/.test(req.path) && (['DELETE', 'PUT', 'PATCH'].includes(req.method) || /password|reset/i.test(req.path)) ) {
+      return res.status(403).json({ error: 'Not available in the trial demo.' });
+    }
     // Parents/students: note "last seen" at most once every 10 minutes (feeds the Parent adoption board).
     if ((session.role === 'Parent' || session.role === 'Student') && !session.impersonated_by && req.headers['x-background'] !== '1') {
       const lastNote = parentSeenAt.get(session.user_id) || 0;
@@ -6038,8 +6048,8 @@ async function parentScopedKvValue(req, key, value) {
 // Lets the login page show the "demo" banner and the demo logins. Reveals nothing when not a demo.
 app.get('/api/demo-info', (req, res) => {
   if (!DEMO_MODE) return res.status(200).json({ demo: false, test: TEST_MODE });
-  return res.status(200).json({ demo: true, password: process.env.DEMO_PASSWORD || 'Demo@123',
-    logins: [['demo.admin','Admin'],['demo.principal','Principal'],['demo.accountant','Accountant'],['demo.office','Office Assistant'],['demo.teacher','Teacher'],['demo.parent','Parent'],['demo.student','Student'],['demo.branch','Branch Accountant (North Campus only)']] });
+  return res.status(200).json({ demo: true, password: process.env.DEMO_PASSWORD || 'Demo@123', showLogins: demoShowLogins,
+    logins: !demoShowLogins ? [] : [['demo.admin','Admin'],['demo.principal','Principal'],['demo.accountant','Accountant'],['demo.office','Office Assistant'],['demo.teacher','Teacher'],['demo.parent','Parent'],['demo.student','Student'],['demo.branch','Branch Accountant (North Campus only)']] });
 });
 
 app.post('/api/login', async (req, res) => {
@@ -6058,6 +6068,7 @@ app.post('/api/login', async (req, res) => {
     const user = rows[0];
     const ok = await bcrypt.compare(String(password), user.password || '');
     if (!ok) { recordLoginFailure(rateKey); userFailure(username); auditFailedLogin(req, username); return res.status(401).json({ error: 'Invalid username or password.' }); }
+    if (DEMO_MODE && demoTrialEnded(user.id)) { recordLoginSuccess(rateKey); return res.status(403).json({ error: 'This trial has ended. Please contact SVM EdTech for a new one.' }); }
     // Checked only after the password is already confirmed correct, so this
     // never gives anyone a way to learn an account's role without already
     // knowing its password — at that point they could just switch tabs
@@ -9012,6 +9023,129 @@ app.use(express.static(path.join(__dirname, 'public'), {
 app.get(['/', '/index.html'], (req, res) => {
   sendIndexHtml(res, req);
 });
+// ---- Demo install only (DEMO_MODE=true): named trial logins for prospective schools.
+// Each prospect gets their own username and password with an expiry date, so the shared demo password can stay private,
+// and the owner can see who has actually signed in. Trials live in their own table because the nightly reload wipes users.
+const DEMO_TRIAL_TEMPLATES = { 'Admin': 'demo.admin', 'Principal': 'demo.principal', 'Accountant': 'demo.accountant', 'Office Assistant': 'demo.office', 'Parent': 'demo.parent' };
+const demoTrialState = new Map();   // user id -> { exp (ms), revoked }
+let demoShowLogins = true, demoTrialTablesReady = false;
+const demoTrialUid = id => 'u_' + id;
+const demoIsTrial = userId => demoTrialState.has(String(userId));
+function demoTrialEnded(userId) {
+  const t = demoTrialState.get(String(userId)); return !!t && (t.revoked || t.exp < Date.now());
+}
+async function demoTrialTables() {
+  if (demoTrialTablesReady) return;
+  await sql`CREATE TABLE IF NOT EXISTS demo_trials (
+    id VARCHAR(40) PRIMARY KEY, school VARCHAR(200) NOT NULL, contact VARCHAR(160) NOT NULL DEFAULT '', phone VARCHAR(40) NOT NULL DEFAULT '',
+    role VARCHAR(40) NOT NULL, username VARCHAR(80) NOT NULL, pass_hash VARCHAR(100) NOT NULL, expires_at DATETIME NOT NULL, revoked TINYINT NOT NULL DEFAULT 0,
+    note VARCHAR(400) NOT NULL DEFAULT '', last_login_at DATETIME NULL, logins INT NOT NULL DEFAULT 0, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`;
+  await sql`CREATE TABLE IF NOT EXISTS demo_settings (k VARCHAR(40) PRIMARY KEY, v VARCHAR(400) NOT NULL DEFAULT '')`;
+  demoTrialTablesReady = true;
+}
+async function demoTrialsRefresh() {
+  try {
+    await demoTrialTables();
+    const rows = await sql`SELECT id, expires_at, revoked FROM demo_trials`;
+    demoTrialState.clear(); rows.forEach(r => demoTrialState.set(demoTrialUid(r.id), { exp: new Date(r.expires_at).getTime(), revoked: !!Number(r.revoked) }));
+    const s = await sql`SELECT v FROM demo_settings WHERE k = 'showLogins'`; demoShowLogins = !s.length || s[0].v !== '0';
+  } catch (e) { console.error('demo trials refresh failed:', e.message); }
+}
+// Make (or remake after the nightly reload) the login for one trial by copying the matching demo account.
+async function demoTrialMakeUser(t) {
+  const tpl = DEMO_TRIAL_TEMPLATES[t.role]; if (!tpl) return false;
+  const src = await sql`SELECT * FROM users WHERE LOWER(username) = ${tpl} AND deleted_at IS NULL`; if (!src.length) return false;
+  const uid = demoTrialUid(t.id);
+  await sql`DELETE FROM users WHERE id = ${uid}`; await sql`DELETE FROM sessions WHERE user_id = ${uid}`;
+  const row = Object.assign({}, src[0], { id: uid, username: t.username, name: t.role === 'Parent' ? src[0].name : (t.school + ' (trial)').slice(0, 120), password: t.pass_hash,
+    must_change_password: 0, initial_pw: '', recovery_code: '', first_login_at: null, last_login_at: null, last_seen_at: null, installed_at: null, twofa_method: null, totp_secret: null, twofa_email: null, twofa_recovery: null, twofa_last_step: 0, deleted_at: null });
+  const cols = Object.keys(row), ph = cols.map((_, i) => `$${i + 1}`).join(', ');
+  await sql.query(`INSERT INTO users (${cols.map(c => '`' + c + '`').join(', ')}) VALUES (${ph})`, cols.map(c => row[c] === undefined ? null : row[c]));
+  return true;
+}
+async function demoTrialsRestore() {
+  try { await demoTrialTables(); const ts = await sql`SELECT * FROM demo_trials`; for (const t of ts) { try { await demoTrialMakeUser(t); } catch (e) { console.warn('trial restore failed for', t.username, e.message); } } await demoTrialsRefresh(); }
+  catch (e) { console.error('demo trials restore failed:', e.message); }
+}
+async function demoTrialTouch(userId) {
+  const uid = String(userId); if (!demoTrialState.has(uid)) return;
+  await sql`UPDATE demo_trials SET last_login_at = now(), logins = logins + 1 WHERE id = ${uid.slice(2)}`.catch(() => {});
+}
+const demoOwnerOnly = (req, res) => {
+  if (!DEMO_MODE) { res.status(404).json({ error: 'Not found.' }); return false; }
+  if (!req.authUser || req.authUser.role !== 'Admin' || req.authUser.impersonatedBy || demoIsTrial(req.authUser.id)) { res.status(403).json({ error: 'Only the demo owner can open this.' }); return false; }
+  return true;
+};
+const demoRand = (chars, n) => Array.from(crypto.randomBytes(n), b => chars[b % chars.length]).join('');
+const demoNewPassword = () => 'Try-' + demoRand('abcdefghjkmnpqrstuvwxyz', 4) + demoRand('23456789', 3);
+const demoTrialOut = r => { const ms = new Date(r.expires_at).getTime(); return { id: r.id, school: r.school, contact: r.contact, phone: r.phone, role: r.role, username: r.username, note: r.note,
+  expiresAt: new Date(ms).toISOString(), revoked: !!Number(r.revoked), expired: ms < Date.now(), lastLogin: r.last_login_at ? new Date(r.last_login_at).toISOString() : '', logins: Number(r.logins) || 0, createdAt: new Date(r.created_at).toISOString() }; };
+app.get('/api/demo/trials', async (req, res) => {
+  try {
+    if (!demoOwnerOnly(req, res)) return; await demoTrialTables();
+    const rows = await sql`SELECT * FROM demo_trials ORDER BY created_at DESC`;
+    return res.status(200).json({ trials: rows.map(demoTrialOut), showLogins: demoShowLogins, roles: Object.keys(DEMO_TRIAL_TEMPLATES) });
+  } catch (err) { console.error('demo trials list error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/demo/trials', async (req, res) => {
+  try {
+    if (!demoOwnerOnly(req, res)) return; await demoTrialTables();
+    const b = req.body || {}; const school = String(b.school || '').trim().slice(0, 200), contact = String(b.contact || '').trim().slice(0, 160), phone = String(b.phone || '').replace(/[^0-9+ ]/g, '').slice(0, 40);
+    const role = String(b.role || 'Admin'); const days = Math.max(1, Math.min(60, parseInt(b.days, 10) || 7));
+    if (!school) return res.status(400).json({ error: 'Please type the school name.' });
+    if (!DEMO_TRIAL_TEMPLATES[role]) return res.status(400).json({ error: 'Unknown role.' });
+    const slug = school.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 12) || 'school';
+    let username = '', n = 0; do { username = 'trial-' + slug + (n ? n : '') ; n++; } while ((await sql`SELECT 1 AS x FROM users WHERE LOWER(username) = ${username}`).length || (await sql`SELECT 1 AS x FROM demo_trials WHERE username = ${username}`).length);
+    const password = demoNewPassword(); const hash = await bcrypt.hash(password, 10); const id = 't' + demoRand('0123456789abcdef', 10);
+    const exp = new Date(Date.now() + days * 86400000);
+    await sql`INSERT INTO demo_trials (id, school, contact, phone, role, username, pass_hash, expires_at, note) VALUES (${id}, ${school}, ${contact}, ${phone}, ${role}, ${username}, ${hash}, ${exp.toISOString().slice(0, 19).replace('T', ' ')}, ${String(b.note || '').slice(0, 400)})`;
+    const t = (await sql`SELECT * FROM demo_trials WHERE id = ${id}`)[0];
+    if (!(await demoTrialMakeUser(t))) { await sql`DELETE FROM demo_trials WHERE id = ${id}`; return res.status(500).json({ error: 'The sample accounts are not loaded yet. Try again in a minute.' }); }
+    await demoTrialsRefresh();
+    auditNote(req.authUser.name, req.authUser.role, 'POST', 'demo-trial', id, `${school} / ${role} / ${days} days`, clientIp(req));
+    return res.status(200).json({ trial: demoTrialOut(t), password });
+  } catch (err) { console.error('demo trial create error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/demo/trials/:id/extend', async (req, res) => {
+  try {
+    if (!demoOwnerOnly(req, res)) return; const days = Math.max(1, Math.min(60, parseInt((req.body || {}).days, 10) || 7));
+    const r = await sql`SELECT * FROM demo_trials WHERE id = ${req.params.id}`; if (!r.length) return res.status(404).json({ error: 'Not found.' });
+    const from = Math.max(Date.now(), new Date(r[0].expires_at).getTime()); const exp = new Date(from + days * 86400000);
+    await sql`UPDATE demo_trials SET expires_at = ${exp.toISOString().slice(0, 19).replace('T', ' ')}, revoked = 0 WHERE id = ${req.params.id}`; await demoTrialsRefresh();
+    return res.status(200).json({ trial: demoTrialOut((await sql`SELECT * FROM demo_trials WHERE id = ${req.params.id}`)[0]) });
+  } catch (err) { console.error('demo trial extend error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/demo/trials/:id/revoke', async (req, res) => {
+  try {
+    if (!demoOwnerOnly(req, res)) return; const on = (req.body || {}).revoked !== false;
+    await sql`UPDATE demo_trials SET revoked = ${on ? 1 : 0} WHERE id = ${req.params.id}`; await sql`DELETE FROM sessions WHERE user_id = ${demoTrialUid(req.params.id)}`; await demoTrialsRefresh();
+    return res.status(200).json({ ok: true });
+  } catch (err) { console.error('demo trial revoke error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/demo/trials/:id/password', async (req, res) => {
+  try {
+    if (!demoOwnerOnly(req, res)) return; const r = await sql`SELECT * FROM demo_trials WHERE id = ${req.params.id}`; if (!r.length) return res.status(404).json({ error: 'Not found.' });
+    const password = demoNewPassword(); const hash = await bcrypt.hash(password, 10);
+    await sql`UPDATE demo_trials SET pass_hash = ${hash} WHERE id = ${req.params.id}`; await sql`UPDATE users SET password = ${hash}, must_change_password = 0 WHERE id = ${demoTrialUid(req.params.id)}`; await sql`DELETE FROM sessions WHERE user_id = ${demoTrialUid(req.params.id)}`;
+    return res.status(200).json({ password });
+  } catch (err) { console.error('demo trial password error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.delete('/api/demo/trials/:id', async (req, res) => {
+  try {
+    if (!demoOwnerOnly(req, res)) return; const uid = demoTrialUid(req.params.id);
+    await sql`DELETE FROM sessions WHERE user_id = ${uid}`; await sql`DELETE FROM users WHERE id = ${uid}`; await sql`DELETE FROM demo_trials WHERE id = ${req.params.id}`; await demoTrialsRefresh();
+    return res.status(200).json({ ok: true });
+  } catch (err) { console.error('demo trial delete error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.put('/api/demo/public-logins', async (req, res) => {
+  try {
+    if (!demoOwnerOnly(req, res)) return; await demoTrialTables(); const show = (req.body || {}).show !== false;
+    await sql`INSERT INTO demo_settings (k, v) VALUES ('showLogins', ${show ? '1' : '0'}) ON DUPLICATE KEY UPDATE v = VALUES(v)`; await demoTrialsRefresh();
+    return res.status(200).json({ showLogins: demoShowLogins });
+  } catch (err) { console.error('demo public logins error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+if (DEMO_MODE) { setTimeout(demoTrialsRefresh, 3000); setInterval(demoTrialsRefresh, 60 * 1000); }
+
 app.get(/.*/, (req, res) => {
   sendIndexHtml(res, req);
 });
@@ -9076,6 +9210,7 @@ if (DEMO_MODE) {
       const mod = await import('./demo/seed-demo.mjs?run=' + Date.now());
       await mod.finished;
       await markSeeded();
+      await demoTrialsRestore();
       console.log('Demo seed finished OK');
     }).catch(e => console.error('SEED FAILED:', e && e.message, e && e.cause ? '(cause: ' + (e.cause.code || e.cause.message) + ')' : ''))
       .finally(async () => {
