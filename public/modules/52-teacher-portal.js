@@ -110,7 +110,7 @@
       @media (max-width:760px){
         .tp-grid{grid-template-columns:repeat(2,1fr);gap:10px;} .tp-tile{min-height:104px;padding:12px;}
         .tp-hero{padding:18px 16px;border-radius:18px;} .tp-hero h2{font-size:1.3rem;}
-        body.tp-on{padding-bottom:0;} body.tp-on .main{padding-bottom:calc(96px + env(safe-area-inset-bottom)) !important;} body.tp-on .toast{left:12px;right:12px;bottom:calc(76px + env(safe-area-inset-bottom));text-align:center;} body.tp-on .mo-sync-badge{bottom:calc(72px + env(safe-area-inset-bottom));} body.tp-on .mo-import-progress{bottom:calc(76px + env(safe-area-inset-bottom));}
+        body.tp-on{padding-bottom:74px;}
         #tpDock{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:900;background:#fff;border-top:1px solid #e3e8f3;box-shadow:0 -6px 20px rgba(20,50,92,.10);padding:6px 6px calc(6px + env(safe-area-inset-bottom));justify-content:space-around;}
         #tpDock button{flex:1;background:none;border:0;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:.68rem;color:#52607a;padding:5px 2px;border-radius:12px;font-family:inherit;}
         #tpDock button .d{font-size:1.25rem;line-height:1;} #tpDock button.on{color:#2f6fed;font-weight:700;background:#eef3ff;}
@@ -206,13 +206,23 @@
       if(isTeacher()){
         try{ dock(); watch(); dockActive(view); loadCfg(false).then(applyNav); if(view === 'myday') setTimeout(() => paint(false), 60); }catch(e){}
       }
-      if(view === 'admintools2' && isMgr()) setTimeout(adminCard, 450);
+      if(view === 'admintools2' && isMgr()){ setTimeout(adminCard, 60); keepAdminCard('teacherPortalCard', adminCard); }
       return r;
     };
   }
   setInterval(() => { if(isTeacher()){ dock(); watch(); } else if($('tpDock')) dock(); }, 2500);
 
   /* ---------- Admin / Principal: Teacher portal controls (in Admin Tools) ---------- */
+  /* The Admin Tools page can finish drawing itself after the first 400ms (slow phone or network) and wipe this card. Watch the
+     page and put the card back whenever it is missing while the page is open, so no refresh is needed. */
+  function keepAdminCard(id, make){
+    window.__atKeep = window.__atKeep || {};
+    if(window.__atKeep[id]) { return; } window.__atKeep[id] = true;
+    let t = null;
+    const check = () => { const v = $('view-admintools2'); if(v && v.style.display !== 'none' && $('adminTools2Body') && !$(id)) make(); };
+    const start = () => { const v = $('view-admintools2'); if(!v) return setTimeout(start, 1000); new MutationObserver(() => { clearTimeout(t); t = setTimeout(check, 250); }).observe(v, { childList: true, subtree: true }); };
+    start();
+  }
   const BACK_OPTS = [[null, 'No limit (today’s behaviour)'], [0, 'Today only'], [1, 'Up to 1 day back'], [2, 'Up to 2 days back'], [3, 'Up to 3 days back'], [7, 'Up to 7 days back'], [15, 'Up to 15 days back'], [30, 'Up to 30 days back']];
   async function adminCard(){
     const host = $('adminTools2Body'); if(!host) return;
@@ -220,6 +230,7 @@
     if(!card){
       card = document.createElement('div'); card.id = 'teacherPortalCard'; card.className = 'profile-card';
       card.style.cssText = 'margin:0 0 18px;padding:16px 18px;';
+      if(!card.innerHTML.trim()) card.innerHTML = '<p style="margin:0;color:#667">Loading…</p>';
       const parentCard = $('portalSettingsCard');
       if(parentCard && parentCard.parentNode === host) parentCard.insertAdjacentElement('afterend', card); else host.insertBefore(card, host.firstChild);
     }
