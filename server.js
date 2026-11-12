@@ -9039,7 +9039,8 @@ app.get(['/', '/index.html'], (req, res) => {
 // ---- Demo install only (DEMO_MODE=true): named trial logins for prospective schools.
 // Each prospect gets their own username and password with an expiry date, so the shared demo password can stay private,
 // and the owner can see who has actually signed in. Trials live in their own table because the nightly reload wipes users.
-const DEMO_TRIAL_TEMPLATES = { 'Admin': 'demo.admin', 'Principal': 'demo.principal', 'Accountant': 'demo.accountant', 'Office Assistant': 'demo.office', 'Parent': 'demo.parent' };
+const DEMO_TRIAL_TEMPLATES = { 'Admin': 'demo.admin', 'Principal': 'demo.principal', 'Accountant': 'demo.accountant', 'Office Assistant': 'demo.office', 'Teacher': 'demo.teacher', 'Parent': 'demo.parent', 'Student': 'demo.student' };
+const DEMO_ROLE_SLUG = { 'Admin': 'admin', 'Principal': 'principal', 'Accountant': 'accountant', 'Office Assistant': 'office', 'Teacher': 'teacher', 'Parent': 'parent', 'Student': 'student' };
 const demoTrialState = new Map();   // user id -> { exp (ms), revoked }
 let demoShowLogins = true, demoTrialTablesReady = false;
 const demoTrialUid = id => 'u_' + id;
@@ -9070,7 +9071,7 @@ async function demoTrialMakeUser(t) {
   const src = await sql`SELECT * FROM users WHERE LOWER(username) = ${tpl} AND deleted_at IS NULL`; if (!src.length) return false;
   const uid = demoTrialUid(t.id);
   await sql`DELETE FROM users WHERE id = ${uid}`; await sql`DELETE FROM sessions WHERE user_id = ${uid}`;
-  const row = Object.assign({}, src[0], { id: uid, username: t.username, name: t.role === 'Parent' ? src[0].name : (t.school + ' (trial)').slice(0, 120), password: t.pass_hash,
+  const row = Object.assign({}, src[0], { id: uid, username: t.username, name: (t.role === 'Parent' || t.role === 'Student') ? src[0].name : (t.school + ' (trial)').slice(0, 120), password: t.pass_hash,
     must_change_password: 0, initial_pw: '', recovery_code: '', first_login_at: null, last_login_at: null, last_seen_at: null, installed_at: null, twofa_method: null, totp_secret: null, twofa_email: null, twofa_recovery: null, twofa_last_step: 0, deleted_at: null });
   const cols = Object.keys(row), ph = cols.map((_, i) => `$${i + 1}`).join(', ');
   await sql.query(`INSERT INTO users (${cols.map(c => '`' + c + '`').join(', ')}) VALUES (${ph})`, cols.map(c => row[c] === undefined ? null : row[c]));
@@ -9104,19 +9105,33 @@ app.post('/api/demo/trials', async (req, res) => {
   try {
     if (!demoOwnerOnly(req, res)) return; await demoTrialTables();
     const b = req.body || {}; const school = String(b.school || '').trim().slice(0, 200), contact = String(b.contact || '').trim().slice(0, 160), phone = String(b.phone || '').replace(/[^0-9+ ]/g, '').slice(0, 40);
-    const role = String(b.role || 'Admin'); const days = Math.max(1, Math.min(60, parseInt(b.days, 10) || 7));
+    const role = String(b.role || 'All'); const days = Math.max(1, Math.min(60, parseInt(b.days, 10) || 7));
     if (!school) return res.status(400).json({ error: 'Please type the school name.' });
-    if (!DEMO_TRIAL_TEMPLATES[role]) return res.status(400).json({ error: 'Unknown role.' });
+    const all = role === 'All';
+    if (!all && !DEMO_TRIAL_TEMPLATES[role]) return res.status(400).json({ error: 'Unknown role.' });
+    // "All" gives the school one login for every role (same password), so they can try every view of the ERP.
+    const roles = all ? Object.keys(DEMO_TRIAL_TEMPLATES) : [role];
     const slug = school.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 12) || 'school';
-    let username = '', n = 0; do { username = 'trial-' + slug + (n ? n : '') ; n++; } while ((await sql`SELECT 1 AS x FROM users WHERE LOWER(username) = ${username}`).length || (await sql`SELECT 1 AS x FROM demo_trials WHERE username = ${username}`).length);
-    const password = demoNewPassword(); const hash = await bcrypt.hash(password, 10); const id = 't' + demoRand('0123456789abcdef', 10);
-    const exp = new Date(Date.now() + days * 86400000);
-    await sql`INSERT INTO demo_trials (id, school, contact, phone, role, username, pass_hash, expires_at, note) VALUES (${id}, ${school}, ${contact}, ${phone}, ${role}, ${username}, ${hash}, ${exp.toISOString().slice(0, 19).replace('T', ' ')}, ${String(b.note || '').slice(0, 400)})`;
-    const t = (await sql`SELECT * FROM demo_trials WHERE id = ${id}`)[0];
-    if (!(await demoTrialMakeUser(t))) { await sql`DELETE FROM demo_trials WHERE id = ${id}`; return res.status(500).json({ error: 'The sample accounts are not loaded yet. Try again in a minute.' }); }
+    const uname = (base, r) => all ? base + '-' + DEMO_ROLE_SLUG[r] : base;
+    const taken = async u => (await sql`SELECT 1 AS x FROM users WHERE LOWER(username) = ${u}`).length || (await sql`SELECT 1 AS x FROM demo_trials WHERE username = ${u}`).length;
+    let base = 'trial-' + slug, n = 0;
+    for (;;) { const cand = base + (n ? n : ''); let ok = true; for (const r of roles) { if (await taken(uname(cand, r))) { ok = false; break; } } if (ok) { base = cand; break; } n++; }
+    const password = demoNewPassword(); const hash = await bcrypt.hash(password, 10);
+    const exp = new Date(Date.now() + days * 86400000); const expStr = exp.toISOString().slice(0, 19).replace('T', ' ');
+    const made = [];
+    for (const r of roles) {
+      const id = 't' + demoRand('0123456789abcdef', 10); made.push(id);
+      await sql`INSERT INTO demo_trials (id, school, contact, phone, role, username, pass_hash, expires_at, note) VALUES (${id}, ${school}, ${contact}, ${phone}, ${r}, ${uname(base, r)}, ${hash}, ${expStr}, ${String(b.note || '').slice(0, 400)})`;
+      const t = (await sql`SELECT * FROM demo_trials WHERE id = ${id}`)[0];
+      if (!(await demoTrialMakeUser(t))) {
+        for (const x of made) { await sql`DELETE FROM users WHERE id = ${demoTrialUid(x)}`; await sql`DELETE FROM demo_trials WHERE id = ${x}`; }
+        return res.status(500).json({ error: 'The sample accounts are not loaded yet. Try again in a minute.' });
+      }
+    }
     await demoTrialsRefresh();
-    auditNote(req.authUser.name, req.authUser.role, 'POST', 'demo-trial', id, `${school} / ${role} / ${days} days`, clientIp(req));
-    return res.status(200).json({ trial: demoTrialOut(t), password });
+    const rows = []; for (const x of made) rows.push((await sql`SELECT * FROM demo_trials WHERE id = ${x}`)[0]);
+    auditNote(req.authUser.name, req.authUser.role, 'POST', 'demo-trial', made[0], `${school} / ${all ? 'all roles' : role} / ${days} days`, clientIp(req));
+    return res.status(200).json({ trial: demoTrialOut(rows[0]), trials: rows.map(demoTrialOut), password });
   } catch (err) { console.error('demo trial create error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
 app.post('/api/demo/trials/:id/extend', async (req, res) => {
@@ -9138,7 +9153,7 @@ app.post('/api/demo/trials/:id/revoke', async (req, res) => {
 app.post('/api/demo/trials/:id/password', async (req, res) => {
   try {
     if (!demoOwnerOnly(req, res)) return; const r = await sql`SELECT * FROM demo_trials WHERE id = ${req.params.id}`; if (!r.length) return res.status(404).json({ error: 'Not found.' });
-    const password = demoNewPassword(); const hash = await bcrypt.hash(password, 10);
+    const want = (req.body || {}).password; const password = (typeof want === 'string' && /^Try-[a-z]{4}[0-9]{3}$/.test(want)) ? want : demoNewPassword(); const hash = await bcrypt.hash(password, 10);
     await sql`UPDATE demo_trials SET pass_hash = ${hash} WHERE id = ${req.params.id}`; await sql`UPDATE users SET password = ${hash}, must_change_password = 0 WHERE id = ${demoTrialUid(req.params.id)}`; await sql`DELETE FROM sessions WHERE user_id = ${demoTrialUid(req.params.id)}`;
     return res.status(200).json({ password });
   } catch (err) { console.error('demo trial password error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }

@@ -31,9 +31,14 @@
     `;
     document.head.appendChild(s);
   }
-  function inviteText(t, pw){
-    return `Hello${t.contact ? ' ' + t.contact : ''},\n\nHere is your trial login for the SVM EdTech School ERP demo. It holds sample data only, so try anything freely.\n\nLink: ${location.origin}\nUsername: ${t.username}\nPassword: ${pw}\nYou are signing in as: ${t.role}\nValid until: ${dstr(t.expiresAt)}\n\nThe sample data resets every night. Reply here if you would like a short walkthrough.\n\nSVM EdTech`;
+  const ROLE_HELP = { 'Admin': 'everything: students, fees, accounts, staff, settings', 'Principal': 'the management view', 'Accountant': 'fees, receipts and accounts', 'Office Assistant': 'front-office work', 'Teacher': 'attendance, marks and homework', 'Parent': 'the parent app: fees, attendance and notices', 'Student': 'the student view' };
+  function inviteText(list, pw){
+    list = Array.isArray(list) ? list : [list]; const t = list[0];
+    const head = `Hello${t.contact ? ' ' + t.contact : ''},\n\nHere ${list.length > 1 ? 'are your trial logins' : 'is your trial login'} for the SVM EdTech School ERP demo. It holds sample data only, so try anything freely.\n\nLink: ${location.origin}\n`;
+    const who = list.length > 1 ? `Password (the same for every login): ${pw}\n\nSign in with each one to see that part of the school:\n${list.map(x => '- ' + x.role + ' (' + (ROLE_HELP[x.role] || x.role) + '): ' + x.username).join('\n')}\n` : `Username: ${t.username}\nPassword: ${pw}\nYou are signing in as: ${t.role}\n`;
+    return head + who + `\nValid until: ${dstr(t.expiresAt)}\n\nThe sample data resets every night. Reply here if you would like a short walkthrough.\n\nSVM EdTech`;
   }
+  const groupsOf = ts => { const m = new Map(); ts.forEach(t => { const k = t.school + '|' + (t.createdAt || '').slice(0, 16); if(!m.has(k)) m.set(k, []); m.get(k).push(t); }); return Array.from(m.values()); };
   function status(t){
     if(t.revoked) return ['#fde4e1', '#b3261e', 'Switched off'];
     if(t.expired) return ['#eceff4', '#555', 'Ended'];
@@ -64,24 +69,25 @@
   async function load(){ try{ data = await api('GET', '/api/demo/trials'); }catch(e){ toast(e.message); } }
   async function render(){
     const v = $('view-demotrials'); if(!v) return; if(!data) await load(); if(!data) return;
-    const ts = data.trials, live = ts.filter(t => !t.revoked && !t.expired);
+    const ts = data.trials, G = groupsOf(ts), live = G.filter(g => g.some(t => !t.revoked && !t.expired));
     v.innerHTML = `<div class="topbar"><div><h1>Demo Trials</h1><p style="margin:0;color:#667">Give each school its own demo login with an end date, and see who has really opened it.</p></div></div>
-      <div class="dt-tiles"><div class="dt-tile"><b>${live.length}</b><span>Active trials</span></div><div class="dt-tile"><b>${ts.filter(t => t.logins > 0).length}</b><span>Opened at least once</span></div><div class="dt-tile"><b>${live.filter(t => !t.logins).length}</b><span>Active, never opened</span></div><div class="dt-tile"><b>${ts.length - live.length}</b><span>Ended or off</span></div></div>
+      <div class="dt-tiles"><div class="dt-tile"><b>${live.length}</b><span>Active trials</span></div><div class="dt-tile"><b>${G.filter(g => g.some(t => t.logins > 0)).length}</b><span>Opened at least once</span></div><div class="dt-tile"><b>${live.filter(g => g.every(t => !t.logins)).length}</b><span>Active, never opened</span></div><div class="dt-tile"><b>${G.length - live.length}</b><span>Ended or off</span></div></div>
       <div class="dt-card"><h3>Create a trial login</h3><div class="dt-f">
         <div><label>School name *</label><input id="dtSchool" placeholder="e.g. Green Valley School"></div>
         <div><label>Contact person</label><input id="dtContact" placeholder="Principal / owner"></div>
         <div><label>WhatsApp number</label><input id="dtPhone" placeholder="98xxxxxxxx" inputmode="tel"></div>
-        <div><label>Sign in as</label><select id="dtRole">${data.roles.map(r => `<option>${esc(r)}</option>`).join('')}</select></div>
+        <div><label>Sign in as</label><select id="dtRole"><option value="All">All roles - full experience (recommended)</option>${data.roles.map(r => `<option>${esc(r)}</option>`).join('')}</select></div>
         <div><label>Valid for (days)</label><input id="dtDays" type="number" min="1" max="60" value="7"></div>
         <div><button class="btn btn-primary" id="dtCreate" style="width:100%">Create login</button></div></div>
-        <div class="dt-note">Admin shows everything, Principal the management view, Accountant the fees and accounts, Parent the parent app. A trial login can look around and try things, but cannot delete users or change passwords of the shared demo accounts. Teacher trials are not offered yet.</div></div>
+        <div class="dt-note"><b>All roles</b> makes one login for each role (Admin, Principal, Accountant, Office Assistant, Teacher, Parent, Student) with the same password, so the school can try every view. A trial login can look around and try things, but cannot see or change logins, passwords or the audit trail.</div></div>
       ${invite ? `<div class="dt-card" style="border-left:6px solid #17703a"><h3>Message ready to send <span style="font-size:.8rem;color:#b3261e;font-weight:600">The password is shown only now</span></h3><textarea class="dt-msg" id="dtMsg" readonly>${esc(invite.text)}</textarea>
         <div class="dt-acts" style="margin-top:8px"><button class="btn btn-primary" id="dtCopy">Copy message</button>${invite.phone ? `<a class="btn btn-secondary" target="_blank" rel="noopener" href="https://wa.me/${esc(invite.phone.length === 10 ? '91' + invite.phone : invite.phone)}?text=${encodeURIComponent(invite.text)}">Open in WhatsApp</a>` : ''}<button class="btn btn-secondary" id="dtDone">Done</button></div></div>` : ''}
       <div class="dt-card"><h3>Trials <label style="font-size:.84rem;font-weight:500;color:#445"><input type="checkbox" id="dtShow" ${data.showLogins ? 'checked' : ''}> Show the shared demo logins on the sign-in page</label></h3>
         ${ts.length ? `<div style="overflow:auto"><table class="dt-tbl"><thead><tr><th>School</th><th>Contact</th><th>Role / username</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead><tbody>
-        ${ts.map(t => { const st = status(t); return `<tr><td><b>${esc(t.school)}</b><div class="dt-note" style="margin:0">Created ${dstr(t.createdAt)}</div></td><td>${esc(t.contact || '-')}<div class="dt-note" style="margin:0">${esc(t.phone || '')}</div></td><td>${esc(t.role)}<div class="dt-note" style="margin:0"><b>${esc(t.username)}</b></div></td>
-          <td><span class="dt-pill" style="background:${st[0]};color:${st[1]}">${esc(st[2])}</span><div class="dt-note" style="margin:2px 0 0">to ${dstr(t.expiresAt)}</div></td><td>${t.logins ? esc(ago(t.lastLogin)) + '<div class="dt-note" style="margin:0">' + t.logins + ' sign-in' + (t.logins === 1 ? '' : 's') + '</div>' : '<span style="color:#8a5a00">Never opened</span>'}</td>
-          <td><div class="dt-acts"><button class="btn btn-secondary" data-a="extend" data-id="${esc(t.id)}">+7 days</button><button class="btn btn-secondary" data-a="pw" data-id="${esc(t.id)}">New password</button><button class="btn btn-secondary" data-a="${t.revoked ? 'on' : 'off'}" data-id="${esc(t.id)}">${t.revoked ? 'Switch on' : 'Switch off'}</button><button class="btn btn-secondary" data-a="del" data-id="${esc(t.id)}" style="color:#b3261e">Delete</button></div></td></tr>`; }).join('')}
+        ${G.map(g => { const t0 = g[0], st = status(g.find(t => !t.revoked && !t.expired) || t0), ids = g.map(t => t.id).join(','), last = g.map(t => t.lastLogin).filter(Boolean).sort().pop() || '', n = g.reduce((s, t) => s + t.logins, 0), allOff = g.every(t => t.revoked);
+          return `<tr><td><b>${esc(t0.school)}</b><div class="dt-note" style="margin:0">Created ${dstr(t0.createdAt)}</div></td><td>${esc(t0.contact || '-')}<div class="dt-note" style="margin:0">${esc(t0.phone || '')}</div></td><td>${g.map(t => esc(t.role) + ': <b>' + esc(t.username) + '</b>').join('<br>')}</td>
+          <td><span class="dt-pill" style="background:${st[0]};color:${st[1]}">${esc(st[2])}</span><div class="dt-note" style="margin:2px 0 0">to ${dstr(t0.expiresAt)}</div></td><td>${n ? esc(ago(last)) + '<div class="dt-note" style="margin:0">' + n + ' sign-in' + (n === 1 ? '' : 's') + '</div>' : '<span style="color:#8a5a00">Never opened</span>'}</td>
+          <td><div class="dt-acts"><button class="btn btn-secondary" data-a="extend" data-id="${esc(ids)}">+7 days</button><button class="btn btn-secondary" data-a="pw" data-id="${esc(ids)}">New password</button><button class="btn btn-secondary" data-a="${allOff ? 'on' : 'off'}" data-id="${esc(ids)}">${allOff ? 'Switch on' : 'Switch off'}</button><button class="btn btn-secondary" data-a="del" data-id="${esc(ids)}">Delete</button></div></td></tr>`; }).join('')}
         </tbody></table></div>` : '<div class="dt-note">No trial logins yet. Create the first one above.</div>'}
         <div class="dt-note">Everything resets to fresh sample data every night at 2 AM, but trial logins stay until they end. Passwords are stored scrambled, so use "New password" if a school loses theirs.</div></div>`;
     $('dtCreate').onclick = create;
@@ -95,17 +101,17 @@
     if(!g('dtSchool').trim()) return toast('Please type the school name.');
     busy = true;
     try{
-      const j = await api('POST', '/api/demo/trials', { school: g('dtSchool'), contact: g('dtContact'), phone: g('dtPhone'), role: g('dtRole'), days: g('dtDays') });
-      invite = { text: inviteText(j.trial, j.password), phone: j.trial.phone.replace(/\D/g, '') }; data = null; await render(); const m = $('dtMsg'); if(m) m.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const j = await api('POST', '/api/demo/trials', { school: g('dtSchool'), contact: g('dtContact'), phone: g('dtPhone'), role: g('dtRole') || 'All', days: g('dtDays') });
+      invite = { text: inviteText(j.trials || [j.trial], j.password), phone: j.trial.phone.replace(/\D/g, '') }; data = null; await render(); const m = $('dtMsg'); if(m) m.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }catch(e){ toast(e.message); } busy = false;
   }
   async function act(a, id){
-    const t = data.trials.find(x => x.id === id); if(!t || busy) return; busy = true;
+    const ids = String(id).split(','), g = data.trials.filter(x => ids.indexOf(x.id) >= 0), t = g[0]; if(!t || busy) return; busy = true;
     try{
-      if(a === 'extend'){ await api('POST', '/api/demo/trials/' + id + '/extend', { days: 7 }); toast('Extended by 7 days.'); }
-      else if(a === 'off' || a === 'on'){ await api('POST', '/api/demo/trials/' + id + '/revoke', { revoked: a === 'off' }); toast(a === 'off' ? 'Switched off. They are signed out.' : 'Switched on.'); }
-      else if(a === 'pw'){ if(!confirm('Make a new password for ' + t.school + '? The old one stops working.')) { busy = false; return; } const j = await api('POST', '/api/demo/trials/' + id + '/password', {}); invite = { text: inviteText(t, j.password), phone: (t.phone || '').replace(/\D/g, '') }; }
-      else if(a === 'del'){ if(!confirm('Delete the trial for ' + t.school + '? Their login stops working for good.')) { busy = false; return; } await api('DELETE', '/api/demo/trials/' + id); toast('Deleted.'); }
+      if(a === 'extend'){ for(const x of g) await api('POST', '/api/demo/trials/' + x.id + '/extend', { days: 7 }); toast('Extended by 7 days.'); }
+      else if(a === 'off' || a === 'on'){ for(const x of g) await api('POST', '/api/demo/trials/' + x.id + '/revoke', { revoked: a === 'off' }); toast(a === 'off' ? 'Switched off. They are signed out.' : 'Switched on.'); }
+      else if(a === 'pw'){ if(!confirm('Make a new password for ' + t.school + '? The old one stops working.')) { busy = false; return; } const j = await api('POST', '/api/demo/trials/' + t.id + '/password', {}); for(const x of g.slice(1)) await api('POST', '/api/demo/trials/' + x.id + '/password', { password: j.password }); invite = { text: inviteText(g, j.password), phone: (t.phone || '').replace(/\D/g, '') }; }
+      else if(a === 'del'){ if(!confirm('Delete the trial for ' + t.school + '? Their login' + (g.length > 1 ? 's stop' : ' stops') + ' working for good.')) { busy = false; return; } for(const x of g) await api('DELETE', '/api/demo/trials/' + x.id); toast('Deleted.'); }
       data = null; await render();
     }catch(e){ toast(e.message); } busy = false;
   }

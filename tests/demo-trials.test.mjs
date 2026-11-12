@@ -22,15 +22,18 @@ test('an ended or switched-off trial cannot sign in and is signed out on its nex
 });
 test('trial logins cannot delete users or change passwords of the shared demo accounts', () => {
   const i = server.indexOf('demoIsTrial(session.user_id)'); assert.ok(i > 0);
-  const b = server.slice(i, i + 400); assert.ok(b.includes("'DELETE'") && /password\|reset/.test(b) && b.includes('403'));
+  const b = server.slice(i, i + 1600);
+  assert.ok(b.includes("req.method !== 'GET'") && /password\|reset/.test(b) && b.includes('403') && b.includes('audit-log'));
+  assert.ok(b.includes("u_demo_owner") && b.includes('DEMO_OWNER_USERNAME'), 'the owner login must be hidden from trial users');
 });
 test('trials survive the nightly reload and keep their own table', () => {
   assert.ok(server.includes('CREATE TABLE IF NOT EXISTS demo_trials'));
   assert.ok(/await markSeeded\(\);\s*await demoTrialsRestore\(\);/.test(server));
   assert.ok(!/DELETE FROM demo_trials/.test(rd('demo/seed-demo.mjs')));
 });
-test('passwords are stored only as hashes and only offered Admin, Principal, Accountant, Office Assistant and Parent', () => {
+test('passwords are stored only as hashes and offered for every role, with an All-roles option', () => {
   assert.ok(server.includes('pass_hash') && !/password VARCHAR|plain/i.test(server.slice(server.indexOf('CREATE TABLE IF NOT EXISTS demo_trials'), server.indexOf('CREATE TABLE IF NOT EXISTS demo_trials') + 700)));
-  assert.ok(server.includes("'Office Assistant': 'demo.office'") && !/DEMO_TRIAL_TEMPLATES = \{[^}]*Teacher/.test(server));
+  assert.ok(server.includes("'Office Assistant': 'demo.office'") && /DEMO_TRIAL_TEMPLATES = \{[^}]*'Teacher': 'demo.teacher'[^}]*'Student': 'demo.student'/.test(server));
+  assert.ok(server.includes("role === 'All'") && server.includes('DEMO_ROLE_SLUG'));
 });
 done('demo-trials');
