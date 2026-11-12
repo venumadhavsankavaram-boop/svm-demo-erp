@@ -133,6 +133,15 @@ async function createLogins(students, staff) {
   DEMO_STUDENT_ID = s.id;
   await mk('u_demo_parent', `Parent of ${s.firstName}`, 'demo.parent', 'Parent', s.id);
   await mk('u_demo_student', s.name, 'demo.student', 'Student', s.id);
+  // Owner login (not shared): created from environment variables so it survives the nightly reload.
+  const ownerUser = (process.env.DEMO_OWNER_USERNAME || '').trim();
+  const ownerPass = process.env.DEMO_OWNER_PASSWORD || '';
+  if (ownerUser && ownerPass.length >= 10) {
+    const oh = await bcrypt.hash(ownerPass, 10);
+    await sql`INSERT INTO users (id, name, username, password, role, linked_student_id, recovery_code)
+      VALUES ('u_demo_owner', 'SVM EdTech Owner', ${ownerUser}, ${oh}, 'Admin', '', 'OWNER')`;
+    console.log('Owner login created.');
+  } else { console.log('No owner login (set DEMO_OWNER_USERNAME and DEMO_OWNER_PASSWORD).'); }
 }
 async function loginAsSeeder() {
   // The seeder's password is random and never stored in plaintext: set a known one just for this run.

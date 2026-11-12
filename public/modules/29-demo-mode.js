@@ -21,7 +21,7 @@
     setH(); window.addEventListener('resize', setH);
     document.title = 'DEMO — ' + document.title;
     const form = document.getElementById('loginForm');
-    if(form && !document.getElementById('demoLogins')){
+    if(form && !document.getElementById('demoLogins') && (info.logins || []).length){
       const box = document.createElement('div');
       box.id = 'demoLogins';
       box.style.cssText = 'margin:0 0 14px;padding:10px 12px;border:1px dashed #7a2e8f;border-radius:10px;font-size:0.78rem;text-align:left;line-height:1.6;';
@@ -33,6 +33,12 @@
         const u = form.querySelector('input[type="text"], input[id*="sername"]'); const p = form.querySelector('input[type="password"]');
         if(u) u.value = a.dataset.u; if(p) p.value = info.password;
       });
+    }
+    else if(form && !document.getElementById('demoLogins') && info.showLogins === false){
+      const box = document.createElement('div'); box.id = 'demoLogins';
+      box.style.cssText = 'margin:0 0 14px;padding:10px 12px;border:1px dashed #7a2e8f;border-radius:10px;font-size:0.8rem;text-align:left;line-height:1.5;';
+      box.innerHTML = '<b>Demo access</b><br>Sign in with the trial username and password SVM EdTech sent you. Need one? Ask the person who shared this link.';
+      form.insertBefore(box, form.firstChild);
     }
   }).catch(() => {});
 })();
