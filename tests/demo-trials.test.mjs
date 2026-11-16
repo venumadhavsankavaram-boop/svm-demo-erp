@@ -36,4 +36,21 @@ test('passwords are stored only as hashes and offered for every role, with an Al
   assert.ok(server.includes("'Office Assistant': 'demo.office'") && /DEMO_TRIAL_TEMPLATES = \{[^}]*'Teacher': 'demo.teacher'[^}]*'Student': 'demo.student'/.test(server));
   assert.ok(server.includes("role === 'All'") && server.includes('DEMO_ROLE_SLUG'));
 });
+test('a trial can be limited to chosen modules, enforced on the server, and can have no end date', () => {
+  assert.ok(server.includes('function planAccessFor') && /checkPlanModuleAccess[\s\S]{0,400}planAccessFor\(req\.authUser\)/.test(server), 'the module gate must read the per-login plan');
+  assert.ok((server.match(/shaped\.moduleAccess = planAccessFor\(/g) || []).length === 2, 'sign-in and /api/me must both send the per-login plan');
+  assert.ok(server.includes('ADD COLUMN modules') && server.includes("'/api/demo/trials/:id/modules'") && server.slice(server.indexOf("'/api/demo/trials/:id/modules'"), server.indexOf("'/api/demo/trials/:id/modules'") + 200).includes('demoOwnerOnly'));
+  const k = server.match(/DEMO_MODULE_BUCKETS = \{([^}]*)\}/)[1]; const v = rd('vendor-reporting.js').match(/PLAN_MODULE_TO_ERP_KEYS = \{([\s\S]*?)\n\};/)[1];
+  const names = x => Array.from(x.matchAll(/(\w+):\s*\[([^\]]*)\]/g)).map(m => m[1] + ':' + m[2].replace(/\s/g, '')).filter(x => !x.startsWith('transport_library')).sort().join('|');
+  assert.equal(names(k), names(v), 'the trial module groups must match the plan groups used for real schools');
+  assert.ok(server.includes('DEMO_NO_EXPIRY') && /noExpiry: ms >= Date\.UTC\(2099/.test(server));
+});
+test('Demo Trials screen offers module tick boxes and an open-ended option', () => {
+  const ui = rd('public/modules/78-demo-trials.js');
+  assert.ok(ui.includes('class="dtMod"') && ui.includes('modules: Array.from') && ui.includes('No end date') && ui.includes("data-a=\"mods\""));
+});
+test('parent fees page does not say online payment is missing when UPI is on', () => {
+  const f = rd('public/modules/25-student-parent-portal-intro.js');
+  assert.ok(f.includes('upiAvailable') && f.includes('(!onlinePaymentAvailable && !upiAvailable)'));
+});
 done('demo-trials');

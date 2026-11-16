@@ -6,7 +6,7 @@ let myProfileTab = 'notifications';
   // not something every school gets by default. null = not checked yet,
   // true/false once the one-time check below resolves; cached for the rest
   // of this login so the Fees tab doesn't re-check on every render.
-  let onlinePaymentAvailable = null;
+  let onlinePaymentAvailable = null, upiAvailable = false;
   async function loadOnlinePaymentStatus(){
     if(onlinePaymentAvailable !== null) return;
     try{
@@ -16,6 +16,11 @@ let myProfileTab = 'notifications';
     }catch(e){
       onlinePaymentAvailable = false;
     }
+    try{
+      const ur = await fetch('/api/upi/settings', { credentials: 'include' });
+      const uj = ur.ok ? await ur.json() : null;
+      upiAvailable = !!(uj && uj.enabled);
+    }catch(e){ upiAvailable = false; }
   }
   function switchMyProfileTab(tab){
     myProfileTab = tab;
@@ -816,7 +821,7 @@ let myProfileTab = 'notifications';
     body.innerHTML = `
       ${pendingRows.length ? `
       <div class="dash-section-title"><div><h3>Pending Fees</h3></div></div>
-      ${!onlinePaymentAvailable ? `<p style="font-size:0.85rem; color:var(--ink-soft); margin:-8px 0 16px;">Online payment isn't set up for this school yet — please pay at the school office.</p>` : ''}
+      ${(!onlinePaymentAvailable && !upiAvailable) ? `<p style="font-size:0.85rem; color:var(--ink-soft); margin:-8px 0 16px;">Online payment isn't set up for this school yet — please pay at the school office.</p>` : ''}
       <div class="table-wrap" style="overflow-x:auto; margin-bottom:16px;">
         <table class="fee-stack"><thead><tr><th>Type</th><th>Total</th><th>Paid</th><th>Late Fee</th><th>Outstanding</th>${onlinePaymentAvailable ? '<th></th>' : ''}</tr></thead><tbody>
         ${pendingRows.map(r => `

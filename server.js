@@ -2419,11 +2419,17 @@ const PLAN_GATED_MODULE_KEYS = ['managefee', 'attendance', 'exams', 'result', 't
 // own Admin). The one exception is a Vendor Support session (see
 // vendor-support-login.js) — that's the vendor's own troubleshooting login,
 // never the school's, and must never be blocked by the school's own plan.
+// Demo only: a trial login can be limited to the modules a school picked (see demoTrialMods further down).
+// Everyone else (and trials with no module list) get the school-wide plan exactly as before.
+function planAccessFor(u) {
+  try { if (DEMO_MODE && u && typeof demoTrialMods !== 'undefined' && demoTrialMods.has(String(u.id))) return demoTrialMods.get(String(u.id)); } catch (_) {}
+  return getModuleAccess();
+}
 async function checkPlanModuleAccess(req, res, moduleKeys) {
   if (!req.authUser || req.authUser.id === 'vendor-support') return true;
   const gatedKeys = moduleKeys.filter(k => PLAN_GATED_MODULE_KEYS.includes(k));
   if (!gatedKeys.length) return true; // not part of any Plan bucket — always included
-  const access = getModuleAccess();
+  const access = planAccessFor(req.authUser);
   if (!access.restricted) return true; // no Plan set, an "All Modules" Plan, or not yet confirmed by a heartbeat — fail open
   const ok = gatedKeys.some(k => access.enabledKeys.includes(k));
   if (!ok) {
@@ -6611,7 +6617,7 @@ async function completeLogin(req, res, user) {
   // So the client can hide a nav item the school's Plan doesn't include —
   // same idea as the ROLE_VIEWS shape it already gets, just billing-driven
   // instead of role-driven. See checkPlanModuleAccess above for enforcement.
-  shaped.moduleAccess = getModuleAccess();
+  shaped.moduleAccess = planAccessFor(user);
   shaped.twofaEnabled = !!user.twofa_method;
   delete shaped.siblingIds; shaped.children = await childrenOfUser(user).catch(() => []);
   shaped.mustSetup2fa = ['Admin', 'Principal'].includes(user.role) && !user.twofa_method && await require2faOn();
@@ -7873,7 +7879,7 @@ app.get('/api/me', async (req, res) => {
     if (!rows.length) return res.status(401).json({ error: 'Account no longer exists.' });
     const shaped = simpleToAppShape(rows[0], SIMPLE_RESOURCES.users.fields);
     delete shaped.password;
-    shaped.moduleAccess = getModuleAccess();
+    shaped.moduleAccess = planAccessFor(req.authUser);
     shaped.mustChangePassword = !req.authUser.impersonatedBy && !!Number(rows[0].must_change_password || 0);
     delete shaped.siblingIds; shaped.children = await childrenOfUser(rows[0]).catch(() => []);
     shaped.mustSetup2fa = !req.authUser.impersonatedBy && ['Admin', 'Principal'].includes(rows[0].role) && await userNeeds2faSetup(req.authUser.id);
@@ -9646,6 +9652,10 @@ app.get(['/', '/index.html'], (req, res) => {
 // and the owner can see who has actually signed in. Trials live in their own table because the nightly reload wipes users.
 const DEMO_TRIAL_TEMPLATES = { 'Admin': 'demo.admin', 'Principal': 'demo.principal', 'Accountant': 'demo.accountant', 'Office Assistant': 'demo.office', 'Teacher': 'demo.teacher', 'Parent': 'demo.parent', 'Student': 'demo.student' };
 const DEMO_ROLE_SLUG = { 'Admin': 'admin', 'Principal': 'principal', 'Accountant': 'accountant', 'Office Assistant': 'office', 'Teacher': 'teacher', 'Parent': 'parent', 'Student': 'student' };
+const demoTrialMods = new Map();    // user id -> { restricted, enabledKeys, website } for trials limited to chosen modules
+const DEMO_MODULE_BUCKETS = { fees: ['managefee'], attendance: ['attendance'], exams: ['exams', 'result'], accounting: ['accounting'], staff_payroll: ['staff'], inventory: ['inventory'], hostel: ['hostel'], transport: ['transport'], library: ['library'], timetable_homework: ['timetable', 'syllabus'], communications: ['announcements', 'inbox', 'noticeboard'] };
+const demoModsFor = list => { const ks = []; String(list || '').split(',').map(x => x.trim()).filter(x => DEMO_MODULE_BUCKETS[x]).forEach(b => ks.push(...DEMO_MODULE_BUCKETS[b])); return ks; };
+const DEMO_NO_EXPIRY = '2099-12-31 00:00:00';
 const demoTrialState = new Map();   // user id -> { exp (ms), revoked }
 let demoShowLogins = true, demoTrialTablesReady = false;
 const demoTrialUid = id => 'u_' + id;
@@ -9659,14 +9669,16 @@ async function demoTrialTables() {
     id VARCHAR(40) PRIMARY KEY, school VARCHAR(200) NOT NULL, contact VARCHAR(160) NOT NULL DEFAULT '', phone VARCHAR(40) NOT NULL DEFAULT '',
     role VARCHAR(40) NOT NULL, username VARCHAR(80) NOT NULL, pass_hash VARCHAR(100) NOT NULL, expires_at DATETIME NOT NULL, revoked TINYINT NOT NULL DEFAULT 0,
     note VARCHAR(400) NOT NULL DEFAULT '', last_login_at DATETIME NULL, logins INT NOT NULL DEFAULT 0, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`;
+  try { await sql`ALTER TABLE demo_trials ADD COLUMN modules VARCHAR(300) NOT NULL DEFAULT ''`; } catch (e) { /* already there */ }
   await sql`CREATE TABLE IF NOT EXISTS demo_settings (k VARCHAR(40) PRIMARY KEY, v VARCHAR(400) NOT NULL DEFAULT '')`;
   demoTrialTablesReady = true;
 }
 async function demoTrialsRefresh() {
   try {
     await demoTrialTables();
-    const rows = await sql`SELECT id, expires_at, revoked FROM demo_trials`;
-    demoTrialState.clear(); rows.forEach(r => demoTrialState.set(demoTrialUid(r.id), { exp: new Date(r.expires_at).getTime(), revoked: !!Number(r.revoked) }));
+    const rows = await sql`SELECT id, expires_at, revoked, modules FROM demo_trials`;
+    demoTrialState.clear(); demoTrialMods.clear();
+    rows.forEach(r => { const m = String(r.modules || '').trim(); if (m) demoTrialMods.set(demoTrialUid(r.id), { restricted: true, enabledKeys: demoModsFor(m), website: false }); }); rows.forEach(r => demoTrialState.set(demoTrialUid(r.id), { exp: new Date(r.expires_at).getTime(), revoked: !!Number(r.revoked) }));
     const s = await sql`SELECT v FROM demo_settings WHERE k = 'showLogins'`; demoShowLogins = !s.length || s[0].v !== '0';
   } catch (e) { console.error('demo trials refresh failed:', e.message); }
 }
@@ -9718,19 +9730,20 @@ const demoOwnerOnly = (req, res) => {
 const demoRand = (chars, n) => Array.from(crypto.randomBytes(n), b => chars[b % chars.length]).join('');
 const demoNewPassword = () => 'Try-' + demoRand('abcdefghjkmnpqrstuvwxyz', 4) + demoRand('23456789', 3);
 const demoTrialOut = r => { const ms = new Date(r.expires_at).getTime(); return { id: r.id, school: r.school, contact: r.contact, phone: r.phone, role: r.role, username: r.username, note: r.note,
-  expiresAt: new Date(ms).toISOString(), revoked: !!Number(r.revoked), expired: ms < Date.now(), lastLogin: r.last_login_at ? new Date(r.last_login_at).toISOString() : '', logins: Number(r.logins) || 0, createdAt: new Date(r.created_at).toISOString() }; };
+  modules: String(r.modules || ''), noExpiry: ms >= Date.UTC(2099, 0, 1), expiresAt: new Date(ms).toISOString(), revoked: !!Number(r.revoked), expired: ms < Date.now(), lastLogin: r.last_login_at ? new Date(r.last_login_at).toISOString() : '', logins: Number(r.logins) || 0, createdAt: new Date(r.created_at).toISOString() }; };
 app.get('/api/demo/trials', async (req, res) => {
   try {
     if (!demoOwnerOnly(req, res)) return; await demoTrialTables();
     const rows = await sql`SELECT * FROM demo_trials ORDER BY created_at DESC`;
-    return res.status(200).json({ trials: rows.map(demoTrialOut), showLogins: demoShowLogins, roles: Object.keys(DEMO_TRIAL_TEMPLATES) });
+    return res.status(200).json({ trials: rows.map(demoTrialOut), showLogins: demoShowLogins, roles: Object.keys(DEMO_TRIAL_TEMPLATES), buckets: Object.keys(DEMO_MODULE_BUCKETS) });
   } catch (err) { console.error('demo trials list error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
 app.post('/api/demo/trials', async (req, res) => {
   try {
     if (!demoOwnerOnly(req, res)) return; await demoTrialTables();
     const b = req.body || {}; const school = String(b.school || '').trim().slice(0, 200), contact = String(b.contact || '').trim().slice(0, 160), phone = String(b.phone || '').replace(/[^0-9+ ]/g, '').slice(0, 40);
-    const role = String(b.role || 'All'); const days = Math.max(1, Math.min(60, parseInt(b.days, 10) || 7));
+    const role = String(b.role || 'All'); const noExp = b.days === 0 || b.days === '0' || b.days === 'none'; const days = noExp ? 0 : Math.max(1, Math.min(60, parseInt(b.days, 10) || 7));
+    const modules = (Array.isArray(b.modules) ? b.modules : String(b.modules || '').split(',')).map(x => String(x).trim()).filter(x => DEMO_MODULE_BUCKETS[x]).filter((x, i, a) => a.indexOf(x) === i).join(',');
     if (!school) return res.status(400).json({ error: 'Please type the school name.' });
     const all = role === 'All';
     if (!all && !DEMO_TRIAL_TEMPLATES[role]) return res.status(400).json({ error: 'Unknown role.' });
@@ -9742,11 +9755,11 @@ app.post('/api/demo/trials', async (req, res) => {
     let base = 'trial-' + slug, n = 0;
     for (;;) { const cand = base + (n ? n : ''); let ok = true; for (const r of roles) { if (await taken(uname(cand, r))) { ok = false; break; } } if (ok) { base = cand; break; } n++; }
     const password = demoNewPassword(); const hash = await bcrypt.hash(password, 10);
-    const exp = new Date(Date.now() + days * 86400000); const expStr = exp.toISOString().slice(0, 19).replace('T', ' ');
+    const exp = new Date(Date.now() + days * 86400000); const expStr = noExp ? DEMO_NO_EXPIRY : exp.toISOString().slice(0, 19).replace('T', ' ');
     const made = [];
     for (const r of roles) {
       const id = 't' + demoRand('0123456789abcdef', 10); made.push(id);
-      await sql`INSERT INTO demo_trials (id, school, contact, phone, role, username, pass_hash, expires_at, note) VALUES (${id}, ${school}, ${contact}, ${phone}, ${r}, ${uname(base, r)}, ${hash}, ${expStr}, ${String(b.note || '').slice(0, 400)})`;
+      await sql`INSERT INTO demo_trials (id, school, contact, phone, role, username, pass_hash, expires_at, note, modules) VALUES (${id}, ${school}, ${contact}, ${phone}, ${r}, ${uname(base, r)}, ${hash}, ${expStr}, ${String(b.note || '').slice(0, 400)}, ${modules})`;
       const t = (await sql`SELECT * FROM demo_trials WHERE id = ${id}`)[0];
       if (!(await demoTrialMakeUser(t))) {
         for (const x of made) { await sql`DELETE FROM users WHERE id = ${demoTrialUid(x)}`; await sql`DELETE FROM demo_trials WHERE id = ${x}`; }
@@ -9755,18 +9768,26 @@ app.post('/api/demo/trials', async (req, res) => {
     }
     await demoTrialsRefresh();
     const rows = []; for (const x of made) rows.push((await sql`SELECT * FROM demo_trials WHERE id = ${x}`)[0]);
-    auditNote(req.authUser.name, req.authUser.role, 'POST', 'demo-trial', made[0], `${school} / ${all ? 'all roles' : role} / ${days} days`, clientIp(req));
+    auditNote(req.authUser.name, req.authUser.role, 'POST', 'demo-trial', made[0], `${school} / ${all ? 'all roles' : role} / ${noExp ? 'no expiry' : days + ' days'} / ${modules || 'all modules'}`, clientIp(req));
     return res.status(200).json({ trial: demoTrialOut(rows[0]), trials: rows.map(demoTrialOut), password });
   } catch (err) { console.error('demo trial create error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
 app.post('/api/demo/trials/:id/extend', async (req, res) => {
   try {
-    if (!demoOwnerOnly(req, res)) return; const days = Math.max(1, Math.min(60, parseInt((req.body || {}).days, 10) || 7));
+    if (!demoOwnerOnly(req, res)) return; const noExp = (req.body || {}).days === 0; const days = Math.max(1, Math.min(60, parseInt((req.body || {}).days, 10) || 7));
     const r = await sql`SELECT * FROM demo_trials WHERE id = ${req.params.id}`; if (!r.length) return res.status(404).json({ error: 'Not found.' });
-    const from = Math.max(Date.now(), new Date(r[0].expires_at).getTime()); const exp = new Date(from + days * 86400000);
-    await sql`UPDATE demo_trials SET expires_at = ${exp.toISOString().slice(0, 19).replace('T', ' ')}, revoked = 0 WHERE id = ${req.params.id}`; await demoTrialsRefresh();
+    const cur = new Date(r[0].expires_at).getTime(); const from = Math.max(Date.now(), cur >= Date.UTC(2099, 0, 1) ? Date.now() : cur); const exp = new Date(from + days * 86400000);
+    await sql`UPDATE demo_trials SET expires_at = ${noExp ? DEMO_NO_EXPIRY : exp.toISOString().slice(0, 19).replace('T', ' ')}, revoked = 0 WHERE id = ${req.params.id}`; await demoTrialsRefresh();
     return res.status(200).json({ trial: demoTrialOut((await sql`SELECT * FROM demo_trials WHERE id = ${req.params.id}`)[0]) });
   } catch (err) { console.error('demo trial extend error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/demo/trials/:id/modules', async (req, res) => {
+  try {
+    if (!demoOwnerOnly(req, res)) return; const r = await sql`SELECT id FROM demo_trials WHERE id = ${req.params.id}`; if (!r.length) return res.status(404).json({ error: 'Not found.' });
+    const b = req.body || {}; const modules = (Array.isArray(b.modules) ? b.modules : []).map(x => String(x).trim()).filter(x => DEMO_MODULE_BUCKETS[x]).filter((x, i, a) => a.indexOf(x) === i).join(',');
+    await sql`UPDATE demo_trials SET modules = ${modules} WHERE id = ${req.params.id}`; await sql`DELETE FROM sessions WHERE user_id = ${demoTrialUid(req.params.id)}`; await demoTrialsRefresh();
+    return res.status(200).json({ trial: demoTrialOut((await sql`SELECT * FROM demo_trials WHERE id = ${req.params.id}`)[0]) });
+  } catch (err) { console.error('demo trial modules error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
 app.post('/api/demo/trials/:id/revoke', async (req, res) => {
   try {

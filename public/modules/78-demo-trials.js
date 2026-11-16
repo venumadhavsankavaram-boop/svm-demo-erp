@@ -31,18 +31,21 @@
     `;
     document.head.appendChild(s);
   }
+  const MOD_LABEL = { fees: 'Fees', attendance: 'Attendance', exams: 'Exams & results', accounting: 'Accounting', staff_payroll: 'Staff & payroll', inventory: 'Inventory', hostel: 'Hostel', transport: 'Transport', library: 'Library', timetable_homework: 'Timetable & homework', communications: 'Notices & messages' };
+  const modsText = m => m ? m.split(',').map(x => MOD_LABEL[x] || x).join(', ') : 'All modules';
   const ROLE_HELP = { 'Admin': 'everything: students, fees, accounts, staff, settings', 'Principal': 'the management view', 'Accountant': 'fees, receipts and accounts', 'Office Assistant': 'front-office work', 'Teacher': 'attendance, marks and homework', 'Parent': 'the parent app: fees, attendance and notices', 'Student': 'the student view' };
   function inviteText(list, pw){
     list = Array.isArray(list) ? list : [list]; const t = list[0];
     const head = `Hello${t.contact ? ' ' + t.contact : ''},\n\nHere ${list.length > 1 ? 'are your trial logins' : 'is your trial login'} for the SVM EdTech School ERP demo. It holds sample data only, so try anything freely.\n\nLink: ${location.origin}\n`;
     const who = list.length > 1 ? `Password (the same for every login): ${pw}\n\nSign in with each one to see that part of the school:\n${list.map(x => '- ' + x.role + ' (' + (ROLE_HELP[x.role] || x.role) + '): ' + x.username).join('\n')}\n` : `Username: ${t.username}\nPassword: ${pw}\nYou are signing in as: ${t.role}\n`;
-    return head + who + `\nValid until: ${dstr(t.expiresAt)}\n\nThe sample data resets every night. Reply here if you would like a short walkthrough.\n\nSVM EdTech`;
+    return head + who + `${t.modules ? '\nModules included: ' + modsText(t.modules) + ' (plus the always-on basics)\n' : ''}\n${t.noExpiry ? 'This login stays open until we switch it off.' : 'Valid until: ' + dstr(t.expiresAt)}\n\nThe sample data resets every night. Reply here if you would like a short walkthrough.\n\nSVM EdTech`;
   }
   const groupsOf = ts => { const m = new Map(); ts.forEach(t => { const k = t.school + '|' + (t.createdAt || '').slice(0, 16); if(!m.has(k)) m.set(k, []); m.get(k).push(t); }); return Array.from(m.values()); };
   function status(t){
     if(t.revoked) return ['#fde4e1', '#b3261e', 'Switched off'];
     if(t.expired) return ['#eceff4', '#555', 'Ended'];
     const d = Math.max(0, Math.ceil((new Date(t.expiresAt).getTime() - Date.now()) / 86400000));
+    if(t.noExpiry) return ['#dff5e6', '#17703a', 'Open'];
     return ['#dff5e6', '#17703a', d + (d === 1 ? ' day left' : ' days left')];
   }
   function ensureShell(){
@@ -77,17 +80,20 @@
         <div><label>Contact person</label><input id="dtContact" placeholder="Principal / owner"></div>
         <div><label>WhatsApp number</label><input id="dtPhone" placeholder="98xxxxxxxx" inputmode="tel"></div>
         <div><label>Sign in as</label><select id="dtRole"><option value="All">All roles - full experience (recommended)</option>${data.roles.map(r => `<option>${esc(r)}</option>`).join('')}</select></div>
-        <div><label>Valid for (days)</label><input id="dtDays" type="number" min="1" max="60" value="7"></div>
+        <div><label>Valid for</label><select id="dtDays"><option value="7">7 days</option><option value="15">15 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="0">No end date (until I switch it off)</option></select></div>
         <div><button class="btn btn-primary" id="dtCreate" style="width:100%">Create login</button></div></div>
+        <div style="margin-top:12px"><label style="font-size:.8rem;color:#667;display:block;margin-bottom:4px">Modules this school chose <span style="font-weight:400">(leave all unticked = every module)</span></label>
+          <div style="display:flex;flex-wrap:wrap;gap:6px 16px">${(data.buckets || []).map(b => `<label style="font-size:.88rem;color:#223;display:flex;gap:5px;align-items:center;margin:0"><input type="checkbox" class="dtMod" value="${esc(b)}"> ${esc(MOD_LABEL[b] || b)}</label>`).join('')}</div>
+          <div class="dt-note">Students, staff lists, admissions, dashboard and settings are always included. A ticked-modules login cannot open any module that was not ticked, and the screens for those modules are hidden.</div></div>
         <div class="dt-note"><b>All roles</b> makes one login for each role (Admin, Principal, Accountant, Office Assistant, Teacher, Parent, Student) with the same password, so the school can try every view. A trial login can look around and try things, but cannot see or change logins, passwords or the audit trail.</div></div>
       ${invite ? `<div class="dt-card" style="border-left:6px solid #17703a"><h3>Message ready to send <span style="font-size:.8rem;color:#b3261e;font-weight:600">The password is shown only now</span></h3><textarea class="dt-msg" id="dtMsg" readonly>${esc(invite.text)}</textarea>
         <div class="dt-acts" style="margin-top:8px"><button class="btn btn-primary" id="dtCopy">Copy message</button>${invite.phone ? `<a class="btn btn-secondary" target="_blank" rel="noopener" href="https://wa.me/${esc(invite.phone.length === 10 ? '91' + invite.phone : invite.phone)}?text=${encodeURIComponent(invite.text)}">Open in WhatsApp</a>` : ''}<button class="btn btn-secondary" id="dtDone">Done</button></div></div>` : ''}
       <div class="dt-card"><h3>Trials <label style="font-size:.84rem;font-weight:500;color:#445"><input type="checkbox" id="dtShow" ${data.showLogins ? 'checked' : ''}> Show the shared demo logins on the sign-in page</label></h3>
-        ${ts.length ? `<div style="overflow:auto"><table class="dt-tbl"><thead><tr><th>School</th><th>Contact</th><th>Role / username</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead><tbody>
+        ${ts.length ? `<div style="overflow:auto"><table class="dt-tbl"><thead><tr><th>School</th><th>Contact</th><th>Role / username</th><th>Modules</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead><tbody>
         ${G.map(g => { const t0 = g[0], st = status(g.find(t => !t.revoked && !t.expired) || t0), ids = g.map(t => t.id).join(','), last = g.map(t => t.lastLogin).filter(Boolean).sort().pop() || '', n = g.reduce((s, t) => s + t.logins, 0), allOff = g.every(t => t.revoked);
           return `<tr><td><b>${esc(t0.school)}</b><div class="dt-note" style="margin:0">Created ${dstr(t0.createdAt)}</div></td><td>${esc(t0.contact || '-')}<div class="dt-note" style="margin:0">${esc(t0.phone || '')}</div></td><td>${g.map(t => esc(t.role) + ': <b>' + esc(t.username) + '</b>').join('<br>')}</td>
-          <td><span class="dt-pill" style="background:${st[0]};color:${st[1]}">${esc(st[2])}</span><div class="dt-note" style="margin:2px 0 0">to ${dstr(t0.expiresAt)}</div></td><td>${n ? esc(ago(last)) + '<div class="dt-note" style="margin:0">' + n + ' sign-in' + (n === 1 ? '' : 's') + '</div>' : '<span style="color:#8a5a00">Never opened</span>'}</td>
-          <td><div class="dt-acts"><button class="btn btn-secondary" data-a="extend" data-id="${esc(ids)}">+7 days</button><button class="btn btn-secondary" data-a="pw" data-id="${esc(ids)}">New password</button><button class="btn btn-secondary" data-a="${allOff ? 'on' : 'off'}" data-id="${esc(ids)}">${allOff ? 'Switch on' : 'Switch off'}</button><button class="btn btn-secondary" data-a="del" data-id="${esc(ids)}">Delete</button></div></td></tr>`; }).join('')}
+          <td style="max-width:200px">${esc(modsText(t0.modules))}</td><td><span class="dt-pill" style="background:${st[0]};color:${st[1]}">${esc(st[2])}</span><div class="dt-note" style="margin:2px 0 0">${t0.noExpiry ? 'no end date' : 'to ' + dstr(t0.expiresAt)}</div></td><td>${n ? esc(ago(last)) + '<div class="dt-note" style="margin:0">' + n + ' sign-in' + (n === 1 ? '' : 's') + '</div>' : '<span style="color:#8a5a00">Never opened</span>'}</td>
+          <td><div class="dt-acts"><button class="btn btn-secondary" data-a="extend" data-id="${esc(ids)}">+7 days</button><button class="btn btn-secondary" data-a="noend" data-id="${esc(ids)}">No end date</button><button class="btn btn-secondary" data-a="mods" data-id="${esc(ids)}">Change modules</button><button class="btn btn-secondary" data-a="pw" data-id="${esc(ids)}">New password</button><button class="btn btn-secondary" data-a="${allOff ? 'on' : 'off'}" data-id="${esc(ids)}">${allOff ? 'Switch on' : 'Switch off'}</button><button class="btn btn-secondary" data-a="del" data-id="${esc(ids)}">Delete</button></div></td></tr>`; }).join('')}
         </tbody></table></div>` : '<div class="dt-note">No trial logins yet. Create the first one above.</div>'}
         <div class="dt-note">Everything resets to fresh sample data every night at 2 AM, but trial logins stay until they end. Passwords are stored scrambled, so use "New password" if a school loses theirs.</div></div>`;
     $('dtCreate').onclick = create;
@@ -101,7 +107,7 @@
     if(!g('dtSchool').trim()) return toast('Please type the school name.');
     busy = true;
     try{
-      const j = await api('POST', '/api/demo/trials', { school: g('dtSchool'), contact: g('dtContact'), phone: g('dtPhone'), role: g('dtRole') || 'All', days: g('dtDays') });
+      const j = await api('POST', '/api/demo/trials', { school: g('dtSchool'), contact: g('dtContact'), phone: g('dtPhone'), role: g('dtRole') || 'All', days: Number(g('dtDays') || 7), modules: Array.from(document.querySelectorAll('.dtMod:checked')).map(x => x.value) });
       invite = { text: inviteText(j.trials || [j.trial], j.password), phone: j.trial.phone.replace(/\D/g, '') }; data = null; await render(); const m = $('dtMsg'); if(m) m.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }catch(e){ toast(e.message); } busy = false;
   }
@@ -109,6 +115,8 @@
     const ids = String(id).split(','), g = data.trials.filter(x => ids.indexOf(x.id) >= 0), t = g[0]; if(!t || busy) return; busy = true;
     try{
       if(a === 'extend'){ for(const x of g) await api('POST', '/api/demo/trials/' + x.id + '/extend', { days: 7 }); toast('Extended by 7 days.'); }
+      else if(a === 'noend'){ for(const x of g) await api('POST', '/api/demo/trials/' + x.id + '/extend', { days: 0 }); toast('This trial now stays open until you switch it off.'); }
+      else if(a === 'mods'){ const cur = (t.modules || '').split(',').filter(Boolean); const ans = prompt('Type the modules to allow, separated by commas. Leave empty for all modules.\nChoices: ' + data.buckets.join(', '), cur.join(', ')); if(ans === null){ busy = false; return; } const list = ans.split(',').map(x => x.trim()).filter(Boolean); const bad = list.filter(x => data.buckets.indexOf(x) < 0); if(bad.length){ toast('Not a module: ' + bad.join(', ')); busy = false; return; } for(const x of g) await api('POST', '/api/demo/trials/' + x.id + '/modules', { modules: list }); toast('Modules updated. They are signed out and see the new set next time.'); }
       else if(a === 'off' || a === 'on'){ for(const x of g) await api('POST', '/api/demo/trials/' + x.id + '/revoke', { revoked: a === 'off' }); toast(a === 'off' ? 'Switched off. They are signed out.' : 'Switched on.'); }
       else if(a === 'pw'){ if(!confirm('Make a new password for ' + t.school + '? The old one stops working.')) { busy = false; return; } const j = await api('POST', '/api/demo/trials/' + t.id + '/password', {}); for(const x of g.slice(1)) await api('POST', '/api/demo/trials/' + x.id + '/password', { password: j.password }); invite = { text: inviteText(g, j.password), phone: (t.phone || '').replace(/\D/g, '') }; }
       else if(a === 'del'){ if(!confirm('Delete the trial for ' + t.school + '? Their login' + (g.length > 1 ? 's stop' : ' stops') + ' working for good.')) { busy = false; return; } for(const x of g) await api('DELETE', '/api/demo/trials/' + x.id); toast('Deleted.'); }
