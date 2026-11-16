@@ -9682,8 +9682,28 @@ async function demoTrialMakeUser(t) {
   await sql.query(`INSERT INTO users (${cols.map(c => '`' + c + '`').join(', ')}) VALUES (${ph})`, cols.map(c => row[c] === undefined ? null : row[c]));
   return true;
 }
+// The demo owner's own login: never expires, never listed as a trial, and rebuilt after every nightly reload.
+// Set in the demo project's secrets (GoDaddy): DEMO_OWNER_USERNAME and DEMO_OWNER_PASSWORD (at least 10 characters).
+// The password is only ever read from there and stored as a hash. Does nothing if either is missing.
+async function demoOwnerEnsure() {
+  try {
+    const un = String(process.env.DEMO_OWNER_USERNAME || '').trim(), pw = String(process.env.DEMO_OWNER_PASSWORD || '');
+    if (!un || pw.length < 10) return;
+    const src = await sql`SELECT * FROM users WHERE LOWER(username) = 'demo.admin' AND deleted_at IS NULL`; if (!src.length) return;
+    const uid = 'u_demo_owner';
+    const cur = await sql`SELECT id, username, password, deleted_at FROM users WHERE id = ${uid}`;
+    if (cur.length && !cur[0].deleted_at && cur[0].username === un && await bcrypt.compare(pw, cur[0].password || '')) return; // already right: leave sessions alone
+    const hash = await bcrypt.hash(pw, 10);
+    await sql`DELETE FROM users WHERE id = ${uid} OR (LOWER(username) = ${un.toLowerCase()} AND id <> ${uid})`; await sql`DELETE FROM sessions WHERE user_id = ${uid}`;
+    const row = Object.assign({}, src[0], { id: uid, username: un, name: 'SVM EdTech Owner', password: hash, must_change_password: 0, initial_pw: '', recovery_code: 'OWNER',
+      first_login_at: null, last_login_at: null, last_seen_at: null, installed_at: null, twofa_method: null, totp_secret: null, twofa_email: null, twofa_recovery: null, twofa_last_step: 0, deleted_at: null });
+    const cols = Object.keys(row), ph = cols.map((_, i) => `$${i + 1}`).join(', ');
+    await sql.query(`INSERT INTO users (${cols.map(c => '`' + c + '`').join(', ')}) VALUES (${ph})`, cols.map(c => row[c] === undefined ? null : row[c]));
+    console.log('Demo owner login is ready.');
+  } catch (e) { console.error('demo owner login failed:', e.message); }
+}
 async function demoTrialsRestore() {
-  try { await demoTrialTables(); const ts = await sql`SELECT * FROM demo_trials`; for (const t of ts) { try { await demoTrialMakeUser(t); } catch (e) { console.warn('trial restore failed for', t.username, e.message); } } await demoTrialsRefresh(); }
+  try { await demoTrialTables(); const ts = await sql`SELECT * FROM demo_trials`; for (const t of ts) { try { await demoTrialMakeUser(t); } catch (e) { console.warn('trial restore failed for', t.username, e.message); } } await demoTrialsRefresh(); await demoOwnerEnsure(); }
   catch (e) { console.error('demo trials restore failed:', e.message); }
 }
 async function demoTrialTouch(userId) {
@@ -9777,7 +9797,7 @@ app.put('/api/demo/public-logins', async (req, res) => {
     return res.status(200).json({ showLogins: demoShowLogins });
   } catch (err) { console.error('demo public logins error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
-if (DEMO_MODE) { setTimeout(demoTrialsRefresh, 3000); setInterval(demoTrialsRefresh, 60 * 1000); }
+if (DEMO_MODE) { setTimeout(demoTrialsRefresh, 3000); setInterval(demoTrialsRefresh, 60 * 1000); setTimeout(demoOwnerEnsure, 6000); setInterval(demoOwnerEnsure, 5 * 60 * 1000); }
 
 app.get(/.*/, (req, res) => {
   sendIndexHtml(res, req);
