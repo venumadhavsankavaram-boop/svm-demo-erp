@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
   async function saveAcctBudget(){
     const label = document.getElementById('budgetLabel').value.trim();
     const startDate = document.getElementById('budgetStart').value;

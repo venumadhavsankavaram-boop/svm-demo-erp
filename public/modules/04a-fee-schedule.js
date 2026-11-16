@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ===== FEE SCHEDULE: Yearly / Terms / Monthly =====
  *
  * Each fee head (Tuition, Bus, Stock, Hostel) can be remitted Yearly, in Terms

@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ===== Teacher Activity Command Center =====
    Replaces the old single-exam "Staff Activity" page. Everything is computed
    across ALL exams and ALL levels (KG / Primary / High School) at once:

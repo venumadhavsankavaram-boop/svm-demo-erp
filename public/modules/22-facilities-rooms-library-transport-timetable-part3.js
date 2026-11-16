@@ -1,32 +1,4 @@
 
-  async function refreshBackupStatusLine(){
-    const el = document.getElementById('backupStatusLine'); if(!el) return;
-    try{
-      const res = await fetch('/api/backup/status'); await throwIfNotOk(res);
-      const info = backupAgeInfo((await res.json()).lastBackup);
-      el.innerHTML = info.text;
-      el.style.background = info.tone === 'good' ? 'rgba(0,150,120,.10)' : info.tone === 'warn' ? 'rgba(230,160,0,.14)' : 'rgba(192,38,75,.10)';
-    }catch(e){ el.textContent = 'Could not check the last backup.'; }
-  }
-  async function loadFeeReminderSettings(){
-    const el = document.getElementById('feeRemBox'); if(!el) return;
-    try{
-      const res = await fetch('/api/fee-reminders/settings'); await throwIfNotOk(res);
-      const d = await res.json(), s = d.settings;
-      el.innerHTML = `
-        <label style="display:flex; gap:8px; align-items:center; margin-bottom:10px;"><input type="checkbox" id="frEnabled" ${s.enabled ? 'checked' : ''}> <b>Send fee reminders automatically</b></label>
-        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin-bottom:10px;">
-          <label>"Due soon" alert, days before the due date<input class="input" type="number" min="1" max="30" id="frLead" value="${s.leadDays}" style="width:100%;"></label>
-          <label>"Still overdue" repeat every (days)<input class="input" type="number" min="3" max="60" id="frEvery" value="${s.repeatEveryDays}" style="width:100%;"></label>
-          <label>…and at most this many times (0 = no repeats)<input class="input" type="number" min="0" max="12" id="frMax" value="${s.repeatMax}" style="width:100%;"></label>
-          <label>Send from this hour of the day (0–23)<input class="input" type="number" min="0" max="23" id="frHour" value="${s.sendHour}" style="width:100%;"></label>
-        </div>
-        <p style="font-size:0.74rem; color:var(--ink-soft); margin:0 0 10px;">Alerts go to ${d.push ? 'app/phone notifications' : '<b>(phone notifications are not set up on this server)</b>'}${d.whatsapp ? ' and WhatsApp' : ''}. The first notice for an overdue installment is only sent if it fell due in the last 14 days, so turning this on never floods parents about old dues.</p>
-        <button class="btn btn-primary btn-sm" type="button" onclick="saveFeeReminderSettings()">Save</button>
-        <button class="btn btn-sm" type="button" onclick="previewFeeReminders()" style="margin-left:6px;">Who would be reminded today?</button>
-        <div id="feeRemPreview" style="margin-top:12px;"></div>`;
-    }catch(e){ el.textContent = 'Could not load (' + e.message + ').'; }
-  }
   async function saveFeeReminderSettings(){
     const v = id => Number((document.getElementById(id) || {}).value);
     try{
@@ -80,7 +52,53 @@
       loadTwofaOverview();
     }catch(e){ showToast('Could not reach the server.'); }
   }
+  async function loadOnlinePayHealth(testMsg){
+    const el = document.getElementById('onlinePayHealth'); if(!el) return;
+    try{
+      const res = await fetch('/api/payments/health'); await throwIfNotOk(res);
+      const d = await res.json();
+      const ok = (t) => '<span style="color:#0a8f6a;">✓</span> ' + t, warn = (t) => '<span style="color:#b7791f;">⚠</span> ' + t, bad = (t) => '<span style="color:#C0264B;">✕</span> ' + t;
+      const rows = [];
+      if(d.demo) rows.push(warn('This is the demo, so online payments are switched off.'));
+      else if(!d.keyIdSet || !d.keySecretSet) rows.push('<span style="color:var(--ink-soft);">○</span> <b>Online payment is not set up for this school.</b> Parents pay at the school office and no "Pay Online" button is shown anywhere. Nothing to do unless you want to start it later.');
+      else {
+        rows.push(d.switchOn ? ok('<b>Parents can pay online: ON.</b> A "Pay Online" button shows in their app.') : warn('<b>Parents can pay online: OFF.</b> No "Pay Online" button is shown. Fees are paid at the school office.'));
+        rows.push(ok('Razorpay keys are set (' + escapeHtml(d.keyMasked) + ').'));
+        if(d.mode === 'live') rows.push(ok('<b>Live mode</b>: real money is being collected.'));
+        else if(d.mode === 'test') rows.push(warn('<b>Test mode</b>: parents can pay, but no real money moves. Switch to live keys before you tell parents to use it.'));
+        else rows.push(warn('The Key ID does not look like a standard Razorpay key.'));
+        rows.push(d.webhookSecretSet ? ok('Safety-net webhook is on. Razorpay address: <code>' + escapeHtml(d.webhookUrl) + '</code>') : warn('Webhook not set (optional). Payments are still found by the automatic check every 5 minutes.'));
+        if(d.lastSweep) rows.push(ok('Automatic check last ran ' + escapeHtml(new Date(d.lastSweep.at).toLocaleString('en-IN', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' })) + (d.lastSweep.error ? ' but reported a problem: ' + escapeHtml(d.lastSweep.error) : ' (' + d.lastSweep.checked + ' open, ' + d.lastSweep.recovered + ' recovered).')));
+        else rows.push('<span style="color:var(--ink-soft);">Automatic check has not found any open orders to look at yet.</span>');
+        const st = d.stats;
+        if(st){
+          rows.push('Last 24 hours: <b>' + st.paidDayCount + '</b> paid (' + fmtMoney(st.paidDayAmount) + '). Last 30 days: <b>' + st.paid30Count + '</b> paid (' + fmtMoney(st.paid30Amount) + ').' + (st.lastPaidAt ? ' Last payment: ' + escapeHtml(new Date(st.lastPaidAt).toLocaleString('en-IN', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' })) + '.' : ' No payment yet.'));
+          if(st.stuck) rows.push(warn('<b>' + st.stuck + '</b> payment(s) started over 15 minutes ago and not confirmed. Press <b>Check now</b>; if they stay, ask the parent for the Razorpay payment ID.'));
+          if(st.failed7) rows.push(warn(st.failed7 + ' payment(s) failed in the last 7 days (usually a declined card or a cancelled UPI request).'));
+        }
+      }
+      if(testMsg) rows.push(testMsg.ok ? ok(escapeHtml(testMsg.message)) : bad(escapeHtml(testMsg.message)));
+      el.innerHTML = '<div style="display:grid; gap:5px; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">' + rows.map(r => '<div>' + r + '</div>').join('') + '</div>' +
+        (d.configured ? '<button class="btn btn-sm" type="button" style="margin-top:8px;" onclick="toggleOnlinePaySwitch(' + (d.switchOn ? 'false' : 'true') + ')">' + (d.switchOn ? 'Switch OFF for parents' : 'Switch ON for parents') + '</button> <button class="btn btn-sm" type="button" style="margin-top:8px;" onclick="testOnlinePayConnection()">Test connection to Razorpay</button>' : '');
+    }catch(e){ el.textContent = 'Could not load the status (' + e.message + ').'; }
+  }
+  async function toggleOnlinePaySwitch(on){
+    const ok = await showConfirmDialog(on ? 'Show the "Pay Online" button to parents and students?' : 'Hide the "Pay Online" button from parents and students? Payments already started will still be recorded.', { title: on ? 'Switch online payment ON' : 'Switch online payment OFF', okText: on ? 'Switch ON' : 'Switch OFF' });
+    if(!ok) return;
+    try{
+      const res = await fetch('/api/payments/switch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ enabled: on }) }); await throwIfNotOk(res);
+      showToast(on ? 'Online payment is ON for parents.' : 'Online payment is OFF for parents.');
+      loadOnlinePayHealth();
+    }catch(e){ showToast('Could not save (' + e.message + ').'); }
+  }
+  async function testOnlinePayConnection(){
+    try{
+      const res = await fetch('/api/payments/test-connection', { method:'POST' }); await throwIfNotOk(res);
+      loadOnlinePayHealth(await res.json());
+    }catch(e){ showToast('Could not test (' + e.message + ').'); }
+  }
   async function loadOnlinePayments(){
+    loadOnlinePayHealth();
     const el = document.getElementById('onlinePaymentsBox'); if(!el) return;
     try{
       const res = await fetch('/api/payments/online-orders'); await throwIfNotOk(res);
@@ -454,6 +472,8 @@
     if(loginNameEl && schoolInfo.name) loginNameEl.textContent = schoolInfo.name;
     const loginLogoEl = document.getElementById('loginLogoImg');
     if(loginLogoEl && schoolInfo.logo) loginLogoEl.src = schoolInfo.logo;
+    try{ if(schoolInfo.name && schoolInfo.name !== 'Your School Name') localStorage.setItem('rgv_brand', JSON.stringify({ name: schoolInfo.name, logo: schoolInfo.logo || '' })); }catch(e){}
+    document.documentElement.classList.remove('brand-pending');
   }
   function schoolLogoSrc(){
     return schoolLogoData || schoolInfo.logo || document.getElementById('sbLogoImg').src;
@@ -692,7 +712,6 @@
     document.getElementById('userModalTitle').textContent = mode === 'studentparent' ? 'Add Student/Parent Login' : (mode === 'staff' ? 'Add Staff User' : 'Add User');
     document.getElementById('userForm').reset();
     document.getElementById('editUserId').value = '';
-    document.getElementById('uRecoveryCode').value = generateRecoveryCode();
     userModalUsernameTouched = false;
     document.getElementById('uPassword').placeholder = 'Set a login password';
     document.getElementById('uPassword').value = generateLoginPassword();
@@ -714,9 +733,6 @@
     const role = document.getElementById('uRole').value;
     document.getElementById('uStudentField').style.display = (role==='Student'||role==='Parent') ? 'block' : 'none';
   }
-  function regenerateRecoveryCode(){
-    document.getElementById('uRecoveryCode').value = generateRecoveryCode();
-  }
   function populateUserStudentPicker(){
     const sel = document.getElementById('uLinkedStudent');
     sel.innerHTML = '<option value="">Not linked</option>' +
@@ -736,7 +752,6 @@
     document.getElementById('uPassword').placeholder = 'Leave blank to keep the current password';
     populateUserRoleSelect();
     document.getElementById('uRole').value = u.role;
-    document.getElementById('uRecoveryCode').value = u.recoveryCode || generateRecoveryCode();
     populateUserStudentPicker();
     document.getElementById('uLinkedStudent').value = u.linkedStudentId || '';
     toggleUserStudentField();
@@ -778,7 +793,7 @@
       password: document.getElementById('uPassword').value,
       role: document.getElementById('uRole').value,
       linkedStudentId: document.getElementById('uLinkedStudent').value,
-      recoveryCode: document.getElementById('uRecoveryCode').value,
+      branchId: (document.getElementById('uBranchField') && document.getElementById('uBranchField').style.display !== 'none') ? document.getElementById('uBranch').value : undefined,
     };
     let linkedStaff = null;
     let prevLinkedUserId;

@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ===== Smart Insights =====
    Plain rules over the school's own data: who needs a fee reminder, which children are missing school,
    notice drafts, enquiries waiting for a reply, students needing attention and records that need fixing.

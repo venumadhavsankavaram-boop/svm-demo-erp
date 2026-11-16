@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ============================================================================
    Sign-in loader. While the app verifies the password (/api/login) and loads
    the school's data, the login card shows an animated school-and-book drawing

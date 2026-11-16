@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const FEE_TYPES_KEY = "fee-types";
   const DISCOUNT_TYPES_KEY = "discount-types";
   const STUDENT_DISCOUNTS_KEY = "student-discounts";

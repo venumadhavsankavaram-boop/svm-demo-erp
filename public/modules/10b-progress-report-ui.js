@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
   /* ===== PROGRESS REPORT CENTER =======================================================
      Replaces the old "pick one exam, search one student" Progress Reports tab.
 
@@ -738,7 +740,7 @@
       ${editor}`;
     const fr = document.getElementById('prcFrame');
     fr.onload = () => { try{ fr.style.height = Math.max(400, fr.contentDocument.documentElement.scrollHeight + 4) + 'px'; }catch(e){} };
-    fr.srcdoc = doc;
+    fr.srcdoc = (window.__dateFmt && window.__dateFmt.convHtml) ? window.__dateFmt.convHtml(doc) : doc; // the preview is a separate page, so show dates dd/mm/yyyy here too
   }
   // module 10's co-scholastic "Save Grades" button re-renders through this name
   function loadReportCardPreview(){ prcPaintPreview(); }

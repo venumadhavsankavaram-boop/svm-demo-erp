@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* =========================================================================
    Fee Pro (part 2) — late fees that collect, waivers, concession rules,
    opening balances. Loads after 08d-fee-pro.js so these declarations win.

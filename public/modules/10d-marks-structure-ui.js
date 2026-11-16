@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
   /* ===== MARKS STRUCTURE — Total / Written / Internal =================================
      A subject's `maxMarks` is always the TOTAL (e.g. 50). When "internal marks" is on, the
      total is split into Written + Internal (e.g. 35 + 15): teachers enter both on the marks

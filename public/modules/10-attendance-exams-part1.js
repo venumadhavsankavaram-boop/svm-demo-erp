@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const ROOMS_KEY = "exam-rooms";
   const EXAM_HALL_TICKETS_KEY = "exam-hall-tickets";
   const EXAM_ROOM_CONFIG_KEY = "exam-room-config";

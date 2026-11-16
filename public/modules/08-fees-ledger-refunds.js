@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 let refundPaymentId = null;
   const FEE_REFUND_CATEGORY = 'Fee Refund';
   async function openRefundPaymentModal(paymentId){

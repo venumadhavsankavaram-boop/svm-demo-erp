@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 function ringSVG(pct, color, size, stroke, trackColor){
     size = size || 108; stroke = stroke || 11;
     const r = (size - stroke) / 2;
@@ -824,12 +826,13 @@ function ringSVG(pct, color, size, stroke, trackColor){
       <div class="pay-table-wrap">
         <table>
           <thead>
-            <tr><th>Date</th><th>Student</th><th>Category</th><th>Mode</th><th>Amount</th><th>Discount</th><th></th></tr>
+            <tr><th>Date</th><th>Receipt No</th><th>Student</th><th>Category</th><th>Mode</th><th>Amount</th><th>Discount</th><th></th></tr>
           </thead>
           <tbody>
             ${recentPayments.length ? recentPayments.map(p => `
               <tr>
                 <td>${p.date || '—'}</td>
+                <td><b>${escapeHtml(p.receiptNo || '—')}</b></td>
                 <td class="name-cell">${p.studentName}</td>
                 <td><span class="pill">${feeLabelFor(p)}</span></td>
                 <td>${p.mode || '—'}</td>
@@ -837,7 +840,7 @@ function ringSVG(pct, color, size, stroke, trackColor){
                 <td>${fmtMoney(p.discount)}</td>
                 <td>${canSub('managefee_collection','managefee','print') ? `<button class="btn-edit-text" onclick="printReceipt('${p.id}')">Print</button>` : ''}</td>
               </tr>
-            `).join('') : `<tr><td colspan="7"><div class="empty-state"><b>No payments recorded yet</b></div></td></tr>`}
+            `).join('') : `<tr><td colspan="8"><div class="empty-state"><b>No payments recorded yet</b></div></td></tr>`}
           </tbody>
         </table>
       </div>
@@ -875,18 +878,19 @@ function ringSVG(pct, color, size, stroke, trackColor){
     const feeSection = `
       <div class="table-wrap" style="box-shadow:none; border:1px solid var(--border);">
         <table>
-          <thead><tr><th>Date</th><th>Student</th><th>Mode</th><th>Amount</th>${cat!=='stock'?'<th>Discount</th>':''}<th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Receipt No</th><th>Student</th><th>Mode</th><th>Amount</th>${cat!=='stock'?'<th>Discount</th>':''}<th></th></tr></thead>
           <tbody>
             ${rows.length ? rows.map(p => `
               <tr>
                 <td>${p.date || '—'}</td>
+                <td><b>${escapeHtml(p.receiptNo || '—')}</b></td>
                 <td class="name-cell">${p.studentName}</td>
                 <td>${p.mode || '—'}</td>
                 <td>${fmtMoney(p.amount)}</td>
                 ${cat!=='stock'?`<td>${fmtMoney(p.discount)}</td>`:''}
                 <td>${canSub('managefee_collection','managefee','print') ? `<button class="btn-edit-text" onclick="printReceipt('${p.id}')">Print</button>` : ''}</td>
               </tr>
-            `).join('') : `<tr><td colspan="6"><div class="empty-state"><b>No ${CATS[cat]} fee payments recorded yet${cat==='stock'?' (no per-class Stock fee rate is configured)':''}</b></div></td></tr>`}
+            `).join('') : `<tr><td colspan="7"><div class="empty-state"><b>No ${CATS[cat]} fee payments recorded yet${cat==='stock'?' (no per-class Stock fee rate is configured)':''}</b></div></td></tr>`}
           </tbody>
         </table>
       </div>

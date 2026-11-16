@@ -773,4 +773,3 @@
   /* --- Tab: Grading Scale --- */
   /* --- Report Templates (multiple, editable) --- */
   const REPORT_TEMPLATES_KEY = "report-templates";
-  OBJECT_BACKED_KEYS[REPORT_TEMPLATES_KEY] = '/api/kv/' + REPORT_TEMPLATES_KEY;

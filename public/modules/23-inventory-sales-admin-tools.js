@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const PENDING_APPROVALS_KEY = "pending-approvals";
   OBJECT_BACKED_KEYS[PENDING_APPROVALS_KEY] = '/api/kv/' + PENDING_APPROVALS_KEY;
   let pendingApprovals = [];

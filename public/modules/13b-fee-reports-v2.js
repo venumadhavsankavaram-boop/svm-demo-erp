@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ============================================================================
    Fee Reports v2 — Paid / Payable / Due register, Defaulters due list,
    Fully-paid list, Class-wise summary and Receipts between dates.

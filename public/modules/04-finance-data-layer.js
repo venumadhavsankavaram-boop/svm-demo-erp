@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const SETTINGS_KEY = "finance-settings";
   const PAYMENTS_KEY = "finance-payments";
   const FEE_STRUCTURE_KEY = "class-fee-structure";

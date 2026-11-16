@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ============================================================================
    Notice Board with targeting. Each notice chooses:
      WHERE it goes  - Public website, In-App (portal / inbox), Push, WhatsApp

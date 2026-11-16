@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Parent & Student login link: https://<erp>/?login=parent opens the sign-in page with only the Parent & Student
    login (the Staff tab is hidden). The server still checks the audience on every login, so a staff account
    cannot sign in through this link. */

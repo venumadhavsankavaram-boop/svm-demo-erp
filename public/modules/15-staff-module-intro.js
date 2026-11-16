@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const STAFF_KEY = "staff-records";
   API_BACKED_KEYS[STAFF_KEY] = '/api/staff';
   const STAFF_DEPTS_KEY = "staff-departments";

@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ===== FEE REFUNDS — request → approval → credit-note ledger =====
    A refund is its own record that points back at the receipt it reverses; the
    original payment is never voided or edited. So a partial refund of ₹2,000 on

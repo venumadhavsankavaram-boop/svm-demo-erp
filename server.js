@@ -1,7 +1,5 @@
 /* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
    Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
-/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
-   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 // Express server for Render — serves the ERP's static files AND handles
 // every /api/* request, using the exact same tested resource-handling logic
 // that ran on Vercel. Only the "wrapper" around it changed: Vercel routed
@@ -747,6 +745,13 @@ async function ensureSchema() {
     last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME NOT NULL
   )`;
+  await addColumnIfMissing('sessions', 'must_change TINYINT DEFAULT 0');
+  await addColumnIfMissing('sessions', 'impersonated_by VARCHAR(191)');
+  await addColumnIfMissing('sessions', 'pair_key VARCHAR(64)');
+  await sql`CREATE TABLE IF NOT EXISTS password_reset_requests (
+    id VARCHAR(64) PRIMARY KEY, user_id VARCHAR(191), username VARCHAR(191), status VARCHAR(16) DEFAULT 'pending',
+    ip VARCHAR(64), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, resolved_at DATETIME NULL
+  )`;
 
   // One row per browser/device a Parent or Student login has granted Web
   // Push permission on (a login can have several — phone + laptop, say).
@@ -1163,8 +1168,8 @@ async function createSession(req, res, user) {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + SESSION_IDLE_MS);
   await sql`
-    INSERT INTO sessions (id, user_id, role, name, expires_at)
-    VALUES (${hashSessionToken(token)}, ${user.id}, ${user.role}, ${user.name}, ${expiresAt.toISOString()})
+    INSERT INTO sessions (id, user_id, role, name, expires_at, must_change)
+    VALUES (${hashSessionToken(token)}, ${user.id}, ${user.role}, ${user.name}, ${expiresAt.toISOString()}, ${user.must_change_password ? 1 : 0})
   `;
   if (user.role === 'Parent' || user.role === 'Student') {
     sql`UPDATE users SET first_login_at = COALESCE(first_login_at, now()), last_login_at = now(), last_seen_at = now() WHERE id = ${user.id}`.catch(() => {});
@@ -1198,6 +1203,7 @@ const PUBLIC_API_ROUTES = [
   { path: '/api/login', methods: ['POST'] },
   { path: '/api/login/2fa', methods: ['POST'] },
   { path: '/api/login/2fa/email', methods: ['POST'] },
+  { path: '/api/password-reset-request', methods: ['POST'] },
   { path: '/api/demo-info', methods: ['GET'] },
   { path: '/api/health', methods: ['GET', 'HEAD'] },
   { path: '/api/logout', methods: ['POST'] },
@@ -1282,7 +1288,8 @@ app.use(async (req, res, next) => {
     // Calls the app makes by itself (page hidden or untouched for a while) check the login but do not renew it,
     // so an app left running in the background still signs out after the idle time.
     if (req.headers['x-background'] !== '1') sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()}, last_seen_at = now() WHERE id = ${idHash}`.catch(() => {});
-    req.authUser = { id: session.user_id, role: session.role, name: session.name };
+    if (req.headers['x-background'] !== '1') { const altTok = parseCookies(req).sid_alt; if (altTok) sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()} WHERE id = ${hashSessionToken(altTok)} AND expires_at > now()`.catch(() => {}); }
+    req.authUser = { id: session.user_id, role: session.role, name: session.name, impersonatedBy: session.impersonated_by || null };
     // A trial login may look around and try things, but cannot lock out the shared demo accounts or other trials.
     if (DEMO_MODE && demoIsTrial(session.user_id)) {
       const isAcct = /^\/api\/(users|student-logins|parent-logins|audit-log)(\/|$)/.test(req.path);
@@ -1306,11 +1313,19 @@ app.use(async (req, res, next) => {
       if (now - lastNote > 10 * 60 * 1000) { parentSeenAt.set(session.user_id, now); sql`UPDATE users SET last_seen_at = now() WHERE id = ${session.user_id}`.catch(() => {}); }
     }
     req.sessionActiveBranch = session.active_branch || null;
+    // After an Admin reset, the user must choose their own password before anything else works.
+    if (session.must_change && !['/api/me', '/api/logout', '/api/account/password'].includes(req.path)) {
+      return res.status(403).json({ error: 'Please set a new password first.', code: 'MUST_CHANGE_PASSWORD' });
+    }
     // "Require two-step sign-in" is on and this Admin/Principal has not set it up yet: only the set-up screen works.
     if (!session.impersonated_by && session.user_id !== 'vendor-support' && ['Admin', 'Principal'].includes(session.role)
         && req.path !== '/api/me' && req.path !== '/api/logout' && !req.path.startsWith('/api/account/2fa')
         && await userNeeds2faSetup(session.user_id)) {
       return res.status(403).json({ error: 'Please set up two-step sign-in first.', code: 'MUST_SETUP_2FA' });
+    }
+    // While an Admin is viewing as someone else, account/security changes are off limits.
+    if (session.impersonated_by && (req.path === '/api/account/password' || req.path.startsWith('/api/account/2fa') || req.path.startsWith('/api/admin/users/'))) {
+      return res.status(403).json({ error: 'Not available while viewing as another user. Exit that view first.' });
     }
     next();
   } catch (err) {
@@ -1507,6 +1522,7 @@ async function handleKv(req, res, key) {
   if ((key === 'admit-card-policy' || key === 'admit-card-exceptions') && req.method === 'PUT' && (!req.authUser || (req.authUser.role !== 'Admin' && req.authUser.role !== 'Principal'))) return res.status(403).json({ error: 'Only the Admin or Principal can change the admit card fee rules.' });
   if (key === 'exam-releases' && req.method === 'PUT' && (!req.authUser || (req.authUser.role !== 'Admin' && req.authUser.role !== 'Principal'))) return res.status(403).json({ error: 'Only the Admin or Principal can release marks to students.' });
   if (key === 'portal-settings' && req.method === 'PUT' && (!req.authUser || (req.authUser.role !== 'Admin' && req.authUser.role !== 'Principal'))) return res.status(403).json({ error: 'Only the Admin or Principal can change the parent portal settings.' });
+  if (key === 'help-settings' && req.method === 'PUT' && (!req.authUser || (req.authUser.role !== 'Admin' && req.authUser.role !== 'Principal'))) return res.status(403).json({ error: 'Only the Admin or Principal can change the help content.' });
   if (key === 'teacher-portal-settings' && req.method === 'PUT') {
     if (!req.authUser || (req.authUser.role !== 'Admin' && req.authUser.role !== 'Principal')) return res.status(403).json({ error: 'Only the Admin or Principal can change the teacher portal settings.' });
     req.body = tpNormalize(req.body); _tpCache = { at: 0, v: null };
@@ -2300,6 +2316,9 @@ const KV_KEY_TO_MODULE = {
   // Public-website content (alumni, achievements, safety, vehicles, admission copy) — edited in Website Gallery > Website Content.
   'website-extras': ['websitegallery'],
   'finance-settings': ['managefee'],
+  'payroll-settings': ['staff'],
+  // Salary posting to Accounting: its settings and the record of which vouchers were created.
+  'payroll-accounting': ['staff'],
   // Fees prepared for the coming academic year (applied when that year is made current).
   'fee-plan-next': ['managefee'],
   // Log of mid-year class / section changes (Promotion & Transfer).
@@ -2389,7 +2408,8 @@ async function checkModuleAccess(req, res, moduleKeys) {
 // part of a Plan; anything else (dashboard, admissions, staff, accounting,
 // setup, announcements, etc.) is core and never gated by Plan, regardless of
 // which modules a school picked.
-const PLAN_GATED_MODULE_KEYS = ['managefee', 'attendance', 'exams', 'result', 'transport', 'library'];
+const PLAN_GATED_MODULE_KEYS = ['managefee', 'attendance', 'exams', 'result', 'transport', 'library',
+  'accounting', 'staff', 'inventory', 'hostel', 'timetable', 'syllabus', 'announcements', 'inbox', 'noticeboard'];
 
 // Same call-site shape as checkModuleAccess (sends its own 403 and returns a
 // boolean) but a completely separate axis: this checks what the SCHOOL paid
@@ -3863,10 +3883,34 @@ async function receiptStartServer() {
 }
 const todayInSchoolTz = () => new Date().toLocaleDateString('en-CA', { timeZone: SCHOOL_TZ });
 
+// The school's own on/off choice for parents paying online (kept in the database, changed by the Admin on the
+// status card). Keys alone no longer decide whether parents SEE the option. Payments already started still finish,
+// because verify, the webhook and the background check ignore this switch.
+let _payOn = { value: true, loadedAt: 0, loading: false };
+async function loadOnlinePaySwitch() {
+  try {
+    const r = await sql`SELECT value FROM kv_store WHERE \`key\` = 'online-payments-switch'`;
+    let v = r.length ? r[0].value : null; if (typeof v === 'string') { try { v = JSON.parse(v); } catch (_) { v = null; } }
+    _payOn.value = !(v && v.enabled === false);
+    _payOn.loadedAt = Date.now();
+  } catch (_) { /* keep the last known value */ }
+}
+async function onlinePayOffered() {
+  if (!razorpayConfigured()) return false;
+  if (Date.now() - _payOn.loadedAt > 30000) await loadOnlinePaySwitch();
+  return _payOn.value;
+}
+function onlinePayOfferedSync() {
+  if (Date.now() - _payOn.loadedAt > 30000 && !_payOn.loading) { _payOn.loading = true; loadOnlinePaySwitch().finally(() => { _payOn.loading = false; }); }
+  return razorpayConfigured() && _payOn.value;
+}
 app.post('/api/payments/create-order', async (req, res) => {
   try {
     if (!razorpayConfigured()) {
       return res.status(501).json({ error: 'Online payments are not set up yet. Ask your Admin to add a Razorpay account.' });
+    }
+    if (!(await onlinePayOffered())) {
+      return res.status(501).json({ error: 'Online payment is switched off for this school. Please pay at the school office.' });
     }
     if (!req.authUser || !PARENT_LOGIN_ROLES.includes(req.authUser.role)) {
       return res.status(403).json({ error: 'Online payment is for Student / Parent logins. Staff record payments at the office.' });
@@ -4012,19 +4056,21 @@ app.post('/api/payments/webhook', async (req, res) => {
   }
 });
 // Background check: orders still "created" after a couple of minutes — if Razorpay says one was paid, record it.
+let lastSweep = null; // { at, checked, recovered, error } — shown on the Admin payment status card
 async function sweepOnlinePayments() {
   if (!razorpayConfigured()) return { checked: 0, recovered: 0 };
   await ensureOnlinePaymentsTable();
   const open = await sql`SELECT order_id FROM online_payments WHERE status = 'created' AND created_at < (NOW() - INTERVAL 2 MINUTE) AND created_at > (NOW() - INTERVAL 3 DAY) ORDER BY created_at LIMIT 50`;
-  let recovered = 0;
+  let recovered = 0, sweepError = null;
   for (const o of open) {
     try {
       const r = await rzApi('GET', '/v1/orders/' + encodeURIComponent(o.order_id) + '/payments');
       const items = (r.ok && r.data && Array.isArray(r.data.items)) ? r.data.items : [];
       const good = items.find(i => i.status === 'captured' || i.status === 'authorized');
       if (good) { const f = await finalizeOnlinePayment(o.order_id, good.id); if (f.ok && f.justRecorded) recovered++; }
-    } catch (e) { console.error('online payment sweep failed for', o.order_id, e.message); }
+    } catch (e) { console.error('online payment sweep failed for', o.order_id, e.message); sweepError = 'Could not reach Razorpay for an open order.'; }
   }
+  lastSweep = { at: new Date().toISOString(), checked: open.length, recovered, error: sweepError };
   return { checked: open.length, recovered };
 }
 setInterval(() => { sweepOnlinePayments().catch(e => console.error('sweepOnlinePayments:', e.message)); }, 5 * 60 * 1000);
@@ -4045,6 +4091,67 @@ app.post('/api/payments/check-now', async (req, res) => {
   } catch (err) { console.error('check-now error:', err); return res.status(500).json({ error: 'Could not check with Razorpay.' }); }
 });
 
+
+// Admin payment-status card: is online payment set up, in which mode, and is anything stuck? Never returns a secret.
+function maskRzKey(k) {
+  const m = /^(rzp_(?:live|test)_)(.+)$/.exec(k || '');
+  if (m) return m[1] + '••••' + m[2].slice(-4);
+  return k ? String(k).slice(0, 3) + '••••' : '';
+}
+app.get('/api/payments/health', async (req, res) => {
+  try {
+    if (!req.authUser || !['Admin', 'Principal'].includes(req.authUser.role)) return res.status(403).json({ error: 'Not allowed.' });
+    const keyId = process.env.RAZORPAY_KEY_ID || '';
+    const out = {
+      demo: DEMO_MODE,
+      configured: razorpayConfigured(),
+      keyIdSet: !!keyId, keySecretSet: !!process.env.RAZORPAY_KEY_SECRET,
+      mode: /^rzp_live_/.test(keyId) ? 'live' : /^rzp_test_/.test(keyId) ? 'test' : (keyId ? 'unknown' : ''),
+      keyMasked: maskRzKey(keyId),
+      switchOn: _payOn.value, offered: await onlinePayOffered(),
+      webhookSecretSet: !!process.env.RAZORPAY_WEBHOOK_SECRET,
+      webhookUrl: (isHttpsRequest(req) ? 'https' : 'http') + '://' + (req.headers['x-forwarded-host'] || req.headers.host || '') + '/api/payments/webhook',
+      lastSweep,
+    };
+    if (out.configured) {
+      await ensureOnlinePaymentsTable();
+      const one = async (q) => (q && q[0]) || {};
+      const paid1 = await one(await sql`SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM online_payments WHERE status = 'paid' AND paid_at > (NOW() - INTERVAL 1 DAY)`);
+      const paid30 = await one(await sql`SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM online_payments WHERE status = 'paid' AND paid_at > (NOW() - INTERVAL 30 DAY)`);
+      const stuck = await one(await sql`SELECT COUNT(*) AS c FROM online_payments WHERE status = 'created' AND created_at < (NOW() - INTERVAL 15 MINUTE) AND created_at > (NOW() - INTERVAL 3 DAY)`);
+      const failed = await one(await sql`SELECT COUNT(*) AS c FROM online_payments WHERE status = 'failed' AND created_at > (NOW() - INTERVAL 7 DAY)`);
+      const last = await one(await sql`SELECT MAX(paid_at) AS t FROM online_payments WHERE status = 'paid'`);
+      out.stats = { paidDayCount: Number(paid1.c || 0), paidDayAmount: Number(paid1.s || 0), paid30Count: Number(paid30.c || 0), paid30Amount: Number(paid30.s || 0),
+        stuck: Number(stuck.c || 0), failed7: Number(failed.c || 0), lastPaidAt: last.t || null };
+    }
+    return res.status(200).json(out);
+  } catch (err) { console.error('payments health error:', err); return res.status(500).json({ error: 'Could not load the payment status.' }); }
+});
+app.post('/api/payments/switch', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.role !== 'Admin' || req.authUser.id === 'vendor-support' || req.authUser.impersonatedBy) return res.status(403).json({ error: 'Only the Admin can change this.' });
+    const on = !!(req.body && req.body.enabled);
+    await sql`INSERT INTO kv_store (\`key\`, value) VALUES ('online-payments-switch', ${JSON.stringify({ enabled: on })}) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP`;
+    _payOn.value = on; _payOn.loadedAt = Date.now();
+    auditNote(req.authUser.name, req.authUser.role, 'SETTING', 'online-payments-switch', null, on ? 'parents can pay online' : 'online payment for parents switched off', clientIp(req));
+    return res.status(200).json({ ok: true, enabled: on });
+  } catch (err) { console.error('payments switch error:', err); return res.status(500).json({ error: 'Could not save.' }); }
+});
+// Asks Razorpay one harmless read-only question to prove the saved keys are accepted. Admin only; nothing is changed.
+app.post('/api/payments/test-connection', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.role !== 'Admin') return res.status(403).json({ error: 'Only the Admin can test the connection.' });
+    if (!razorpayConfigured()) return res.status(200).json({ ok: false, message: DEMO_MODE ? 'Online payments are switched off in the demo.' : 'No Razorpay keys are set on the server yet.' });
+    const r = await rzApi('GET', '/v1/payments?count=1');
+    if (r.ok) return res.status(200).json({ ok: true, message: 'Razorpay accepted the keys.' });
+    if (r.status === 401) return res.status(200).json({ ok: false, message: 'Razorpay rejected the keys. Check the Key ID and Key Secret on the server.' });
+    return res.status(200).json({ ok: false, message: 'Razorpay answered with an error (code ' + r.status + '). Try again in a minute.' });
+  } catch (err) {
+    console.error('payments test-connection error:', err.message);
+    return res.status(200).json({ ok: false, message: 'Could not reach Razorpay from the server. Check the internet connection and try again.' });
+  }
+});
+
 // Whether this school has online fee payment turned on at all — the deploy-
 // time choice this template is built around. A school that doesn't want to
 // offer it (or hasn't signed up for Razorpay yet) is simply never given
@@ -4054,8 +4161,8 @@ app.post('/api/payments/check-now', async (req, res) => {
 // clicked. The Fees tab calls this first so it can hide the button entirely
 // for a school that hasn't integrated the feature, instead of offering a
 // dead end. Deliberately just a boolean — never leaks which keys are set.
-app.get('/api/payments/status', (req, res) => {
-  return res.status(200).json({ enabled: razorpayConfigured() });
+app.get('/api/payments/status', async (req, res) => {
+  return res.status(200).json({ enabled: await onlinePayOffered() });
 });
 
 // ---------- Notifications: Web Push (on by default) + WhatsApp (opt-in per school) ----------
@@ -4514,7 +4621,7 @@ async function planFeeReminders(settings, today) {
       const k = Math.floor(isoDiffDays(today, oldest) / settings.repeatEveryDays);
       if (k >= 1 && k <= settings.repeatMax) {
         plans.push({ student, name, kind: 'fee_overdue_repeat', ref: oldest + ':' + k, title: 'Fee still overdue', amount: sum(overdue), dueIso: oldest, wa: 'FEE_DUE_AFTER',
-          body: `Reminder: ${name}'s fee of ${fmtMoneyServer(sum(overdue))} (${labels(overdue)}) is still pending. Please pay at the school office${razorpayConfigured() ? ' or online from the app' : ''}.` });
+          body: `Reminder: ${name}'s fee of ${fmtMoneyServer(sum(overdue))} (${labels(overdue)}) is still pending. Please pay at the school office${onlinePayOfferedSync() ? ' or online from the app' : ''}.` });
       }
     }
   }
@@ -4991,6 +5098,363 @@ app.get('/api/users/activity', async (req, res) => {
     const iso = d => d ? new Date(d).toISOString() : '';
     return res.status(200).json(rows.map(r => ({ id: r.id, lastLogin: iso(r.last_login_at), lastSeen: iso(r.last_seen_at), twofa: r.twofa_method || '' })));
   } catch (err) { console.error('users activity error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+
+// ---------- UPI payment claims (parents pay by QR, the office verifies, a receipt is issued) ----------
+// Nothing is marked paid on a parent's word. A claim needs a 12-digit UTR (unique across the whole school), is checked by the
+// office against the bank credit, and only then becomes a normal fee receipt (once only, under a lock).
+// The optional UPI charge (a flat or percentage convenience fee) is set by the Admin and recomputed on the server.
+const UPI_KEY = 'upi-settings';
+const UPI_STAFF = ['Admin', 'Principal', 'Accountant'];
+function upiDefaults() {
+  return { enabled: false, upiId: '', payeeName: '', qr: '', instructions: '', requireScreenshot: false, maxAgeDays: 10,
+    charge: { mode: 'none', percent: 0, flat: 0, min: 0, max: 0, freeUpTo: 0, label: 'UPI charge', effectiveFrom: '', reason: '' }, changes: [] };
+}
+function upiCalcCharge(fee, charge, onDate) {
+  const c = charge || {}; fee = Number(fee) || 0;
+  if (!c.mode || c.mode === 'none' || fee <= 0) return 0;
+  if (c.effectiveFrom && onDate && String(onDate) < c.effectiveFrom) return 0;
+  if (Number(c.freeUpTo) > 0 && fee <= Number(c.freeUpTo)) return 0;
+  let v = c.mode === 'percent' ? fee * (Number(c.percent) || 0) / 100 : (Number(c.flat) || 0);
+  if (Number(c.min) > 0) v = Math.max(v, Number(c.min));
+  if (Number(c.max) > 0) v = Math.min(v, Number(c.max));
+  return Math.round(v * 100) / 100;
+}
+function upiNormalize(b, old) {
+  const d = upiDefaults(); b = (b && typeof b === 'object') ? b : {}; const o = old || d;
+  const str = (x, n, def) => (typeof x === 'string' ? x.trim().slice(0, n) : def);
+  const num = (x, lo, hi, def) => { const n = Number(x); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n * 100) / 100)) : def; };
+  const c = b.charge || {}; const oc = o.charge || d.charge;
+  const mode = ['none', 'percent', 'flat'].includes(c.mode) ? c.mode : oc.mode;
+  const upiId = str(b.upiId, 100, o.upiId).replace(/\s+/g, '');
+  const qr = typeof b.qr === 'string' ? (b.qr === '' ? '' : (/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(b.qr) && b.qr.length <= 700000 ? b.qr : o.qr)) : o.qr;
+  return { enabled: b.enabled === true, upiId, payeeName: str(b.payeeName, 80, o.payeeName), qr, instructions: str(b.instructions, 600, o.instructions),
+    requireScreenshot: b.requireScreenshot === true, maxAgeDays: Math.round(num(b.maxAgeDays, 1, 60, o.maxAgeDays || 10)),
+    charge: { mode, percent: num(c.percent, 0, 10, oc.percent), flat: num(c.flat, 0, 1000, oc.flat), min: num(c.min, 0, 1000, oc.min), max: num(c.max, 0, 100000, oc.max), freeUpTo: num(c.freeUpTo, 0, 100000, oc.freeUpTo || 0),
+      label: str(c.label, 40, oc.label) || 'UPI charge', effectiveFrom: /^\d{4}-\d{2}-\d{2}$/.test(String(c.effectiveFrom || '')) ? c.effectiveFrom : '', reason: str(c.reason, 200, oc.reason) },
+    changes: Array.isArray(o.changes) ? o.changes.slice(0, 30) : [] };
+}
+let _upiCache = { at: 0, v: null }, _upiTable = false;
+async function upiSettings() {
+  if (_upiCache.v && Date.now() - _upiCache.at < 5000) return _upiCache.v;
+  let v = upiDefaults();
+  try { const r = await sql`SELECT value FROM kv_store WHERE \`key\` = ${UPI_KEY}`; if (r.length) { let x = r[0].value; if (typeof x === 'string') x = JSON.parse(x); v = Object.assign(upiNormalize(x, upiDefaults()), { enabled: !!(x && x.enabled), changes: (x && x.changes) || [] }); } } catch (_) { /* defaults */ }
+  _upiCache = { at: Date.now(), v }; return v;
+}
+async function upiEnsureTable() {
+  if (_upiTable) return;
+  await sql`CREATE TABLE IF NOT EXISTS upi_claims (
+    id VARCHAR(40) PRIMARY KEY, student_id VARCHAR(191) NOT NULL, user_id VARCHAR(191) NOT NULL, user_name TEXT,
+    fee_lines TEXT NOT NULL, fee_amount DECIMAL(14,2) NOT NULL, charge_amount DECIMAL(14,2) NOT NULL DEFAULT 0, paid_total DECIMAL(14,2) NOT NULL,
+    utr VARCHAR(20) NOT NULL, utr_key VARCHAR(20) NULL, ref_code VARCHAR(12) NOT NULL, paid_on VARCHAR(12) NOT NULL, paid_time VARCHAR(8) NOT NULL DEFAULT '',
+    payer_note VARCHAR(300) NOT NULL DEFAULT '', screenshot MEDIUMTEXT NULL, status VARCHAR(12) NOT NULL DEFAULT 'submitted', flags TEXT, bank_check VARCHAR(20) NOT NULL DEFAULT '',
+    reviewed_by TEXT, reviewed_role VARCHAR(40), reviewed_at DATETIME NULL, reject_reason VARCHAR(300) NOT NULL DEFAULT '', credited_amount DECIMAL(14,2) NULL, received_total DECIMAL(14,2) NULL,
+    receipt_nos TEXT, history TEXT, class_at_payment TEXT, ip VARCHAR(64), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_upi_utr_key (utr_key), UNIQUE KEY uq_upi_ref (ref_code))`;
+  await createIndexIfMissing('idx_upi_claims_status', 'upi_claims', 'status');
+  await createIndexIfMissing('idx_upi_claims_student', 'upi_claims', 'student_id');
+  _upiTable = true;
+}
+const upiIsParent = req => !!req.authUser && PARENT_LOGIN_ROLES.includes(req.authUser.role) && !req.authUser.impersonatedBy;
+const upiIsStaff = req => !!req.authUser && UPI_STAFF.includes(req.authUser.role) && !req.authUser.impersonatedBy;
+const upiHist = (row, who, what) => { let h = []; try { h = JSON.parse(row.history || '[]'); } catch (_) {} h.push({ at: new Date().toISOString(), by: who, what }); return JSON.stringify(h.slice(-30)); };
+const upiParse = (s, def) => { try { const v = JSON.parse(s); return v == null ? def : v; } catch (_) { return def; } };
+function upiOut(r, withShot) {
+  const lines = upiParse(r.fee_lines, []);
+  return { id: r.id, studentId: r.student_id, studentName: r.student_name || '', className: r.class_name || r.class_at_payment || '', section: r.section || '', admissionNo: r.admission_no || '', userName: r.user_name || '',
+    lines, feeAmount: Number(r.fee_amount), chargeAmount: Number(r.charge_amount), paidTotal: Number(r.paid_total), utr: r.utr, refCode: r.ref_code, paidOn: r.paid_on, paidTime: r.paid_time, note: r.payer_note,
+    status: r.status, flags: upiParse(r.flags, []), bankCheck: r.bank_check, reviewedBy: r.reviewed_by || '', reviewedAt: r.reviewed_at ? new Date(r.reviewed_at).toISOString() : '', rejectReason: r.reject_reason,
+    creditedAmount: r.credited_amount == null ? null : Number(r.credited_amount), receivedTotal: r.received_total == null ? null : Number(r.received_total), receiptNos: upiParse(r.receipt_nos, []),
+    hasShot: !!Number(r.has_shot), createdAt: new Date(r.created_at).toISOString(), history: withShot ? upiParse(r.history, []) : undefined };
+}
+const UPI_SELECT = `SELECT c.id, c.student_id, c.user_id, c.user_name, c.fee_lines, c.fee_amount, c.charge_amount, c.paid_total, c.utr, c.ref_code, c.paid_on, c.paid_time, c.payer_note, c.status, c.flags, c.bank_check,
+  c.reviewed_by, c.reviewed_at, c.reject_reason, c.credited_amount, c.received_total, c.receipt_nos, c.history, c.class_at_payment, c.created_at, (c.screenshot IS NOT NULL AND c.screenshot <> '') AS has_shot,
+  CONCAT(COALESCE(s.last_name, ''), ' ', COALESCE(s.first_name, '')) AS student_name, s.class_name, s.section, s.admission_no
+  FROM upi_claims c LEFT JOIN students s ON s.id = c.student_id`;
+
+app.get('/api/upi/settings', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Please sign in.' });
+    const s = await upiSettings();
+    if (upiIsStaff(req)) return res.status(200).json(s);
+    if (!upiIsParent(req) || !s.enabled) return res.status(200).json({ enabled: false });
+    return res.status(200).json({ enabled: true, upiId: s.upiId, payeeName: s.payeeName, qr: s.qr, instructions: s.instructions, requireScreenshot: s.requireScreenshot, maxAgeDays: s.maxAgeDays, charge: s.charge });
+  } catch (err) { console.error('upi settings error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.put('/api/upi/settings', async (req, res) => {
+  try {
+    if (!req.authUser || !MATERIAL_MGR.includes(req.authUser.role) || req.authUser.impersonatedBy) return res.status(403).json({ error: 'Only the Admin or Principal can change this.' });
+    const old = await upiSettings(); const body = req.body || {}; const next = upiNormalize(body, old);
+    if (next.upiId && !/^[a-zA-Z0-9.\-_]{2,100}@[a-zA-Z0-9]{2,40}$/.test(next.upiId)) return res.status(400).json({ error: 'That UPI ID does not look right. It should look like name@sbi.' });
+    if (next.enabled && !next.upiId && !next.qr) return res.status(400).json({ error: 'Add the UPI ID or the QR image before switching this on.' });
+    const who = req.authUser.name || req.authUser.role, notes = [];
+    if (next.enabled !== old.enabled) notes.push(next.enabled ? 'switched ON' : 'switched OFF');
+    if (JSON.stringify(next.charge) !== JSON.stringify(old.charge)) { const c = next.charge; notes.push('charge: ' + (c.mode === 'none' ? 'none' : c.mode === 'percent' ? c.percent + '%' : '₹' + c.flat) + (c.freeUpTo ? ' free up to ₹' + c.freeUpTo : '') + (c.min ? ' min ₹' + c.min : '') + (c.max ? ' max ₹' + c.max : '') + (c.effectiveFrom ? ' from ' + c.effectiveFrom : '') + (c.reason ? ' (' + c.reason + ')' : '')); }
+    if (next.upiId !== old.upiId) notes.push('UPI ID changed');
+    if (next.qr !== old.qr) notes.push('QR image changed');
+    next.changes = (notes.length ? [{ at: new Date().toISOString(), by: who, text: notes.join('; ') }] : []).concat(old.changes || []).slice(0, 30);
+    await sql`INSERT INTO kv_store (\`key\`, value) VALUES (${UPI_KEY}, ${JSON.stringify(next)}) ON DUPLICATE KEY UPDATE value = VALUES(value)`;
+    _upiCache = { at: 0, v: null };
+    if (notes.length) auditNote(req.authUser.name, req.authUser.role, 'PUT', 'upi-settings', UPI_KEY, notes.join('; ').slice(0, 300), clientIp(req));
+    return res.status(200).json(next);
+  } catch (err) { console.error('upi settings save error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+// Parent: the claims for their own child (or children), newest first. The screenshot itself is never sent here.
+app.get('/api/upi/mine', async (req, res) => {
+  try {
+    if (!upiIsParent(req)) return res.status(200).json([]);
+    await upiEnsureTable(); const kids = await consentKidsOfUser(req.authUser.id); if (!kids.length) return res.status(200).json([]);
+    const ph = kids.map((_, i) => `$${i + 1}`).join(', ');
+    const rows = await sql.query(`${UPI_SELECT} WHERE c.student_id IN (${ph}) ORDER BY c.created_at DESC LIMIT 40`, kids.map(k => k.id));
+    return res.status(200).json(rows.map(r => upiOut(r, false)));
+  } catch (err) { console.error('upi mine error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/upi/claims', async (req, res) => {
+  try {
+    if (!upiIsParent(req)) return res.status(403).json({ error: 'Only the parent or student login can send a payment for checking.' });
+    const s = await upiSettings(); if (!s.enabled) return res.status(409).json({ error: 'UPI payment is not switched on for this school.' });
+    await upiEnsureTable(); const b = req.body || {};
+    const kids = await consentKidsOfUser(req.authUser.id); const kid = b.studentId ? kids.find(k => k.id === String(b.studentId)) : kids[0];
+    if (!kid) return res.status(b.studentId && kids.length ? 403 : 400).json({ error: b.studentId && kids.length ? 'That student is not linked to this login.' : 'No student is linked to this login.' });
+    const utr = String(b.utr || '').replace(/\s+/g, '');
+    if (!/^\d{12}$/.test(utr)) return res.status(400).json({ error: 'The UPI reference (UTR) has 12 digits. Please copy it from your UPI app, under the payment details.' });
+    const today = todayInSchoolTz(); const paidOn = String(b.paidOn || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(paidOn)) return res.status(400).json({ error: 'Please choose the date you paid.' });
+    if (paidOn > today) return res.status(400).json({ error: 'The payment date cannot be in the future.' });
+    const ageDays = Math.round((new Date(today) - new Date(paidOn)) / 86400000);
+    if (ageDays > (s.maxAgeDays || 10)) return res.status(400).json({ error: `Payments older than ${s.maxAgeDays || 10} days cannot be sent here. Please visit the school office with your phone.` });
+    const rawLines = Array.isArray(b.lines) ? b.lines.slice(0, 8) : []; if (!rawLines.length) return res.status(400).json({ error: 'Please choose what you paid for.' });
+    const lines = []; const seen = new Set();
+    for (const l of rawLines) {
+      const amount = Math.round(Number(l && l.amount) * 100) / 100; const type = l && l.type === 'extra' ? 'extra' : 'fee'; const key = String((l && l.key) || '');
+      if (!amount || amount <= 0 || amount > ONLINE_PAY_MAX) return res.status(400).json({ error: 'Invalid amount.' });
+      if (seen.has(type + ':' + key)) return res.status(400).json({ error: 'The same fee is listed twice.' }); seen.add(type + ':' + key);
+      let category = 'fee', extraId = null, extraName = null;
+      if (type === 'extra') {
+        const rows = await sql`SELECT * FROM student_extra_fees WHERE id = ${key} AND student_id = ${kid.id}`;
+        if (!rows.length) return res.status(400).json({ error: 'That fee was not found for this student.' });
+        const owed = (Number(rows[0].amount) || 0) - (Number(rows[0].paid_amount) || 0);
+        if (amount > owed + 0.005) return res.status(400).json({ error: 'That is more than is due for this fee. Refresh the page and try again.' });
+        category = 'extra'; extraId = rows[0].id; extraName = rows[0].name;
+      } else { if (!/^[A-Za-z0-9_-]{1,40}$/.test(key)) return res.status(400).json({ error: 'Invalid fee type.' }); category = key; }
+      lines.push({ type, key, category, extraFeeId: extraId, extraFeeName: extraName, label: String(l.label || '').slice(0, 100), amount });
+    }
+    const feeAmount = Math.round(lines.reduce((t, l) => t + l.amount, 0) * 100) / 100; const charge = upiCalcCharge(feeAmount, s.charge, paidOn);
+    const paidTotal = Math.round(Number(b.paidTotal) * 100) / 100; if (!paidTotal || paidTotal <= 0 || paidTotal > ONLINE_PAY_MAX) return res.status(400).json({ error: 'Please type the total amount you paid.' });
+    let shot = null; if (b.screenshot) { shot = String(b.screenshot); if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(shot) || shot.length > 700000) return res.status(400).json({ error: 'The screenshot is not a valid picture, or is too large.' }); }
+    if (s.requireScreenshot && !shot) return res.status(400).json({ error: 'Please attach a screenshot of the successful payment.' });
+    const dayCount = await sql`SELECT COUNT(*) AS c FROM upi_claims WHERE user_id = ${req.authUser.id} AND created_at > (NOW() - INTERVAL 1 DAY)`; if (Number(dayCount[0].c) >= 10) return res.status(429).json({ error: 'Too many submissions today. Please contact the school office.' });
+    const open = await sql`SELECT COUNT(*) AS c FROM upi_claims WHERE student_id = ${kid.id} AND status = 'submitted'`; if (Number(open[0].c) >= 5) return res.status(429).json({ error: 'Several payments are already waiting to be checked. Please wait for the office to verify them.' });
+    // Duplicate protection: one UTR is one payment, school-wide.
+    const dup = await sql`SELECT id, student_id, status FROM upi_claims WHERE utr = ${utr} AND (utr_key IS NOT NULL OR (status = 'rejected' AND student_id = ${kid.id})) LIMIT 1`;
+    if (dup.length) return res.status(409).json({ error: dup[0].status === 'rejected' ? 'This reference was already checked and could not be matched. Please visit the school office.' : 'This UTR has already been sent. If it is your payment, the office is checking it. Please do not send it again.' });
+    const have = await sql`SELECT receipt_no, student_id FROM payments WHERE ref = ${utr} AND (voided IS NULL OR voided = 0) LIMIT 1`;
+    if (have.length) return res.status(409).json({ error: 'This payment is already recorded' + (have[0].student_id === kid.id ? ' as receipt ' + have[0].receipt_no + '.' : '.') + ' No need to send it again.' });
+    const flags = [];
+    if (!shot) flags.push('no_screenshot');
+    if (ageDays > 5) flags.push('older_payment');
+    if (Math.abs(paidTotal - (feeAmount + charge)) > 0.5) flags.push('amount_differs');
+    const sim = await sql`SELECT id FROM upi_claims WHERE student_id = ${kid.id} AND status IN ('submitted','approved') AND ABS(paid_total - ${paidTotal}) < 0.01 AND paid_on = ${paidOn} LIMIT 1`; if (sim.length) flags.push('similar_claim');
+    const same = await sql`SELECT receipt_no FROM payments WHERE student_id = ${kid.id} AND date = ${paidOn} AND ABS(amount - ${feeAmount}) < 0.01 AND (voided IS NULL OR voided = 0) LIMIT 1`; if (same.length) flags.push('same_amount_recorded');
+    const recent = await sql`SELECT COUNT(*) AS c FROM upi_claims WHERE student_id = ${kid.id} AND created_at > (NOW() - INTERVAL 7 DAY)`; if (Number(recent[0].c) >= 3) flags.push('many_claims');
+    let ref = String(b.refCode || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10); if (ref.length < 4) ref = 'RF' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const taken = await sql`SELECT 1 AS x FROM upi_claims WHERE ref_code = ${ref}`; if (taken.length) ref = 'RF' + crypto.randomBytes(4).toString('hex').toUpperCase().slice(0, 8);
+    const id = 'upc_' + crypto.randomBytes(8).toString('hex'); const stu = await sql`SELECT class_name FROM students WHERE id = ${kid.id}`;
+    const hist = JSON.stringify([{ at: new Date().toISOString(), by: req.authUser.name || 'Parent', what: 'Sent for checking' }]);
+    await sql`INSERT INTO upi_claims (id, student_id, user_id, user_name, fee_lines, fee_amount, charge_amount, paid_total, utr, utr_key, ref_code, paid_on, paid_time, payer_note, screenshot, flags, class_at_payment, ip, history)
+      VALUES (${id}, ${kid.id}, ${req.authUser.id}, ${req.authUser.name || ''}, ${JSON.stringify(lines)}, ${feeAmount}, ${charge}, ${paidTotal}, ${utr}, ${utr}, ${ref}, ${paidOn}, ${String(b.paidTime || '').slice(0, 8)}, ${String(b.note || '').slice(0, 300)}, ${shot}, ${JSON.stringify(flags)}, ${(stu[0] && stu[0].class_name) || ''}, ${clientIp(req)}, ${hist})`;
+    auditNote(req.authUser.name, req.authUser.role, 'POST', 'upi-claim', id, `UTR ${utr} ${paidTotal} for ${kid.name}`, clientIp(req));
+    res.status(200).json({ ok: true, id, refCode: ref, flags });
+    notifyUsersByRole(['Admin', 'Accountant'], { title: 'UPI payment to verify', body: `${kid.name} (${kid.className} ${kid.section}): ${fmtMoneyServer(paidTotal)}`, tag: 'upi-claim', url: '/' }).catch(() => {});
+  } catch (err) {
+    if (err && /Duplicate entry/i.test(String(err.message))) return res.status(409).json({ error: 'This UTR has already been sent. Please do not send it again.' });
+    console.error('upi claim error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+app.post('/api/upi/claims/:id/cancel', async (req, res) => {
+  try {
+    if (!upiIsParent(req)) return res.status(403).json({ error: 'Not allowed.' }); await upiEnsureTable();
+    const r = await sql`SELECT * FROM upi_claims WHERE id = ${req.params.id} AND user_id = ${req.authUser.id}`; if (!r.length) return res.status(404).json({ error: 'Not found.' });
+    if (r[0].status !== 'submitted') return res.status(409).json({ error: 'This payment has already been checked.' });
+    await sql`UPDATE upi_claims SET status = 'cancelled', utr_key = NULL, history = ${upiHist(r[0], req.authUser.name || 'Parent', 'Withdrawn by the parent')} WHERE id = ${req.params.id} AND status = 'submitted'`;
+    return res.status(200).json({ ok: true });
+  } catch (err) { console.error('upi cancel error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.get('/api/upi/claims', async (req, res) => {
+  try {
+    if (!upiIsStaff(req)) return res.status(403).json({ error: 'You do not have permission to open this.' }); await upiEnsureTable();
+    const st = String(req.query.status || 'submitted'); const where = ['submitted', 'approved', 'rejected', 'cancelled'].includes(st) ? `WHERE c.status = '${st}'` : '';
+    const rows = await sql.query(`${UPI_SELECT} ${where} ORDER BY c.created_at DESC LIMIT 400`);
+    const all = await sql`SELECT status, COUNT(*) AS n, COALESCE(SUM(paid_total), 0) AS amt FROM upi_claims GROUP BY status`;
+    const today = todayInSchoolTz();
+    const td = await sql`SELECT COALESCE(SUM(credited_amount), 0) AS fee, COALESCE(SUM(charge_amount), 0) AS chg, COUNT(*) AS n FROM upi_claims WHERE status = 'approved' AND DATE(reviewed_at) = ${today}`;
+    const mo = await sql`SELECT COALESCE(SUM(charge_amount), 0) AS chg FROM upi_claims WHERE status = 'approved' AND reviewed_at >= ${today.slice(0, 8) + '01'}`;
+    const by = {}; all.forEach(r => { by[r.status] = { n: Number(r.n), amt: Number(r.amt) }; });
+    return res.status(200).json({ claims: rows.map(r => upiOut(r, true)), counts: by, today: { n: Number(td[0].n), fee: Number(td[0].fee), charge: Number(td[0].chg) }, monthCharge: Number(mo[0].chg) });
+  } catch (err) { console.error('upi list error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.get('/api/upi/count', async (req, res) => {
+  try {
+    if (!upiIsStaff(req)) return res.status(200).json({ waiting: 0 }); await upiEnsureTable();
+    const r = await sql`SELECT COUNT(*) AS n FROM upi_claims WHERE status = 'submitted'`; return res.status(200).json({ waiting: Number(r[0].n) });
+  } catch (err) { return res.status(200).json({ waiting: 0 }); }
+});
+app.get('/api/upi/claims/:id/screenshot', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Please sign in.' }); await upiEnsureTable();
+    const r = await sql`SELECT user_id, screenshot FROM upi_claims WHERE id = ${req.params.id}`; if (!r.length || !r[0].screenshot) return res.status(404).json({ error: 'No screenshot.' });
+    if (!upiIsStaff(req) && r[0].user_id !== req.authUser.id) return res.status(403).json({ error: 'Not allowed.' });
+    return res.status(200).json({ image: r[0].screenshot });
+  } catch (err) { console.error('upi screenshot error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/upi/claims/:id/reject', async (req, res) => {
+  try {
+    if (!upiIsStaff(req)) return res.status(403).json({ error: 'Only the Admin, Principal or Accountant can do this.' }); await upiEnsureTable();
+    const reason = String((req.body || {}).reason || '').trim().slice(0, 300); if (reason.length < 3) return res.status(400).json({ error: 'Please give a reason. The parent will see it.' });
+    const out = await withKeyLock('upiclaim:' + req.params.id, async () => {
+      const r = await sql`SELECT * FROM upi_claims WHERE id = ${req.params.id}`; if (!r.length) return { code: 404, error: 'Not found.' };
+      if (r[0].status !== 'submitted') return { code: 409, error: 'This payment has already been ' + r[0].status + '.' };
+      const who = (req.authUser.name || req.authUser.role);
+      await sql`UPDATE upi_claims SET status = 'rejected', utr_key = NULL, reject_reason = ${reason}, bank_check = ${String((req.body || {}).bankMatch || '').slice(0, 20)}, reviewed_by = ${who}, reviewed_role = ${req.authUser.role}, reviewed_at = NOW(),
+        history = ${upiHist(r[0], who, 'Rejected: ' + reason)} WHERE id = ${req.params.id}`;
+      return { ok: true, row: r[0] };
+    });
+    if (!out.ok) return res.status(out.code).json({ error: out.error });
+    auditNote(req.authUser.name, req.authUser.role, 'POST', 'upi-reject', req.params.id, reason.slice(0, 200), clientIp(req));
+    res.status(200).json({ ok: true });
+    sendPushToStudent(out.row.student_id, { title: 'Your UPI payment could not be matched', body: reason + ' Please contact the school office.', tag: 'upi-claim', url: '/' }).catch(() => {});
+  } catch (err) { console.error('upi reject error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/upi/claims/:id/approve', async (req, res) => {
+  try {
+    if (!upiIsStaff(req)) return res.status(403).json({ error: 'Only the Admin, Principal or Accountant can do this.' }); await upiEnsureTable();
+    const b = req.body || {}; const bankMatch = ['matched', 'amount_differs', 'not_found', 'manual'].includes(b.bankMatch) ? b.bankMatch : 'manual';
+    if (bankMatch !== 'matched' && b.seenInBank !== true) return res.status(400).json({ error: 'Please confirm that you have seen this credit in the bank account (UTR and amount).' });
+    const s = await upiSettings();
+    const out = await withKeyLock('upiclaim:' + req.params.id, async () => {
+      const rows = await sql`SELECT * FROM upi_claims WHERE id = ${req.params.id}`; if (!rows.length) return { code: 404, error: 'Not found.' };
+      const c = rows[0]; if (c.status !== 'submitted') return { code: 409, error: 'This payment has already been ' + c.status + '.' };
+      const lines = upiParse(c.fee_lines, []); let credit = Number(c.fee_amount); const origCredit = credit;
+      if (b.creditAmount != null && b.creditAmount !== '') {
+        credit = Math.round(Number(b.creditAmount) * 100) / 100;
+        if (!credit || credit <= 0 || credit > ONLINE_PAY_MAX) return { code: 400, error: 'Invalid amount.' };
+        if (lines.length > 1 && Math.abs(credit - origCredit) > 0.005) return { code: 400, error: 'This payment covers several fees, so the amount cannot be changed. Reject it and ask the parent to send it again.' };
+        if (credit > origCredit + 0.005) return { code: 400, error: 'The amount cannot be more than what the parent listed.' };
+      }
+      const charge = Math.abs(credit - origCredit) < 0.005 ? Number(c.charge_amount) : upiCalcCharge(credit, s.charge, c.paid_on);
+      const received = b.receivedTotal != null && b.receivedTotal !== '' ? Math.round(Number(b.receivedTotal) * 100) / 100 : Number(c.paid_total);
+      if (Math.abs(received - (credit + charge)) > 0.5 && b.acceptDifference !== true) return { code: 409, error: `The money received (${fmtMoneyServer(received)}) is not the fee plus charge (${fmtMoneyServer(credit + charge)}). Tick "accept the difference" if that is right.`, needsAccept: true };
+      const dup = await sql`SELECT receipt_no FROM payments WHERE ref = ${c.utr} AND (voided IS NULL OR voided = 0) LIMIT 1`; if (dup.length) return { code: 409, error: 'This UTR is already recorded as receipt ' + dup[0].receipt_no + '.' };
+      const lineCredits = lines.length === 1 ? [credit] : lines.map(l => Number(l.amount));
+      // Re-check extra fees against what is owed right now (the office may have recorded a payment meanwhile).
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].type === 'extra') { const e = await sql`SELECT amount, paid_amount FROM student_extra_fees WHERE id = ${lines[i].key} AND student_id = ${c.student_id}`; if (!e.length) return { code: 409, error: 'The extra fee no longer exists.' };
+          if (lineCredits[i] > (Number(e[0].amount) || 0) - (Number(e[0].paid_amount) || 0) + 0.005) return { code: 409, error: 'The fee has been paid or changed since this was sent. Reject it, or ask the parent.' }; }
+      }
+      const who = req.authUser.name || req.authUser.role, prefix = await receiptPrefixServer(), name = await studentFullName(c.student_id);
+      const nos = await issueReceiptNumbers({ prefix, count: lines.length, start: await receiptStartServer(), draftKey: ('upi_' + c.id).slice(0, 40), by: who, role: req.authUser.role });
+      const date = (c.paid_on && c.paid_on <= todayInSchoolTz()) ? c.paid_on : todayInSchoolTz(); const note = `Paid by UPI, UTR ${c.utr}${charge ? ' (UPI charge ' + fmtMoneyServer(charge) + ' collected separately)' : ''}. Verified by ${who}.`;
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i], payRowId = 'pay_upi_' + c.id + '_' + i;
+        if (!(await sql`SELECT id FROM payments WHERE id = ${payRowId}`).length) {
+          await sql`INSERT INTO payments (id, receipt_no, student_id, student_name, category, mode, amount, discount, instalment, date, note, class_at_payment, extra_fee_name, extra_fee_id, ref, collected_by)
+            VALUES (${payRowId}, ${nos[i]}, ${c.student_id}, ${name}, ${l.category || 'fee'}, 'UPI', ${lineCredits[i]}, 0, '', ${date}, ${note}, ${c.class_at_payment || ''}, ${l.extraFeeName || null}, ${l.extraFeeId || null}, ${i === 0 ? c.utr : c.utr + '-' + (i + 1)}, ${who + ' (UPI verified)'})`;
+          if (l.type === 'extra' && l.extraFeeId) await sql`UPDATE student_extra_fees SET paid = (COALESCE(paid_amount, 0) + ${lineCredits[i]} >= amount AND amount > 0), paid_amount = COALESCE(paid_amount, 0) + ${lineCredits[i]} WHERE id = ${l.extraFeeId}`;
+        }
+      }
+      await sql`UPDATE upi_claims SET status = 'approved', credited_amount = ${credit}, charge_amount = ${charge}, received_total = ${received}, bank_check = ${bankMatch}, receipt_nos = ${JSON.stringify(nos)},
+        reviewed_by = ${who}, reviewed_role = ${req.authUser.role}, reviewed_at = NOW(), history = ${upiHist(c, who, `Approved ${fmtMoneyServer(credit)} · receipt ${nos.join(', ')} · bank check: ${bankMatch}${Math.abs(received - (credit + charge)) > 0.5 ? ' · difference accepted' : ''}`)} WHERE id = ${c.id}`;
+      return { ok: true, nos, studentId: c.student_id, credit };
+    });
+    if (!out.ok) return res.status(out.code).json({ error: out.error, needsAccept: !!out.needsAccept });
+    auditNote(req.authUser.name, req.authUser.role, 'POST', 'upi-approve', req.params.id, 'receipts ' + out.nos.join(','), clientIp(req));
+    res.status(200).json({ ok: true, receiptNos: out.nos });
+    notifyFeePayment({ studentId: out.studentId, amount: out.credit, mode: 'UPI', receiptNo: out.nos.join(', ') }).catch(err => console.error('fee payment notification failed:', err));
+  } catch (err) { console.error('upi approve error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+
+// ---------- Second login on the same phone (a teacher who is also a parent) ----------
+// The person signs in normally, then adds their other login ONCE (username and password are checked exactly like a sign-in).
+// Both sessions stay alive and separate; "Switch login" just swaps which one the browser uses. Nothing is merged: each login
+// keeps its own role, permissions and password. Only Teacher <-> Parent/Student pairs are allowed, and never an account with
+// two-step sign-in, so this cannot be used to get round that protection.
+const SW_STAFF = ['Teacher'];
+const swPairOk = (a, b) => (SW_STAFF.includes(a) && PARENT_LOGIN_ROLES.includes(b)) || (PARENT_LOGIN_ROLES.includes(a) && SW_STAFF.includes(b));
+async function swAltSession(req, curRole) {
+  const alt = parseCookies(req).sid_alt; if (!alt) return null;
+  const rows = await sql`SELECT * FROM sessions WHERE id = ${hashSessionToken(alt)}`; if (!rows.length) return null;
+  const s = rows[0], now = Date.now();
+  // Only the person who paired the two logins can use the parked one: both sessions carry the same pair key.
+  const mine = parseCookies(req).sid ? await sql`SELECT pair_key FROM sessions WHERE id = ${hashSessionToken(parseCookies(req).sid)}` : [];
+  if (!s.pair_key || !mine.length || mine[0].pair_key !== s.pair_key) return null;
+  if (s.impersonated_by || new Date(s.expires_at).getTime() < now || now - new Date(s.created_at).getTime() > SESSION_ABSOLUTE_MAX_MS) return null;
+  if (!swPairOk(curRole, s.role)) return null;
+  return { row: s, token: alt };
+}
+function swCookies(req, sid, alt) {
+  const secure = isHttpsRequest(req) ? '; Secure' : '', max = Math.floor(SESSION_ABSOLUTE_MAX_MS / 1000);
+  return [`sid=${sid}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=${max}`, alt ? `sid_alt=${alt}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=${max}` : `sid_alt=; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=0`];
+}
+async function swDestroyAlt(req) {
+  const alt = parseCookies(req).sid_alt; if (alt) await sql`DELETE FROM sessions WHERE id = ${hashSessionToken(alt)}`.catch(() => {});
+}
+app.get('/api/account/switch', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.impersonatedBy || !(SW_STAFF.includes(req.authUser.role) || PARENT_LOGIN_ROLES.includes(req.authUser.role))) return res.status(200).json({ available: false });
+    const a = await swAltSession(req, req.authUser.role);
+    return res.status(200).json({ available: true, other: a ? { name: String(a.row.name || ''), role: a.row.role } : null, wants: SW_STAFF.includes(req.authUser.role) ? 'child' : 'teacher' });
+  } catch (err) { console.error('switch state error:', err); return res.status(200).json({ available: false }); }
+});
+app.post('/api/account/switch/add', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.impersonatedBy) return res.status(403).json({ error: 'Not available.' });
+    const cur = req.authUser, { username, password } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: 'Username and password are required.' });
+    const rateKey = loginRateKey(req, username), blocked = checkLoginRateLimit(rateKey) || userBlockSeconds(username);
+    if (blocked) return res.status(429).json({ error: `Too many failed attempts. Try again in ${Math.ceil(blocked / 60)} minute(s).` });
+    const rows = await sql`SELECT * FROM users WHERE LOWER(username) = LOWER(${String(username)}) AND deleted_at IS NULL`;
+    const bad = () => { recordLoginFailure(rateKey); userFailure(username); auditFailedLogin(req, username); return res.status(401).json({ error: 'Invalid username or password.' }); };
+    if (!rows.length) return bad();
+    const other = rows[0]; if (!(await bcrypt.compare(String(password), other.password || ''))) return bad();
+    recordLoginSuccess(rateKey);
+    if (other.id === cur.id) return res.status(400).json({ error: 'That is the login you are already using.' });
+    if (!swPairOk(cur.role, other.role)) return res.status(403).json({ error: cur.role === 'Teacher' ? 'Please enter the parent or student login of your child.' : 'Please enter your teacher login.' });
+    if (other.twofa_method) return res.status(403).json({ error: 'This login uses two-step sign-in and cannot be added here.' });
+    if (Number(other.must_change_password || 0)) return res.status(403).json({ error: 'Sign in with that login once on its own to set a new password, then add it here.' });
+    const curToken = parseCookies(req).sid; if (!curToken) return res.status(401).json({ error: 'Not logged in.' });
+    await swDestroyAlt(req);
+    await sql`DELETE FROM sessions WHERE user_id = ${other.id}`;
+    const token = crypto.randomBytes(32).toString('hex'), exp = new Date(Date.now() + SESSION_IDLE_MS);
+    const pairKey = crypto.randomBytes(12).toString('hex');
+    await sql`INSERT INTO sessions (id, user_id, role, name, expires_at, must_change, pair_key) VALUES (${hashSessionToken(token)}, ${other.id}, ${other.role}, ${other.name}, ${exp.toISOString()}, 0, ${pairKey})`;
+    await sql`UPDATE sessions SET pair_key = ${pairKey} WHERE id = ${hashSessionToken(curToken)}`;
+    if (PARENT_LOGIN_ROLES.includes(other.role)) sql`UPDATE users SET first_login_at = COALESCE(first_login_at, now()), last_login_at = now(), last_seen_at = now() WHERE id = ${other.id}`.catch(() => {});
+    else sql`UPDATE users SET last_login_at = now() WHERE id = ${other.id}`.catch(() => {});
+    // The new login becomes the active one; the one the person came from is parked in sid_alt.
+    res.setHeader('Set-Cookie', swCookies(req, token, curToken));
+    auditNote(cur.name, cur.role, 'LOGIN', 'switch-login', other.id, `added a second login (${other.role}) on this device`, clientIp(req));
+    return res.status(200).json({ ok: true });
+  } catch (err) { console.error('switch add error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/account/switch', async (req, res) => {
+  try {
+    if (!req.authUser || req.authUser.impersonatedBy) return res.status(403).json({ error: 'Not available.' });
+    const a = await swAltSession(req, req.authUser.role);
+    const curToken = parseCookies(req).sid;
+    if (!a || !curToken) { res.setHeader('Set-Cookie', swCookies(req, curToken || '', null).slice(1)); return res.status(409).json({ needLogin: true, error: 'Please add the other login again.' }); }
+    const exp = new Date(Math.min(Date.now() + SESSION_IDLE_MS, new Date(a.row.created_at).getTime() + SESSION_ABSOLUTE_MAX_MS));
+    await sql`UPDATE sessions SET expires_at = ${exp.toISOString()}, last_seen_at = now() WHERE id = ${hashSessionToken(a.token)}`;
+    res.setHeader('Set-Cookie', swCookies(req, a.token, curToken));
+    auditNote(req.authUser.name, req.authUser.role, 'LOGIN', 'switch-login', a.row.user_id, `switched to the ${a.row.role} login`, clientIp(req));
+    return res.status(200).json({ ok: true });
+  } catch (err) { console.error('switch error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
+});
+app.post('/api/account/switch/remove', async (req, res) => {
+  try {
+    if (!req.authUser) return res.status(401).json({ error: 'Not logged in.' });
+    await swDestroyAlt(req); res.setHeader('Set-Cookie', swCookies(req, parseCookies(req).sid || '', null).slice(1));
+    return res.status(200).json({ ok: true });
+  } catch (err) { console.error('switch remove error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
 
 // ---------- Exam plans: a teacher plans an exam for their own subject, the Principal/Admin approves ----------
@@ -6151,6 +6615,7 @@ async function completeLogin(req, res, user) {
   shaped.twofaEnabled = !!user.twofa_method;
   delete shaped.siblingIds; shaped.children = await childrenOfUser(user).catch(() => []);
   shaped.mustSetup2fa = ['Admin', 'Principal'].includes(user.role) && !user.twofa_method && await require2faOn();
+  shaped.mustChangePassword = !!Number(user.must_change_password || 0);
   await createSession(req, res, user);
   auditNote(user.name, user.role, 'LOGIN', 'sign-in', user.id, user.twofa_method ? 'with two-step code' : null, clientIp(req));
   return res.status(200).json(shaped);
@@ -6367,7 +6832,9 @@ app.get('/api/approvers', async (req, res) => {
 app.post('/api/logout', async (req, res) => {
   try {
     if (req.authUser) auditNote(req.authUser.name, req.authUser.role, 'LOGOUT', 'sign-in', req.authUser.id, null, clientIp(req));
+    await swDestroyAlt(req);
     await destroySession(req, res);
+    res.setHeader('Set-Cookie', ['sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0', 'sid_alt=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0']);
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('logout error:', err);
@@ -6411,8 +6878,10 @@ app.post('/api/account/password', async (req, res) => {
     if (!rows.length) return res.status(401).json({ error: 'Account no longer exists.' });
     const ok = await bcrypt.compare(current, rows[0].password || '');
     if (!ok) return res.status(400).json({ error: 'Current password is incorrect.' });
+    if (next === current) return res.status(400).json({ error: 'Choose a new password that is different from the current one.' });
     const hash = await bcrypt.hash(next, 10);
-    await sql`UPDATE users SET password = ${hash}, initial_pw = NULL WHERE id = ${req.authUser.id}`;
+    await sql`UPDATE users SET password = ${hash}, must_change_password = 0, initial_pw = NULL, first_login_at = COALESCE(first_login_at, now()) WHERE id = ${req.authUser.id}`;
+    await sql`UPDATE sessions SET must_change = 0 WHERE user_id = ${req.authUser.id}`.catch(() => {});
     // Anyone else signed in with the old password (another device, a stolen session) is signed out; this device stays in.
     const mine = parseCookies(req).sid ? hashSessionToken(parseCookies(req).sid) : '';
     await sql`DELETE FROM sessions WHERE user_id = ${req.authUser.id} AND id <> ${mine}`.catch(() => {});
@@ -6420,6 +6889,137 @@ app.post('/api/account/password', async (req, res) => {
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('account password error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+
+
+// ---------- Admin password tools, "log in as", and reset requests ----------
+// Passwords are one-way hashes, so nobody (Admin included) can read one back. Instead the Admin can set a
+// temporary password (the user must replace it at next sign-in) or open the account to help directly.
+function requireRealAdmin(req, res, allowVendorSupport) {
+  if (!req.authUser || req.authUser.role !== 'Admin' || (req.authUser.id === 'vendor-support' && !allowVendorSupport) || req.authUser.impersonatedBy) {
+    res.status(403).json({ error: 'Only the Admin can do this.' });
+    return false;
+  }
+  return true;
+}
+function makeTempPassword() {
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz', digits = '23456789';
+  const pick = (set) => set[crypto.randomInt(set.length)];
+  let out = '';
+  for (let i = 0; i < 6; i++) out += pick(letters);
+  out += pick(digits) + pick(digits);
+  return out;
+}
+app.post('/api/admin/users/reset-password', async (req, res) => {
+  try {
+    // A Vendor Support session may also do this, so a school that has lost its only Admin password can be recovered.
+    if (!requireRealAdmin(req, res, true)) return;
+    const { userId, newPassword } = req.body || {};
+    const rows = await sql`SELECT * FROM users WHERE id = ${String(userId || '')} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'User not found.' });
+    const target = rows[0];
+    if (target.id === req.authUser.id) return res.status(400).json({ error: 'Use My Account to change your own password.' });
+    const temp = String(newPassword || '').trim() || makeTempPassword();
+    const problem = passwordProblem(temp, target.role);
+    if (problem) return res.status(400).json({ error: problem });
+    const hash = await bcrypt.hash(temp, 10);
+    await sql`UPDATE users SET password = ${hash}, must_change_password = 1, initial_pw = NULL WHERE id = ${target.id}`;
+    await sql`DELETE FROM sessions WHERE user_id = ${target.id}`.catch(() => {});
+    await sql`UPDATE password_reset_requests SET status = 'done', resolved_at = now() WHERE user_id = ${target.id} AND status = 'pending'`.catch(() => {});
+    auditNote(req.authUser.name, req.authUser.role, 'PASSWORD_RESET', 'users', target.id, `temporary password set for ${target.username} (${target.role}); user must change it at next sign-in`, clientIp(req));
+    return res.status(200).json({ ok: true, tempPassword: temp, username: target.username });
+  } catch (err) {
+    console.error('admin reset password error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+app.post('/api/admin/users/impersonate', async (req, res) => {
+  try {
+    if (!requireRealAdmin(req, res)) return;
+    const rows = await sql`SELECT * FROM users WHERE id = ${String((req.body && req.body.userId) || '')} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'User not found.' });
+    const target = rows[0];
+    if (target.id === req.authUser.id) return res.status(400).json({ error: 'You are already signed in as this user.' });
+    if (target.role === 'Admin') return res.status(403).json({ error: 'You cannot open another Admin account.' });
+    // The user's own session is left alone; the Admin's cookie simply switches to a marked "viewing as" session.
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + SESSION_IDLE_MS);
+    const label = `${target.name} [via ${req.authUser.name}]`.slice(0, 190);
+    await sql`DELETE FROM sessions WHERE user_id = ${req.authUser.id}`;
+    await sql`INSERT INTO sessions (id, user_id, role, name, expires_at, must_change, impersonated_by)
+      VALUES (${hashSessionToken(token)}, ${target.id}, ${target.role}, ${label}, ${expiresAt.toISOString()}, 0, ${req.authUser.id})`;
+    const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `sid=${token}; HttpOnly${secureFlag}; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_ABSOLUTE_MAX_MS / 1000)}`);
+    auditNote(req.authUser.name, req.authUser.role, 'IMPERSONATE_START', 'users', target.id, `opened the account of ${target.username} (${target.role})`, clientIp(req));
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('impersonate error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+app.post('/api/account/stop-viewing-as', async (req, res) => {
+  try {
+    if (!req.authUser || !req.authUser.impersonatedBy) return res.status(400).json({ error: 'You are not viewing as another user.' });
+    const rows = await sql`SELECT * FROM users WHERE id = ${req.authUser.impersonatedBy} AND deleted_at IS NULL`;
+    if (!rows.length) { await destroySession(req, res); return res.status(401).json({ error: 'Please sign in again.' }); }
+    const admin = rows[0];
+    await destroySession(req, res);
+    auditNote(admin.name, admin.role, 'IMPERSONATE_END', 'users', req.authUser.id, 'returned to own account', clientIp(req));
+    await createSession(req, res, admin);
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('stop viewing as error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+// Public: someone who forgot their password asks the office to reset it. The answer never reveals whether the
+// username exists, and requests are limited per address so it cannot be used to flood the Admin's list.
+const resetReqHits = new Map();
+app.post('/api/password-reset-request', async (req, res) => {
+  const generic = { ok: true, message: 'If this username exists, the school office has been notified. Please contact the office to receive a temporary password.' };
+  try {
+    const ip = clientIp(req) || 'unknown';
+    const now = Date.now();
+    const rec = resetReqHits.get(ip) || { n: 0, since: now };
+    if (now - rec.since > 3600000) { rec.n = 0; rec.since = now; }
+    rec.n++; resetReqHits.set(ip, rec);
+    if (rec.n > 5) return res.status(429).json({ error: 'Too many requests. Please contact the school office.' });
+    const username = String((req.body && req.body.username) || '').trim().slice(0, 100);
+    if (!username) return res.status(400).json({ error: 'Enter your username.' });
+    const rows = await sql`SELECT id, username FROM users WHERE LOWER(username) = LOWER(${username}) AND deleted_at IS NULL`;
+    if (rows.length) {
+      const u = rows[0];
+      const pend = await sql`SELECT id FROM password_reset_requests WHERE user_id = ${u.id} AND status = 'pending'`;
+      if (!pend.length) {
+        await sql`INSERT INTO password_reset_requests (id, user_id, username, ip) VALUES (${crypto.randomBytes(12).toString('hex')}, ${u.id}, ${u.username}, ${ip.slice(0, 64)})`;
+        auditNote(u.username, '', 'PASSWORD_RESET_REQUEST', 'users', u.id, 'asked the office to reset their password', ip);
+      }
+    }
+    return res.status(200).json(generic);
+  } catch (err) {
+    console.error('password reset request error:', err);
+    return res.status(200).json(generic);
+  }
+});
+app.get('/api/admin/users/reset-requests', async (req, res) => {
+  try {
+    if (!requireRealAdmin(req, res)) return;
+    const rows = await sql`SELECT r.id, r.user_id, r.username, r.created_at, u.name, u.role FROM password_reset_requests r
+      LEFT JOIN users u ON u.id = r.user_id WHERE r.status = 'pending' ORDER BY r.created_at DESC LIMIT 100`;
+    return res.status(200).json(rows.map(r => ({ id: r.id, userId: r.user_id, username: r.username, name: r.name || '', role: r.role || '', requestedAt: r.created_at })));
+  } catch (err) {
+    console.error('reset requests error:', err);
+    return res.status(500).json({ error: 'Something went wrong on the server.' });
+  }
+});
+app.post('/api/admin/users/dismiss-reset-request', async (req, res) => {
+  try {
+    if (!requireRealAdmin(req, res)) return;
+    await sql`UPDATE password_reset_requests SET status = 'dismissed', resolved_at = now() WHERE id = ${String((req.body && req.body.id) || '')}`;
+    return res.status(200).json({ ok: true });
+  } catch (err) {
     return res.status(500).json({ error: 'Something went wrong on the server.' });
   }
 });
@@ -7274,9 +7874,14 @@ app.get('/api/me', async (req, res) => {
     const shaped = simpleToAppShape(rows[0], SIMPLE_RESOURCES.users.fields);
     delete shaped.password;
     shaped.moduleAccess = getModuleAccess();
+    shaped.mustChangePassword = !req.authUser.impersonatedBy && !!Number(rows[0].must_change_password || 0);
     delete shaped.siblingIds; shaped.children = await childrenOfUser(rows[0]).catch(() => []);
     shaped.mustSetup2fa = !req.authUser.impersonatedBy && ['Admin', 'Principal'].includes(rows[0].role) && await userNeeds2faSetup(req.authUser.id);
     try { shaped.branch = await branchInfoForMe(req); } catch (_) { shaped.branch = { multi: false }; }
+    if (req.authUser.impersonatedBy) {
+      const a = await sql`SELECT name FROM users WHERE id = ${req.authUser.impersonatedBy}`.catch(() => []);
+      shaped.impersonating = { byId: req.authUser.impersonatedBy, byName: a.length ? a[0].name : 'Admin' };
+    }
     return res.status(200).json(shaped);
   } catch (err) {
     console.error('me error:', err);

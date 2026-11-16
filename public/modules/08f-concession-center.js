@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Concession Center — Manage Fee → Discounts.
    Rebuilds the Discounts screen (overview, filters, per-head breakdown, audit-friendly
    cancel, export) and the "Add discount" form on top of the existing data model

@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ===== Notification Center + staff reminders =====
    Why this exists: reminders sent from Staff → Teacher Activity were saved on the server
    but no screen ever read them back, and phone push was only offered to students, parents

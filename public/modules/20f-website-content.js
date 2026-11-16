@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Website module (sidebar: Website → Manage Website). One screen with tabs for everything the public school
    website shows: Overview, Home & Banner, Pages, Alumni & Achievements, Policies, Gallery, Notices, Enquiries.
    This file is screen layout only. Nothing about how data is stored or what the public website receives changed:

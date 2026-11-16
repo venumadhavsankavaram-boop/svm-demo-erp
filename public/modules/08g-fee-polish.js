@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Manage Fee polish — layout and look only. No fee logic, saving or calculation is changed here.
    Tab bar on one row, summary cards on Fee Types / Extra Fees / Late Fees, a two-column Late Fees page,
    and a proper style for the secondary button. */

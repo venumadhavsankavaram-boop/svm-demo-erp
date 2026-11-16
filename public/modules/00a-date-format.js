@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Dates everywhere in the ERP are shown as dd/mm/yyyy (e.g. 23/10/2026), times as 9:53 am.
    Loaded FIRST so that every screen, print window (receipt, statement, report card) and Excel/PDF export that
    builds dates in the usual ISO form (2026-10-23) or with month names (23 Oct 2026) is shown the Indian way.

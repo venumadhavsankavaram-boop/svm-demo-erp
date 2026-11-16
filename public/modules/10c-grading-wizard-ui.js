@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
   /* ===== GRADING SCHEMES — one place, one wizard =====================================
      Replaces the old "Grading Scale" + "Consolidation Scale" tabs. A scheme is a named set
      of grade bands (From % is the only number you type; the "To %" is derived, so bands can

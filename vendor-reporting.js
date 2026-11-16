@@ -95,7 +95,16 @@ const PLAN_MODULE_TO_ERP_KEYS = {
   fees: ['managefee'],
   attendance: ['attendance'],
   exams: ['exams', 'result'],
-  transport_library: ['transport', 'library'],
+  transport_library: ['transport', 'library'], // older plans (Transport + Library together) keep working
+  // Finer choices (added so a school can buy only what it needs):
+  accounting: ['accounting'],
+  staff_payroll: ['staff'],
+  inventory: ['inventory'],
+  hostel: ['hostel'],
+  transport: ['transport'],
+  library: ['library'],
+  timetable_homework: ['timetable', 'syllabus'],
+  communications: ['announcements', 'inbox', 'noticeboard'],
 };
 
 // Mirrors accessStatus above in every way that matters: never set locally,
@@ -104,7 +113,35 @@ const PLAN_MODULE_TO_ERP_KEYS = {
 // available) is both the starting value and what a school with no Plan set,
 // an "All Modules" Plan, or an unreachable/not-yet-configured dashboard
 // gets. Only "ERP — Selected Modules" ever produces `restricted: true`.
-let moduleAccess = { restricted: false, enabledKeys: [] };
+let moduleAccess = { restricted: false, enabledKeys: [], website: true };
+
+// The plan this school was SOLD, set at launch time in the school's own
+// secrets as SCHOOL_PLAN so it still applies before the first heartbeat and
+// when the dashboard is unreachable (the dashboard alone fails open):
+//   SCHOOL_PLAN=all_website                    ERP, every module, plus the public website
+//   SCHOOL_PLAN=all                            ERP only, every module (no website screens)
+//   SCHOOL_PLAN=selected:fees,attendance       ERP only, just these buckets
+//        buckets: fees, attendance, exams, accounting, staff_payroll, inventory, hostel,
+//                 transport, library, timetable_homework, communications (transport_library = old combined one)
+// Unset = no local plan (every module, website screens shown) - exactly the
+// behaviour of every school launched before this existed.
+// A plan the dashboard confirms by heartbeat always wins over this; this is
+// only what applies until then, or when the dashboard has no plan for the school.
+function localPlanFromEnv() {
+  const raw = String(process.env.SCHOOL_PLAN || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === 'all_website' || raw === 'erp_all_modules_website') return { restricted: false, enabledKeys: [], website: true };
+  if (raw === 'all' || raw === 'erp_all_modules') return { restricted: false, enabledKeys: [], website: false };
+  const m = raw.match(/^(?:selected|erp_selected_modules)\s*:\s*(.*)$/);
+  if (m) {
+    const enabledKeys = [];
+    m[1].split(',').map(x => x.trim()).filter(Boolean).forEach(b => { if (PLAN_MODULE_TO_ERP_KEYS[b]) enabledKeys.push(...PLAN_MODULE_TO_ERP_KEYS[b]); });
+    return { restricted: true, enabledKeys, website: false };
+  }
+  return null; // not understood: stay open rather than lock a school out by a typo
+}
+const LOCAL_PLAN = localPlanFromEnv();
+if (LOCAL_PLAN) moduleAccess = LOCAL_PLAN;
 
 /**
  * Read by server.js (to gate the API) and forwarded to the client (to hide
@@ -157,10 +194,15 @@ async function sendHeartbeat() {
       (Array.isArray(result.planModules) ? result.planModules : []).forEach(m => {
         if (PLAN_MODULE_TO_ERP_KEYS[m]) enabledKeys.push(...PLAN_MODULE_TO_ERP_KEYS[m]);
       });
-      moduleAccess = { restricted: true, enabledKeys };
+      moduleAccess = { restricted: true, enabledKeys, website: false };
+    } else if (result.planType === 'erp_all_modules') {
+      moduleAccess = { restricted: false, enabledKeys: [], website: false };
+    } else if (result.planType === 'erp_all_modules_website') {
+      moduleAccess = { restricted: false, enabledKeys: [], website: true };
     } else {
-      // null (no plan set yet), 'erp_all_modules', or 'erp_all_modules_website' — unrestricted.
-      moduleAccess = { restricted: false, enabledKeys: [] };
+      // null: the dashboard has no plan for this school yet. Keep what the
+      // school's own SCHOOL_PLAN says, or open if none is set.
+      moduleAccess = LOCAL_PLAN || { restricted: false, enabledKeys: [], website: true };
     }
   }
 }

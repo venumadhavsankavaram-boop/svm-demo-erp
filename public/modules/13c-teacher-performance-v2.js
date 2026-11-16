@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ============================================================================
    Teacher Performance v2 — loads its own data, explains empty results,
    adds the measures other school ERPs show.

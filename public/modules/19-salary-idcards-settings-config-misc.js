@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const ACCT_BANK_ACCOUNTS_KEY = "acct-bank-accounts";
   const ACCT_FIXED_ASSETS_KEY = "acct-fixed-assets";
   const ACCT_OTHER_LEDGERS_KEY = "acct-other-ledgers";

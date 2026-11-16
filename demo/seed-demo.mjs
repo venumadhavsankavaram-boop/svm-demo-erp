@@ -230,13 +230,14 @@ async function main() {
 
   await api('PUT', '/api/school-info', {
     name: DEMO_NAME, tagline: 'Learning that lights the way', udise: '', schoolCode: 'DEM001', receiptCode: 'DEM', regNumber: 'DEMO/2026/001',
-    recognition: 'Demo school — sample data only', email: 'office@demo-school.example.com', phone: '08412345678', whatsapp: '9876500000',
+    recognition: 'Demo school - sample data only', email: 'office@demo-school.example.com', phone: '08412345678', whatsapp: '9876500000',
     website: 'www.demo-school.example.com', state: 'Telangana', district: 'Demo District', pin: '500001', address: '1-2-3, Demo Nagar, Demo City',
     workingDays: 220, principalName: 'Mrs. Sunitha Rao', logo: '', principalSignature: '', leadership: [],
   });
   const fs = {}; CLASSES.forEach(c => { fs[c] = { admission: ADMISSION(c), fee: FEES[c], bus: 0, stock: 0 }; });
   await api('PUT', '/api/fee-structure', fs);
   await api('PUT', '/api/kv/receipt-settings', { startNumber: 1 });
+  await api('PUT', '/api/upi/settings', { enabled: true, upiId: 'demo-school@upi', payeeName: 'Demo School', instructions: 'Scan the QR or pay to the UPI ID, then submit the transaction reference. The office verifies and issues the receipt.', requireScreenshot: false, maxAgeDays: 10, charge: { mode: 'none' } });
   await api('PUT', '/api/kv/fee-schedule', { '2026-27': { bus: { due: '2026-07-31', mode: 'yearly' }, fee: { due: '2026-10-31', mode: 'yearly' }, stock: { due: '', mode: 'yearly' }, hostel: { due: '', mode: 'yearly' } } });
   await api('PUT', '/api/kv/exam-types', [
     { id: 'etype_demo_pri', name: 'FA - PRIMARY', group: 'formative', scopeClasses: CLASSES.slice(3, 8) },

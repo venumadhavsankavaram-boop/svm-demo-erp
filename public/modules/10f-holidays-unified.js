@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ============================================================================
    Holidays — ONE list for the whole ERP.
    Attendance → Holidays and Exams → Holidays are two windows onto the same data

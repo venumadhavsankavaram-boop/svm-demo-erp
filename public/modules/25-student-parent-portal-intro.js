@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 let myProfileTab = 'notifications';
   // Whether THIS school has online fee payment turned on — a deploy-time
   // choice (see /api/payments/status and razorpayConfigured() in server.js),

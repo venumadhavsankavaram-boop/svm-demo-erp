@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ===== Deleted Items (Recycle Bin) =====
    One page for everything that has been removed but can still be answered for:
      - Students  : soft-deleted (restorable for TRASH_RETENTION_DAYS, then auto-purged)

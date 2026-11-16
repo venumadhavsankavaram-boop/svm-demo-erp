@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Two-step sign-in helpers: authenticator-app codes (TOTP, RFC 6238), recovery codes and a tiny
    built-in email sender (SMTP) for the "code by email" option. No outside packages. */
 import crypto from 'crypto';

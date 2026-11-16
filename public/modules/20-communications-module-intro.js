@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const COMMS_MESSAGES_KEY = "comms-messages";
   const ADMISSION_INQUIRIES_KEY = "admission-inquiries";
   const WEBSITE_GALLERY_KEY = "website-gallery";

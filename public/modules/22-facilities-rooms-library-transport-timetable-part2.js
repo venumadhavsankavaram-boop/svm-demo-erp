@@ -1,50 +1,4 @@
 
-  let invCheckoutSearchMode = 'name', invCheckoutBrowseClass = '', invCheckoutBrowseSection = '';
-  let invCheckoutDate = new Date().toISOString().slice(0,10);
-  function openInventorySellCart(){
-    invCart = [];
-    invCartCategory = 'All'; invCartSubCategory = 'All'; invCartSearch = '';
-    invCheckoutBuyerType = 'Student'; invCheckoutStudentId = ''; invCheckoutSearchMode = 'name';
-    invCheckoutBrowseClass = ''; invCheckoutBrowseSection = '';
-    invCheckoutDate = new Date().toISOString().slice(0,10);
-    inventoryTab = 'sellcart';
-    invQuickOpen = false;
-    renderInventoryBody();
-  }
-  function setInvCartCategory(c){
-    invCartCategory = c;
-    invCartSubCategory = 'All'; // picking a new top-level category always clears the sub-filter
-    renderInventorySellCart(document.getElementById('inventoryBody'));
-  }
-  function setInvCartSubCategory(sc){
-    invCartSubCategory = sc;
-    renderInventorySellCart(document.getElementById('inventoryBody'));
-  }
-  function quickSellItem(itemId){
-    openInventorySellCart();
-    addToInvCart(itemId);
-  }
-  function closeInventorySell(){
-    invCart = [];
-    inventoryTab = 'items';
-    renderInventoryBody();
-  }
-  let invCartLastAddTime = {};
-  function addToInvCart(itemId){
-    const now = Date.now();
-    if(invCartLastAddTime[itemId] && (now - invCartLastAddTime[itemId]) < 400) return; // guard: a single click/tap should never register twice
-    invCartLastAddTime[itemId] = now;
-    const it = inventoryItems.find(x => x.id === itemId);
-    if(!it || it.quantity <= 0) return;
-    const existing = invCart.find(c => c.itemId === itemId);
-    if(existing){
-      if(existing.qty >= it.quantity){ showToast('Not enough stock.'); return; }
-      existing.qty++;
-    }else{
-      invCart.push({ itemId, name:it.name, price:it.sellingPrice, cost:it.costPrice, qty:1, discount:0, stock:it.quantity });
-    }
-    renderInventoryBody();
-  }
   function removeFromInvCart(i){
     invCart.splice(i,1);
     renderInventoryBody();
@@ -589,6 +543,7 @@
       <div class="profile-card" style="max-width:720px; margin-bottom:24px;">
         <h4>💳 Online payments</h4>
         <p style="font-size:0.78rem; color:var(--ink-soft); margin:6px 0 12px;">Fees paid by parents through Razorpay. A payment that was made but not yet recorded (for example the parent closed the page) is found automatically every few minutes — or press <b>Check now</b>.</p>
+        <div id="onlinePayHealth" style="margin:0 0 12px; font-size:0.8rem;">Loading status…</div>
         <button class="btn btn-sm" type="button" onclick="loadOnlinePayments()">Refresh</button>
         <button class="btn btn-sm" type="button" onclick="checkOnlinePaymentsNow()" style="margin-left:6px;">Check now</button>
         <div id="onlinePaymentsBox" style="margin-top:12px; font-size:0.8rem;">Loading…</div>
@@ -660,7 +615,7 @@
   const AUDIT_WORDS = {
     POST:['Added','#0a8f6a'], PUT:['Changed','#b7791f'], DELETE:['Deleted','#C0264B'], RESTORE:['Restored','#0a8f6a'], SETTING:['Saved settings / list','#b7791f'], CORRECTION:['Admin correction of a locked entry','#C0264B'],
     LOGIN:['Signed in','#0a8f6a'], LOGIN_FAILED:['Failed sign-in','#C0264B'], LOGIN_BLOCKED:['Sign-in blocked (too many tries)','#C0264B'], LOGOUT:['Signed out','#6b7280'],
-    TWOFA_FAILED:['Wrong two-step code','#C0264B'], PASSWORD_CHANGED:['Changed own password','#b7791f'], BACKUP_DOWNLOAD:['Downloaded full backup','#b7791f'], AUDIT_EXPORT:['Downloaded audit trail','#6b7280'],
+    TWOFA_FAILED:['Wrong two-step code','#C0264B'], PASSWORD_CHANGED:['Changed own password','#b7791f'], PASSWORD_RESET:['Admin reset a password','#C0264B'], PASSWORD_RESET_REQUEST:['Asked office to reset password','#6b7280'], IMPERSONATE_START:['Admin opened a user account','#C0264B'], IMPERSONATE_END:['Admin returned to own account','#6b7280'], BACKUP_DOWNLOAD:['Downloaded full backup','#b7791f'], AUDIT_EXPORT:['Downloaded audit trail','#6b7280'],
   };
   const AUDIT_NOTES = { twofa_enabled_app:'Turned ON two-step sign-in (app)', twofa_enabled_email:'Turned ON two-step sign-in (email)', twofa_disabled:'Turned OFF two-step sign-in', twofa_reset:'Reset someone\'s two-step sign-in', twofa_recovery_code_used:'Signed in with a recovery code', voucher_gap:'Voucher number gap noted' };
   function auditPretty(s){ s = String(s || '').replace(/[-_]+/g, ' ').trim(); return s ? s.charAt(0).toUpperCase() + s.slice(1) : '—'; }
@@ -715,4 +670,32 @@
     const icon = tone === 'good' ? '✅' : tone === 'warn' ? '🟠' : '🔴';
     const age = days <= 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago';
     return { days, tone, text: icon + ' Last backup: <b>' + when + '</b> (' + age + ') — ' + Number(lb.tables||0) + ' tables, ' + Number(lb.rows||0).toLocaleString('en-IN') + ' records' + (lb.by ? ' · by ' + escapeHtml(lb.by) : '') + (tone === 'good' ? '' : '. <b>Download a fresh one.</b>') };
+  }
+  async function refreshBackupStatusLine(){
+    const el = document.getElementById('backupStatusLine'); if(!el) return;
+    try{
+      const res = await fetch('/api/backup/status'); await throwIfNotOk(res);
+      const info = backupAgeInfo((await res.json()).lastBackup);
+      el.innerHTML = info.text;
+      el.style.background = info.tone === 'good' ? 'rgba(0,150,120,.10)' : info.tone === 'warn' ? 'rgba(230,160,0,.14)' : 'rgba(192,38,75,.10)';
+    }catch(e){ el.textContent = 'Could not check the last backup.'; }
+  }
+  async function loadFeeReminderSettings(){
+    const el = document.getElementById('feeRemBox'); if(!el) return;
+    try{
+      const res = await fetch('/api/fee-reminders/settings'); await throwIfNotOk(res);
+      const d = await res.json(), s = d.settings;
+      el.innerHTML = `
+        <label style="display:flex; gap:8px; align-items:center; margin-bottom:10px;"><input type="checkbox" id="frEnabled" ${s.enabled ? 'checked' : ''}> <b>Send fee reminders automatically</b></label>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin-bottom:10px;">
+          <label>"Due soon" alert, days before the due date<input class="input" type="number" min="1" max="30" id="frLead" value="${s.leadDays}" style="width:100%;"></label>
+          <label>"Still overdue" repeat every (days)<input class="input" type="number" min="3" max="60" id="frEvery" value="${s.repeatEveryDays}" style="width:100%;"></label>
+          <label>…and at most this many times (0 = no repeats)<input class="input" type="number" min="0" max="12" id="frMax" value="${s.repeatMax}" style="width:100%;"></label>
+          <label>Send from this hour of the day (0–23)<input class="input" type="number" min="0" max="23" id="frHour" value="${s.sendHour}" style="width:100%;"></label>
+        </div>
+        <p style="font-size:0.74rem; color:var(--ink-soft); margin:0 0 10px;">Alerts go to ${d.push ? 'app/phone notifications' : '<b>(phone notifications are not set up on this server)</b>'}${d.whatsapp ? ' and WhatsApp' : ''}. The first notice for an overdue installment is only sent if it fell due in the last 14 days, so turning this on never floods parents about old dues.</p>
+        <button class="btn btn-primary btn-sm" type="button" onclick="saveFeeReminderSettings()">Save</button>
+        <button class="btn btn-sm" type="button" onclick="previewFeeReminders()" style="margin-left:6px;">Who would be reminded today?</button>
+        <div id="feeRemPreview" style="margin-top:12px;"></div>`;
+    }catch(e){ el.textContent = 'Could not load (' + e.message + ').'; }
   }

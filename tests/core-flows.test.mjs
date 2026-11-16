@@ -101,7 +101,7 @@ try {
   const again = await call('POST', '/api/student-logins/bulk', A.ck, { className: '3rd Class', section: 'B', password: 'student@123' });
   ok('running it again creates nobody twice', again.s === 200 && again.j.created.length === 0 && again.j.alreadyHave === 3, again.j);
   const pl = await login('ravikumar', 'student@123'); ok('the parent signs in with the starting password', pl.s === 200, pl.s);
-  const me = await call('GET', '/api/me', pl.ck); ok('and can sign in as a Parent (demo has no forced-change screen)', me.s === 200 && me.j.role === 'Parent', me.j);
+  const me = await call('GET', '/api/me', pl.ck); ok('and is told to choose their own password', me.s === 200 && me.j.mustChangePassword === true && me.j.role === 'Parent', me.j);
   const sl = await call('GET', '/api/student-logins/slips?className=3rd%20Class&section=B', A.ck);
   ok('the slips list has all three with the starting password', sl.s === 200 && sl.j.slips.length === 3 && sl.j.slips.every(x => x.password === 'student@123'), sl.j);
   ok('slips for another class are not mixed in', (await call('GET', '/api/student-logins/slips?className=1st%20Class', A.ck)).j.slips.length === 0);

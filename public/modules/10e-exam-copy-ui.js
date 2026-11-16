@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
   /* ===== COPY SUBJECTS FROM ANOTHER EXAM =============================================
      Setting up subjects class-by-class for every exam is slow. This wizard copies the whole
      subject set-up (subjects, max marks + internal split, teachers, countable / elective

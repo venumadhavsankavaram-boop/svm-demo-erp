@@ -1,4 +1,5 @@
 
+  OBJECT_BACKED_KEYS[REPORT_TEMPLATES_KEY] = '/api/kv/' + REPORT_TEMPLATES_KEY;
   let reportTemplates = [];
   let templatesView = 'list';
   let editingTemplateId = '';

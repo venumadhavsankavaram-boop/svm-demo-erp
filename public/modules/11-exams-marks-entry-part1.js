@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const PAGE_SIZES_MM = { A4: [210, 297], Legal: [215.9, 355.6] };
   let roomAllotSubTab = 'hallTickets';
   let roomAllotExamId = '';

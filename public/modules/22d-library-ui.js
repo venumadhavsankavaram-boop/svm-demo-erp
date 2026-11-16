@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ============================================================================
    Facilities -> Library screens: catalogue (cards / table), book editor,
    Issue & Return (2-step flow), Overdue & Fines, Settings.

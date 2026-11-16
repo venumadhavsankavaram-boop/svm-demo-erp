@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ===== FEE STRUCTURE: Remittance Schedule panel =====
  *
  * Lets an admin choose, for each fee head, whether it is paid Yearly, in Terms

@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* ============================================================================
    Hostel screens (Rooms / Allot / Roster) - presentation only.
    Loads after module 21 and overrides its render functions. Every save /

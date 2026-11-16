@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 const SYLLABUS_TAB_PERM_KEYS = { tracker:'syllabus_tracker', homework:'syllabus_homework' };
   let syllabusTab = 'tracker';
   let syClass = '', sySection = '', sySubject = '';
@@ -761,3 +763,49 @@ const SYLLABUS_TAB_PERM_KEYS = { tracker:'syllabus_tracker', homework:'syllabus_
   let invCartSubCategory = 'All';
   let invCartSearch = '';
   let invCheckoutBuyerType = 'Student', invCheckoutStudentId = '', invCheckoutPaymentMode = 'Cash';
+  let invCheckoutSearchMode = 'name', invCheckoutBrowseClass = '', invCheckoutBrowseSection = '';
+  let invCheckoutDate = new Date().toISOString().slice(0,10);
+  function openInventorySellCart(){
+    invCart = [];
+    invCartCategory = 'All'; invCartSubCategory = 'All'; invCartSearch = '';
+    invCheckoutBuyerType = 'Student'; invCheckoutStudentId = ''; invCheckoutSearchMode = 'name';
+    invCheckoutBrowseClass = ''; invCheckoutBrowseSection = '';
+    invCheckoutDate = new Date().toISOString().slice(0,10);
+    inventoryTab = 'sellcart';
+    invQuickOpen = false;
+    renderInventoryBody();
+  }
+  function setInvCartCategory(c){
+    invCartCategory = c;
+    invCartSubCategory = 'All'; // picking a new top-level category always clears the sub-filter
+    renderInventorySellCart(document.getElementById('inventoryBody'));
+  }
+  function setInvCartSubCategory(sc){
+    invCartSubCategory = sc;
+    renderInventorySellCart(document.getElementById('inventoryBody'));
+  }
+  function quickSellItem(itemId){
+    openInventorySellCart();
+    addToInvCart(itemId);
+  }
+  function closeInventorySell(){
+    invCart = [];
+    inventoryTab = 'items';
+    renderInventoryBody();
+  }
+  let invCartLastAddTime = {};
+  function addToInvCart(itemId){
+    const now = Date.now();
+    if(invCartLastAddTime[itemId] && (now - invCartLastAddTime[itemId]) < 400) return; // guard: a single click/tap should never register twice
+    invCartLastAddTime[itemId] = now;
+    const it = inventoryItems.find(x => x.id === itemId);
+    if(!it || it.quantity <= 0) return;
+    const existing = invCart.find(c => c.itemId === itemId);
+    if(existing){
+      if(existing.qty >= it.quantity){ showToast('Not enough stock.'); return; }
+      existing.qty++;
+    }else{
+      invCart.push({ itemId, name:it.name, price:it.sellingPrice, cost:it.costPrice, qty:1, discount:0, stock:it.quantity });
+    }
+    renderInventoryBody();
+  }

@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Dashboard access — hides the Dashboard sections a role has not been given.
    The choices are made per role in Roles & Permissions → Overview → Dashboard.
    A role with no saved choice for a section keeps seeing it as long as it can see the

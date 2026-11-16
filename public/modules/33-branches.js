@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Multi-branch support — the screens.
    The server does the real work (see branches.js): it keeps every branch's records apart and answers each request
    for ONE branch (or "all branches", read only). This file adds:

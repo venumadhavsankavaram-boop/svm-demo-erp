@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 SVM EdTech. All rights reserved. Proprietary and confidential.
+   Unauthorised copying, modification or distribution of this file is prohibited. See LICENSE. */
 /* Shows the receipt / voucher number ON the form while it is being filled in.
    Fee receipts, family fee receipts, ledger quick-pay, income / payment / journal vouchers and refunds.
    The number shown is the one the server has set aside for this entry (the same one the Save button uses),
