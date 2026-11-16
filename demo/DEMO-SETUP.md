@@ -23,7 +23,7 @@ Leave **unset**: `RAZORPAY_*`, `WHATSAPP_*`, `VAPID_*`, `VENDOR_*`, `BIOMETRIC_A
 
 ## Run the seed by hand
 `DEMO_MODE=true node demo/seed-demo.mjs --base=https://<demo-address>` (the server must be running).
-The script refuses to run unless the database is empty or already holds "Sunrise Public School".
+The script refuses to run unless the database is empty or already holds "Demo School" (or the older "Sunrise Public School").
 
 ## Demo logins (password above)
 demo.admin · demo.principal · demo.accountant · demo.office · demo.teacher · demo.parent · demo.student

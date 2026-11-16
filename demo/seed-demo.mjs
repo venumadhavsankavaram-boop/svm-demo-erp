@@ -1,18 +1,18 @@
 // Demo school sample data  —  node demo/seed-demo.mjs [--base=http://127.0.0.1:3000]
 //
-// Fills a DEMO database with a fictional school ("Sunrise Public School"): students, staff,
+// Fills a DEMO database with a fictional school ("Demo School"): students, staff,
 // fees + receipts, accounting vouchers, attendance, exams, notices, transport, hostel, timetable,
 // library, inventory and one login per role.
 // It saves through the ERP's own API (same validation, same record formats as the app).
 //
 // SAFETY: this script WIPES the database it is pointed at. It refuses to run unless
 //   1. env DEMO_MODE=true, and
-//   2. the database is empty, or already holds the demo school ("Sunrise Public School").
+//   2. the database is empty, or already holds the demo school ("Demo School", or the older "Sunrise Public School").
 // A real school's database can therefore never be wiped by mistake.
 import bcrypt from 'bcryptjs';
 import { sql, closePool } from '../db.js';
 
-const DEMO_NAME = 'Sunrise Public School';
+const DEMO_NAME = 'Demo School';
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || 'Demo@123';
 const BASE = (process.argv.find(a => a.startsWith('--base=')) || '').slice(7) || `http://127.0.0.1:${process.env.PORT || 3000}`;
 const SEED_USER = 'zz_demo_seeder';
@@ -103,7 +103,7 @@ async function safetyCheckAndWipe() {
   // this seed leaves in kv_store after it has loaded the sample school once (so a renamed demo still reloads).
   let seededBefore = false;
   try { seededBefore = (await sql`SELECT 1 AS x FROM kv_store WHERE \`key\` = 'demo-seed-version'`).length > 0; } catch (e) {}
-  const isDemo = name === DEMO_NAME || name === 'Demo School' || seededBefore;
+  const isDemo = name === DEMO_NAME || name === 'Sunrise Public School' || seededBefore;
   if (!isDemo && Number(nStudents) > 0) {
     throw new Error(`Refusing to wipe: this database holds "${name || 'a school'}" with ${nStudents} students, not the demo school.`);
   }
@@ -133,15 +133,6 @@ async function createLogins(students, staff) {
   DEMO_STUDENT_ID = s.id;
   await mk('u_demo_parent', `Parent of ${s.firstName}`, 'demo.parent', 'Parent', s.id);
   await mk('u_demo_student', s.name, 'demo.student', 'Student', s.id);
-  // Owner login (not shared): created from environment variables so it survives the nightly reload.
-  const ownerUser = (process.env.DEMO_OWNER_USERNAME || '').trim();
-  const ownerPass = process.env.DEMO_OWNER_PASSWORD || '';
-  if (ownerUser && ownerPass.length >= 10) {
-    const oh = await bcrypt.hash(ownerPass, 10);
-    await sql`INSERT INTO users (id, name, username, password, role, linked_student_id, recovery_code)
-      VALUES ('u_demo_owner', 'SVM EdTech Owner', ${ownerUser}, ${oh}, 'Admin', '', 'OWNER')`;
-    console.log('Owner login created.');
-  } else { console.log('No owner login (set DEMO_OWNER_USERNAME and DEMO_OWNER_PASSWORD).'); }
 }
 async function loginAsSeeder() {
   // The seeder's password is random and never stored in plaintext: set a known one just for this run.
@@ -175,7 +166,7 @@ function buildStudents() {
           blood: pick(['A+','B+','O+','AB+','O-']), caste: pick(['OC','BC-A','BC-B','SC']), religion: 'Hindu',
           fatherName: `${father} ${last}`, motherName: `${mother} ${last}`, parent: `${father} ${last}`,
           fatherPhone: phone, motherPhone: '9' + String(int(100000000, 999999999)), contact: phone,
-          email: `${first}.${last}${n}@example.com`.toLowerCase(), fatherAddress: `${int(1, 99)}-${int(1, 99)}, Main Road, Sunrise Nagar`,
+          email: `${first}.${last}${n}@example.com`.toLowerCase(), fatherAddress: `${int(1, 99)}-${int(1, 99)}, Main Road, Demo Nagar`,
           admDate: `${2026 - Math.min(idx, 6)}-06-${pad(int(1, 20))}`, needsTransport: rnd() < 0.3 ? 'Yes' : 'No',
           photo: avatarSvg(first[0] + last[0], (n * 37) % 360),
         });
@@ -238,9 +229,9 @@ async function main() {
   console.log(`Seeding ${students.length} students, ${staff.length} staff via ${BASE}`);
 
   await api('PUT', '/api/school-info', {
-    name: DEMO_NAME, tagline: 'Learning that lights the way', udise: '', schoolCode: 'SPS001', receiptCode: 'SPS', regNumber: 'DEMO/2026/001',
-    recognition: 'Demo school — sample data only', email: 'office@sunrise-demo.example.com', phone: '08412345678', whatsapp: '9876500000',
-    website: 'www.sunrise-demo.example.com', state: 'Telangana', district: 'Demo District', pin: '500001', address: '1-2-3, Sunrise Nagar, Demo City',
+    name: DEMO_NAME, tagline: 'Learning that lights the way', udise: '', schoolCode: 'DEM001', receiptCode: 'DEM', regNumber: 'DEMO/2026/001',
+    recognition: 'Demo school — sample data only', email: 'office@demo-school.example.com', phone: '08412345678', whatsapp: '9876500000',
+    website: 'www.demo-school.example.com', state: 'Telangana', district: 'Demo District', pin: '500001', address: '1-2-3, Demo Nagar, Demo City',
     workingDays: 220, principalName: 'Mrs. Sunitha Rao', logo: '', principalSignature: '', leadership: [],
   });
   const fs = {}; CLASSES.forEach(c => { fs[c] = { admission: ADMISSION(c), fee: FEES[c], bus: 0, stock: 0 }; });
@@ -380,7 +371,7 @@ async function main() {
   // Notices
   console.log('Notices…');
   const notices = [
-    ['Welcome to Sunrise Public School ERP demo', 'This is a demonstration system with sample data. Nothing here is real.'],
+    ['Welcome to the Demo School ERP', 'This is a demonstration system with sample data. Nothing here is real.'],
     ['Parent–Teacher meeting', 'The parent–teacher meeting is on the first Saturday of next month at 10 AM.'],
     ['FA1 results published', 'FA1 results are available in the parent portal.'],
     ['Fee reminder', 'Please clear the pending fee before 31 October to avoid a late fee.'],
@@ -558,7 +549,7 @@ async function main() {
   // A second campus, so the demo can show multi-branch: section B of classes 1-5 moves to "North Campus"
   // (with its fees, attendance and marks), it gets its own stock list and its own branch-only login.
   try {
-    const nb = await (await api('POST', '/api/branches', { name: 'Sunrise North Campus', code: 'NORTH', address: 'Plot 12, North Road, North Town', phone: '9876500300', email: 'north@sunrise-demo.example.com' })).json();
+    const nb = await (await api('POST', '/api/branches', { name: 'Demo North Campus', code: 'NORTH', address: 'Plot 12, North Road, North Town', phone: '9876500300', email: 'north@demo-school.example.com' })).json();
     const moveIds = students.filter(s => s.section === 'B').map(s => s.id);
     if (moveIds.length) await api('POST', '/api/branches/move-students', { studentIds: moveIds, toBranch: nb.id });
     const hash = await bcrypt.hash(DEMO_PASSWORD, 10);
