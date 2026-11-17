@@ -31,8 +31,10 @@ test('trials survive the nightly reload and keep their own table', () => {
   assert.ok(/await markSeeded\(\);\s*await demoTrialsRestore\(\);/.test(server));
   assert.ok(!/DELETE FROM demo_trials/.test(rd('demo/seed-demo.mjs')));
 });
-test('passwords are stored only as hashes and offered for every role, with an All-roles option', () => {
-  assert.ok(server.includes('pass_hash') && !/password VARCHAR|plain/i.test(server.slice(server.indexOf('CREATE TABLE IF NOT EXISTS demo_trials'), server.indexOf('CREATE TABLE IF NOT EXISTS demo_trials') + 700)));
+test('sign-in passwords are hashed; the throwaway trial password is kept for the owner only; every role offered for every role, with an All-roles option', () => {
+  assert.ok(server.includes('pass_hash') && !/password VARCHAR/i.test(server.slice(server.indexOf('CREATE TABLE IF NOT EXISTS demo_trials'), server.indexOf('CREATE TABLE IF NOT EXISTS demo_trials') + 700)));
+  assert.ok(server.includes('pass_plain') && /password: String\(r\.pass_plain/.test(server), 'the owner sees each trial password');
+  const lst = server.indexOf("app.get('/api/demo/trials'"); assert.ok(server.slice(lst, lst + 150).includes('demoOwnerOnly'), 'only the owner can read the passwords');
   assert.ok(server.includes("'Office Assistant': 'demo.office'") && /DEMO_TRIAL_TEMPLATES = \{[^}]*'Teacher': 'demo.teacher'[^}]*'Student': 'demo.student'/.test(server));
   assert.ok(server.includes("role === 'All'") && server.includes('DEMO_ROLE_SLUG'));
 });

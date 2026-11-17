@@ -9669,6 +9669,8 @@ async function demoTrialTables() {
     id VARCHAR(40) PRIMARY KEY, school VARCHAR(200) NOT NULL, contact VARCHAR(160) NOT NULL DEFAULT '', phone VARCHAR(40) NOT NULL DEFAULT '',
     role VARCHAR(40) NOT NULL, username VARCHAR(80) NOT NULL, pass_hash VARCHAR(100) NOT NULL, expires_at DATETIME NOT NULL, revoked TINYINT NOT NULL DEFAULT 0,
     note VARCHAR(400) NOT NULL DEFAULT '', last_login_at DATETIME NULL, logins INT NOT NULL DEFAULT 0, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`;
+  // The owner can see each trial's (throwaway, sample-data-only) password to help a school that is stuck. Older trials show none until a new password is made.
+  try { await sql`ALTER TABLE demo_trials ADD COLUMN pass_plain VARCHAR(60) NOT NULL DEFAULT ''`; } catch (e) { /* already there */ }
   try { await sql`ALTER TABLE demo_trials ADD COLUMN modules VARCHAR(300) NOT NULL DEFAULT ''`; } catch (e) { /* already there */ }
   await sql`CREATE TABLE IF NOT EXISTS demo_settings (k VARCHAR(40) PRIMARY KEY, v VARCHAR(400) NOT NULL DEFAULT '')`;
   demoTrialTablesReady = true;
@@ -9730,7 +9732,7 @@ const demoOwnerOnly = (req, res) => {
 const demoRand = (chars, n) => Array.from(crypto.randomBytes(n), b => chars[b % chars.length]).join('');
 const demoNewPassword = () => 'Try-' + demoRand('abcdefghjkmnpqrstuvwxyz', 4) + demoRand('23456789', 3);
 const demoTrialOut = r => { const ms = new Date(r.expires_at).getTime(); return { id: r.id, school: r.school, contact: r.contact, phone: r.phone, role: r.role, username: r.username, note: r.note,
-  modules: String(r.modules || ''), noExpiry: ms >= Date.UTC(2099, 0, 1), expiresAt: new Date(ms).toISOString(), revoked: !!Number(r.revoked), expired: ms < Date.now(), lastLogin: r.last_login_at ? new Date(r.last_login_at).toISOString() : '', logins: Number(r.logins) || 0, createdAt: new Date(r.created_at).toISOString() }; };
+  password: String(r.pass_plain || ''), modules: String(r.modules || ''), noExpiry: ms >= Date.UTC(2099, 0, 1), expiresAt: new Date(ms).toISOString(), revoked: !!Number(r.revoked), expired: ms < Date.now(), lastLogin: r.last_login_at ? new Date(r.last_login_at).toISOString() : '', logins: Number(r.logins) || 0, createdAt: new Date(r.created_at).toISOString() }; };
 app.get('/api/demo/trials', async (req, res) => {
   try {
     if (!demoOwnerOnly(req, res)) return; await demoTrialTables();
@@ -9759,7 +9761,7 @@ app.post('/api/demo/trials', async (req, res) => {
     const made = [];
     for (const r of roles) {
       const id = 't' + demoRand('0123456789abcdef', 10); made.push(id);
-      await sql`INSERT INTO demo_trials (id, school, contact, phone, role, username, pass_hash, expires_at, note, modules) VALUES (${id}, ${school}, ${contact}, ${phone}, ${r}, ${uname(base, r)}, ${hash}, ${expStr}, ${String(b.note || '').slice(0, 400)}, ${modules})`;
+      await sql`INSERT INTO demo_trials (id, school, contact, phone, role, username, pass_hash, pass_plain, expires_at, note, modules) VALUES (${id}, ${school}, ${contact}, ${phone}, ${r}, ${uname(base, r)}, ${hash}, ${password}, ${expStr}, ${String(b.note || '').slice(0, 400)}, ${modules})`;
       const t = (await sql`SELECT * FROM demo_trials WHERE id = ${id}`)[0];
       if (!(await demoTrialMakeUser(t))) {
         for (const x of made) { await sql`DELETE FROM users WHERE id = ${demoTrialUid(x)}`; await sql`DELETE FROM demo_trials WHERE id = ${x}`; }
@@ -9800,7 +9802,7 @@ app.post('/api/demo/trials/:id/password', async (req, res) => {
   try {
     if (!demoOwnerOnly(req, res)) return; const r = await sql`SELECT * FROM demo_trials WHERE id = ${req.params.id}`; if (!r.length) return res.status(404).json({ error: 'Not found.' });
     const want = (req.body || {}).password; const password = (typeof want === 'string' && /^Try-[a-z]{4}[0-9]{3}$/.test(want)) ? want : demoNewPassword(); const hash = await bcrypt.hash(password, 10);
-    await sql`UPDATE demo_trials SET pass_hash = ${hash} WHERE id = ${req.params.id}`; await sql`UPDATE users SET password = ${hash}, must_change_password = 0 WHERE id = ${demoTrialUid(req.params.id)}`; await sql`DELETE FROM sessions WHERE user_id = ${demoTrialUid(req.params.id)}`;
+    await sql`UPDATE demo_trials SET pass_hash = ${hash}, pass_plain = ${password} WHERE id = ${req.params.id}`; await sql`UPDATE users SET password = ${hash}, must_change_password = 0 WHERE id = ${demoTrialUid(req.params.id)}`; await sql`DELETE FROM sessions WHERE user_id = ${demoTrialUid(req.params.id)}`;
     return res.status(200).json({ password });
   } catch (err) { console.error('demo trial password error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
