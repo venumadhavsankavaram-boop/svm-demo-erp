@@ -122,6 +122,7 @@
       else if(a === 'pw'){ if(!confirm('Make a new password for ' + t.school + '? The old one stops working.')) { busy = false; return; } const j = await api('POST', '/api/demo/trials/' + t.id + '/password', {}); for(const x of g.slice(1)) await api('POST', '/api/demo/trials/' + x.id + '/password', { password: j.password }); invite = { text: inviteText(g, j.password), phone: (t.phone || '').replace(/\D/g, '') }; }
       else if(a === 'del'){ if(!confirm('Delete the trial for ' + t.school + '? Their login' + (g.length > 1 ? 's stop' : ' stops') + ' working for good.')) { busy = false; return; } for(const x of g) await api('DELETE', '/api/demo/trials/' + x.id); toast('Deleted.'); }
       data = null; await render();
+      if((a === 'pw' || a === 'invite') && invite){ toast(a === 'pw' ? 'New password made. It is shown on the row and in the message above.' : 'Message ready above. Press Copy message.'); const m = $('dtMsg'); if(m) m.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
     }catch(e){ toast(e.message); } busy = false;
   }
   const origSwitch = window.switchView;
