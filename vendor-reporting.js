@@ -261,3 +261,15 @@ export function reportVendorQuery(subject, message, priority) {
     priority: ['low', 'normal', 'high'].includes(priority) ? priority : 'normal',
   });
 }
+
+/**
+ * Demo install only: tells the vendor dashboard that a visitor started the demo, so the person shows up
+ * in its Leads tab. Fire-and-forget; a no-op when reporting is disabled.
+ */
+export function reportDemoLead(lead) {
+  if (!ENABLED || !lead) return;
+  postToDashboard('/api/ingest/demo-lead', {
+    name: String(lead.name || '').slice(0, 200), school: String(lead.school || '').slice(0, 200),
+    phone: String(lead.phone || '').slice(0, 40), message: String(lead.message || '').slice(0, 1000),
+  });
+}

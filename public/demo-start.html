@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Try the SVM EdTech demo</title>
+<style>
+:root{--bg:#fbf8f1;--card:#fff;--fg:#1c2145;--soft:#5c6385;--line:#e6e1d3;--navy:#1f2a6b;--gold:#c9962b;--goldbg:#fff4de;--err:#b3261e;--errbg:#fde8e6;--ok:#0b7a5a}
+@media (prefers-color-scheme:dark){:root{--bg:#12152b;--card:#1b2040;--fg:#eceefb;--soft:#a9b0d3;--line:#2c3260;--navy:#9db0ff;--gold:#f0b457;--goldbg:#3a2d12;--err:#ff9a92;--errbg:#431d1b;--ok:#5fe0b0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;padding:22px max(16px,env(safe-area-inset-right,0px)) 40px max(16px,env(safe-area-inset-left,0px));min-height:100vh}
+.wrap{max-width:520px;margin:0 auto}
+.brand{display:flex;align-items:center;gap:10px;margin:6px 0 18px;font-weight:700;letter-spacing:.06em;color:var(--navy);font-size:.95rem}
+.logo{display:grid;grid-template-columns:repeat(3,9px);gap:2px}.logo i{width:9px;height:9px;background:var(--navy);border-radius:2px}.logo i.g{background:var(--gold)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px 20px;box-shadow:0 6px 24px rgba(31,42,107,.07)}
+h1{font-size:1.45rem;line-height:1.25;margin:0 0 6px;color:var(--navy);text-wrap:balance}
+.sub{margin:0 0 18px;color:var(--soft);font-size:.95rem}
+label{display:block;font-weight:600;font-size:.88rem;margin:14px 0 5px}
+label small{font-weight:400;color:var(--soft)}
+input,select{width:100%;font:inherit;padding:12px 13px;border:1px solid var(--line);border-radius:11px;background:var(--bg);color:var(--fg)}
+input:focus,select:focus{outline:2px solid var(--gold);outline-offset:1px}
+.phone{display:flex;gap:8px}.phone span{display:grid;place-items:center;padding:0 12px;border:1px solid var(--line);border-radius:11px;background:var(--bg);color:var(--soft);font-weight:600}
+.chk{font-weight:400;display:flex;gap:10px;align-items:flex-start;margin:16px 0 4px;font-size:.88rem;color:var(--soft)}
+.chk a{color:var(--navy);font-weight:600}.chk input{width:20px;height:20px;margin:2px 0 0;flex:none;accent-color:var(--navy)}
+.btn{display:block;width:100%;margin-top:18px;border:0;border-radius:12px;padding:14px 16px;font:inherit;font-weight:700;background:var(--navy);color:#fff;cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
+.btn.gold{background:var(--gold);color:#241a02}
+.msg{margin:14px 0 0;padding:10px 12px;border-radius:10px;font-size:.9rem;background:var(--errbg);color:var(--err)}
+.fine{margin:14px 0 0;color:var(--soft);font-size:.8rem}
+.fine a,.link{color:var(--navy);font-weight:600}
+.note{margin:0 0 14px;padding:10px 12px;background:var(--goldbg);border-radius:10px;font-size:.88rem}
+.roles{display:grid;gap:10px;margin-top:6px}
+.role{display:flex;gap:12px;align-items:center;text-align:left;width:100%;padding:13px 14px;border:1px solid var(--line);border-radius:13px;background:var(--bg);color:var(--fg);font:inherit;cursor:pointer}
+.role:hover{border-color:var(--gold)}.role b{display:block;color:var(--navy)}.role span{font-size:.84rem;color:var(--soft)}
+.role em{font-style:normal;font-size:1.4rem;flex:none}
+.grp{margin:16px 0 2px;font-size:.78rem;text-transform:uppercase;letter-spacing:.07em;color:var(--soft)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="logo"><i></i><i></i><i></i><i></i><i class="g"></i><i></i><i></i><i></i><i></i></span>SVM EDTECH</div>
+
+  <div class="card" id="loading"><p class="sub" style="margin:0">Opening the demo…</p></div>
+
+  <form class="card" id="form" hidden novalidate>
+    <h1>Try the live demo of our school ERP</h1>
+    <p class="sub">See fees, attendance, exams, accounts and the parent and teacher apps with sample school data. Free for <span id="days">3</span> days.</p>
+    <label for="name">Your name</label>
+    <input id="name" autocomplete="name" maxlength="120" placeholder="e.g. Ramesh Kumar">
+    <label for="school">School name</label>
+    <input id="school" autocomplete="organization" maxlength="160" placeholder="e.g. Sri Sai Public School">
+    <label for="phone">WhatsApp number</label>
+    <div class="phone"><span>+91</span><input id="phone" type="tel" inputmode="numeric" autocomplete="tel-national" maxlength="14" placeholder="10-digit mobile number"></div>
+    <label for="students">Number of students <small>(optional)</small></label>
+    <select id="students"><option value="">Choose…</option><option>Up to 100</option><option>100-300</option><option>300-600</option><option>600-1000</option><option>Over 1000</option></select>
+    <div style="position:absolute;left:-9999px" aria-hidden="true"><input id="website" tabindex="-1" autocomplete="off"></div>
+    <label class="chk"><input type="checkbox" id="consent"><span>I agree that SVM EdTech may contact me on this number about the demo. <a href="https://svmedtech.com/privacy/" target="_blank" rel="noopener">Privacy</a></span></label>
+    <div class="msg" id="err" hidden></div>
+    <button class="btn" id="go" type="submit">Start my demo</button>
+    <p class="fine">Already tried it? Type only your number and press the button. We will let you back in.</p>
+  </form>
+
+  <div class="card" id="pick" hidden>
+    <h1 id="hi">Welcome</h1>
+    <p class="note" id="until"></p>
+    <p class="sub" style="margin-bottom:6px">Choose the view you want to see. You can come back here any time to switch.</p>
+    <div class="grp">School office</div>
+    <div class="roles">
+      <button class="role" data-r="Admin"><em>🏫</em><div><b>Owner / Admin</b><span>Everything: setup, users, all modules</span></div></button>
+      <button class="role" data-r="Principal"><em>🎓</em><div><b>Principal</b><span>Dashboard, reports, approvals</span></div></button>
+      <button class="role" data-r="Accountant"><em>💰</em><div><b>Accountant</b><span>Fees, receipts, accounts</span></div></button>
+      <button class="role" data-r="Office Assistant"><em>🗂️</em><div><b>Office assistant</b><span>Admissions and student records</span></div></button>
+    </div>
+    <div class="grp">Teachers and families</div>
+    <div class="roles">
+      <button class="role" data-r="Teacher"><em>📚</em><div><b>Teacher</b><span>Attendance, marks, homework</span></div></button>
+      <button class="role" data-r="Parent"><em>👨‍👩‍👧</em><div><b>Parent</b><span>Fees, attendance, results, notices</span></div></button>
+      <button class="role" data-r="Student"><em>🧒</em><div><b>Student</b><span>Timetable, homework, results</span></div></button>
+    </div>
+    <div class="msg" id="err2" hidden></div>
+  </div>
+
+  <div class="card" id="ended" hidden>
+    <h1>Your demo has ended</h1>
+    <p class="sub">Your 3 days are over. If you liked what you saw, we would be happy to answer your questions, or extend your demo.</p>
+    <a class="btn gold" id="wa" href="#" style="text-align:center;text-decoration:none" target="_blank" rel="noopener">Chat with us on WhatsApp</a>
+    <p class="fine">Monday to Friday, 9 AM to 6 PM. Or visit <a href="https://svmedtech.com">svmedtech.com</a>.</p>
+  </div>
+</div>
+<script>
+(function(){
+  var $=function(i){return document.getElementById(i)};
+  var WA='917780204177';
+  function show(id){['loading','form','pick','ended'].forEach(function(x){$(x).hidden=x!==id})}
+  function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{}),credentials:'same-origin'}).then(function(r){return r.json().catch(function(){return {}}).then(function(j){j._s=r.status;return j})})}
+  function when(iso){var d=new Date(iso);return d.toLocaleString('en-IN',{day:'numeric',month:'short',hour:'numeric',minute:'2-digit'})}
+  function ended(info){
+    var t='Hello, I tried the SVM EdTech demo'+(info&&info.school?' for '+info.school:'')+' and would like to talk.';
+    $('wa').href='https://wa.me/'+WA+'?text='+encodeURIComponent(t);show('ended');
+  }
+  function pick(info){
+    $('hi').textContent='Welcome'+(info.name?', '+info.name.split(' ')[0]:'');
+    $('until').textContent='Your demo is open until '+when(info.expiresAt)+'.';
+    show('pick');
+  }
+  document.querySelectorAll('.role').forEach(function(b){b.addEventListener('click',function(){
+    b.disabled=true;$('err2').hidden=true;
+    post('/api/demo/enter',{role:b.dataset.r}).then(function(j){
+      if(j.ok){location.href='/';return}
+      b.disabled=false;
+      if(j.ended){ended(j);return}
+      if(j.start){show('form');return}
+      $('err2').textContent=j.error||'Please try again.';$('err2').hidden=false;
+    }).catch(function(){b.disabled=false;$('err2').textContent='No connection. Please try again.';$('err2').hidden=false});
+  })});
+  $('form').addEventListener('submit',function(e){
+    e.preventDefault();$('err').hidden=true;
+    var go=$('go');go.disabled=true;go.textContent='Please wait…';
+    post('/api/demo/start',{name:$('name').value,school:$('school').value,phone:$('phone').value,students:$('students').value,website:$('website').value,consent:$('consent').checked}).then(function(j){
+      go.disabled=false;go.textContent='Start my demo';
+      if(j.ended){ended(j);return}
+      if(j.ok){pick(j);return}
+      $('err').textContent=j.error||'Please try again.';$('err').hidden=false;
+    }).catch(function(){go.disabled=false;go.textContent='Start my demo';$('err').textContent='No connection. Please try again.';$('err').hidden=false});
+  });
+  fetch('/api/demo/pass',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
+    if(j&&j.ok){ if(j.ended) ended(j); else pick(j); } else show('form');
+  }).catch(function(){show('form')});
+})();
+</script>
+</body>
+</html>

@@ -25,7 +25,7 @@ import { initBranches, ensureBranchSchema, installBranchRoutes, branchGuard, kvB
 // Client"). Both are opt-in and fail silent: with VENDOR_DASHBOARD_URL /
 // VENDOR_SCHOOL_ID / VENDOR_API_KEY unset (the default for a school not
 // yet added to the vendor dashboard), this does nothing at all.
-import { startVendorReporting, reportVendorError, isAccessSuspended, getModuleAccess } from './vendor-reporting.js';
+import { startVendorReporting, reportVendorError, isAccessSuspended, getModuleAccess, reportDemoLead } from './vendor-reporting.js';
 import { handleVendorSupportLogin } from './vendor-support-login.js';
 import { newTotpSecret, checkTotp, otpauthUrl, newRecoveryCodes, hashCode, newEmailCode, smtpConfigured, maskEmail, looksLikeEmail, sendMail } from './twofa.js';
 startVendorReporting();
@@ -1211,6 +1211,9 @@ const PUBLIC_API_ROUTES = [
   { path: '/api/login/2fa/email', methods: ['POST'] },
   { path: '/api/password-reset-request', methods: ['POST'] },
   { path: '/api/demo-info', methods: ['GET'] },
+  { path: '/api/demo/pass', methods: ['GET'] },
+  { path: '/api/demo/start', methods: ['POST'] },
+  { path: '/api/demo/enter', methods: ['POST'] },
   { path: '/api/health', methods: ['GET', 'HEAD'] },
   { path: '/api/logout', methods: ['POST'] },
   { path: '/api/vendor-support-login', methods: ['GET'] },
@@ -9785,6 +9788,8 @@ async function demoTrialTables() {
   // The owner can see each trial's (throwaway, sample-data-only) password to help a school that is stuck. Older trials show none until a new password is made.
   try { await sql`ALTER TABLE demo_trials ADD COLUMN pass_plain VARCHAR(60) NOT NULL DEFAULT ''`; } catch (e) { /* already there */ }
   try { await sql`ALTER TABLE demo_trials ADD COLUMN modules VARCHAR(300) NOT NULL DEFAULT ''`; } catch (e) { /* already there */ }
+  try { await sql`ALTER TABLE demo_trials ADD COLUMN grp VARCHAR(40) NOT NULL DEFAULT ''`; } catch (e) { /* already there */ }
+  try { await sql`ALTER TABLE demo_trials ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT ''`; } catch (e) { /* already there */ }
   await sql`CREATE TABLE IF NOT EXISTS demo_settings (k VARCHAR(40) PRIMARY KEY, v VARCHAR(400) NOT NULL DEFAULT '')`;
   demoTrialTablesReady = true;
 }
@@ -9933,6 +9938,97 @@ app.put('/api/demo/public-logins', async (req, res) => {
     return res.status(200).json({ showLogins: demoShowLogins });
   } catch (err) { console.error('demo public logins error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
+
+// ---- Demo install only: self-serve start. A visitor leaves name, school and WhatsApp number once and gets a pass
+// (DEMO_PASS_DAYS days, counted from the first entry) with a login for every role. The pass is remembered in a cookie, and a
+// returning visitor on another device types only the number. Re-entering never restarts the clock. The visitor also
+// lands in the vendor dashboard's Leads tab. Passes live in demo_trials, so the nightly reload and the owner's screen handle them.
+const DEMO_PASS_DAYS = 3;
+const demoPassSecret = () => (process.env.DEMO_PASS_SECRET || process.env.DEMO_OWNER_PASSWORD || process.env.DEMO_PASSWORD || 'svm-demo-pass') + '|pass';
+const demoPassSign = grp => crypto.createHmac('sha256', demoPassSecret()).update(String(grp)).digest('hex').slice(0, 24);
+const demoStartHits = new Map();
+const demoPhone10 = v => { let d = String(v || '').replace(/\D/g, ''); if (d.length === 12 && d.startsWith('91')) d = d.slice(2); if (d.length === 11 && d.startsWith('0')) d = d.slice(1); return /^[6-9]\d{9}$/.test(d) ? d : ''; };
+const demoGroupRows = async grp => grp ? await sql`SELECT * FROM demo_trials WHERE grp = ${grp} AND source = 'self'` : [];
+async function demoGroupFromCookie(req) {
+  const c = String(parseCookies(req).demo_pass || ''); const i = c.indexOf('.'); if (i < 1) return null;
+  const grp = c.slice(0, i), sig = c.slice(i + 1), want = demoPassSign(grp);
+  if (sig.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return null;
+  const rows = await demoGroupRows(grp); return rows.length ? { grp, rows } : null;
+}
+const demoPassOut = (g, ok) => { const ms = Math.max(...g.rows.map(r => new Date(r.expires_at).getTime())); const t = g.rows[0];
+  return { ok, name: t.contact, school: t.school, expiresAt: new Date(ms).toISOString(), ended: ms < Date.now() || g.rows.every(r => Number(r.revoked)), roles: g.rows.map(r => r.role) }; };
+async function demoCreateGroup(school, contact, phone, note) {
+  const roles = Object.keys(DEMO_TRIAL_TEMPLATES);
+  const slug = school.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 12) || 'school';
+  const taken = async u => (await sql`SELECT 1 AS x FROM users WHERE LOWER(username) = ${u}`).length || (await sql`SELECT 1 AS x FROM demo_trials WHERE username = ${u}`).length;
+  let base = 'trial-' + slug, n = 0;
+  for (;;) { const cand = base + (n ? n : ''); let ok = true; for (const r of roles) { if (await taken(cand + '-' + DEMO_ROLE_SLUG[r])) { ok = false; break; } } if (ok) { base = cand; break; } n++; }
+  const password = demoNewPassword(), hash = await bcrypt.hash(password, 10);
+  const expStr = new Date(Date.now() + DEMO_PASS_DAYS * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+  const grp = 'g' + demoRand('0123456789abcdef', 10), made = [];
+  for (const r of roles) {
+    const id = 't' + demoRand('0123456789abcdef', 10); made.push(id);
+    await sql`INSERT INTO demo_trials (id, school, contact, phone, role, username, pass_hash, pass_plain, expires_at, note, modules, grp, source) VALUES (${id}, ${school}, ${contact}, ${phone}, ${r}, ${base + '-' + DEMO_ROLE_SLUG[r]}, ${hash}, ${password}, ${expStr}, ${note}, '', ${grp}, 'self')`;
+    const t = (await sql`SELECT * FROM demo_trials WHERE id = ${id}`)[0];
+    if (!(await demoTrialMakeUser(t))) { for (const x of made) { await sql`DELETE FROM users WHERE id = ${demoTrialUid(x)}`; await sql`DELETE FROM demo_trials WHERE id = ${x}`; } return null; }
+  }
+  await demoTrialsRefresh(); return grp;
+}
+async function demoEnterRole(req, res, g, role) {
+  const row = g.rows.find(r => r.role === role); if (!row) return { error: 'Unknown view.', code: 400 };
+  const uid = demoTrialUid(row.id);
+  if (demoTrialEnded(uid) || new Date(row.expires_at).getTime() < Date.now()) return { error: 'ended', code: 403 };
+  const u = await sql`SELECT * FROM users WHERE id = ${uid} AND deleted_at IS NULL`; if (!u.length) return { error: 'The demo is refreshing. Please try again in a minute.', code: 503 };
+  await createSession(req, res, u[0]);
+  const secure = isHttpsRequest(req) ? '; Secure' : '';
+  const prev = res.getHeader('Set-Cookie');
+  res.setHeader('Set-Cookie', [].concat(prev || [], `demo_pass=${g.grp}.${demoPassSign(g.grp)}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=${(DEMO_PASS_DAYS + 2) * 86400}`));
+  return { ok: true };
+}
+app.get('/api/demo/pass', async (req, res) => {
+  try { if (!DEMO_MODE) return res.status(404).json({ ok: false }); const g = await demoGroupFromCookie(req); return res.status(200).json(g ? demoPassOut(g, true) : { ok: false }); }
+  catch (err) { console.error('demo pass error:', err); return res.status(200).json({ ok: false }); }
+});
+app.post('/api/demo/start', async (req, res) => {
+  try {
+    if (!DEMO_MODE) return res.status(404).json({ error: 'Not found.' });
+    const b = req.body || {}; if (b.website) return res.status(200).json({ ok: true, roles: [] });
+    const ip = clientIp(req), now = Date.now(), hits = (demoStartHits.get(ip) || []).filter(t => now - t < 3600000);
+    if (hits.length >= 12) return res.status(429).json({ error: 'Too many tries. Please WhatsApp us on 7780204177.' });
+    hits.push(now); demoStartHits.set(ip, hits); if (demoStartHits.size > 5000) demoStartHits.clear();
+    const phone = demoPhone10(b.phone); if (!phone) return res.status(400).json({ error: 'Please type a 10-digit mobile number.' });
+    await demoTrialTables();
+    const found = await sql`SELECT grp FROM demo_trials WHERE phone = ${phone} AND source = 'self' ORDER BY created_at LIMIT 1`;
+    let grp, returning = false;
+    if (found.length) { grp = found[0].grp; returning = true; }
+    else {
+      const name = String(b.name || '').trim().slice(0, 160), school = String(b.school || '').trim().slice(0, 200);
+      if (name.length < 2 || school.length < 2) return res.status(400).json({ error: 'Please type your name and your school name.' });
+      if (b.consent !== true) return res.status(400).json({ error: 'Please tick the box so we can contact you about the demo.' });
+      const students = String(b.students || '').replace(/[^0-9a-zA-Z+\- ]/g, '').slice(0, 20);
+      grp = await demoCreateGroup(school, name, phone, 'Self-serve demo' + (students ? ' · ' + students + ' students' : ''));
+      if (!grp) return res.status(503).json({ error: 'The demo is refreshing its sample data. Please try again in a minute.' });
+      reportDemoLead({ name, school, phone, message: 'Started the live demo on ' + new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Calcutta' }) + (students ? '. Students: ' + students : '') + '. Pass lasts ' + DEMO_PASS_DAYS + ' days.' });
+    }
+    const rows = await demoGroupRows(grp); const g = { grp, rows };
+    const out = demoPassOut(g, true);
+    const secure = isHttpsRequest(req) ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `demo_pass=${grp}.${demoPassSign(grp)}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=${(DEMO_PASS_DAYS + 2) * 86400}`);
+    if (returning && out.ended) return res.status(403).json(Object.assign({ ended: true }, out));
+    return res.status(200).json(Object.assign({ returning }, out));
+  } catch (err) { console.error('demo start error:', err); return res.status(500).json({ error: 'Something went wrong. Please try again.' }); }
+});
+app.post('/api/demo/enter', async (req, res) => {
+  try {
+    if (!DEMO_MODE) return res.status(404).json({ error: 'Not found.' });
+    const g = await demoGroupFromCookie(req); if (!g) return res.status(401).json({ error: 'Please start the demo first.', start: true });
+    const r = await demoEnterRole(req, res, g, String((req.body || {}).role || 'Admin'));
+    if (r.ok) return res.status(200).json({ ok: true });
+    return res.status(r.code).json(r.error === 'ended' ? Object.assign({ ended: true }, demoPassOut(g, true)) : { error: r.error });
+  } catch (err) { console.error('demo enter error:', err); return res.status(500).json({ error: 'Something went wrong. Please try again.' }); }
+});
+app.get('/demo-start', (req, res, next) => { if (!DEMO_MODE) return next(); res.setHeader('Cache-Control', 'no-store'); res.sendFile(path.join(__dirname, 'public', 'demo-start.html')); });
+
 if (DEMO_MODE) { setTimeout(demoTrialsRefresh, 3000); setInterval(demoTrialsRefresh, 60 * 1000); setTimeout(demoOwnerEnsure, 6000); setInterval(demoOwnerEnsure, 5 * 60 * 1000); }
 
 app.get(/.*/, (req, res) => {

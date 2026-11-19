@@ -20,6 +20,15 @@
     const setH = () => document.documentElement.style.setProperty('--demo-h', bar.offsetHeight + 'px');
     setH(); window.addEventListener('resize', setH);
     document.title = 'DEMO — ' + document.title;
+    /* A visitor who started the demo from svmedtech.com: show how long the pass lasts, a way to switch view, and a WhatsApp link. */
+    fetch('/api/demo/pass', { cache: 'no-store', credentials: 'same-origin' }).then(r => r.ok ? r.json() : null).then(p => {
+      if(!p || !p.ok || p.ended) return;
+      const until = new Date(p.expiresAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+      const wa = 'https://wa.me/917780204177?text=' + encodeURIComponent('Hello, I am trying the SVM EdTech demo' + (p.school ? ' for ' + p.school : '') + ' and have a question.');
+      const a = 'color:#ffe9a8;font-weight:700;text-decoration:underline;';
+      bar.innerHTML = 'DEMO \u00b7 sample data only \u00b7 open until ' + until.replace(/[<>&]/g, '') + ' \u00b7 <a href="/demo-start" style="' + a + '">Switch view</a> \u00b7 <a href="' + wa + '" target="_blank" rel="noopener" style="' + a + '">WhatsApp us</a>';
+      setH();
+    }).catch(() => {});
     const form = document.getElementById('loginForm');
     if(form && !document.getElementById('demoLogins') && (info.logins || []).length){
       const box = document.createElement('div');
@@ -37,7 +46,7 @@
     else if(form && !document.getElementById('demoLogins') && info.showLogins === false){
       const box = document.createElement('div'); box.id = 'demoLogins';
       box.style.cssText = 'margin:0 0 14px;padding:10px 12px;border:1px dashed #7a2e8f;border-radius:10px;font-size:0.8rem;text-align:left;line-height:1.5;';
-      box.innerHTML = '<b>Demo access</b><br>Sign in with the trial username and password SVM EdTech sent you. Need one? Ask the person who shared this link.';
+      box.innerHTML = '<b>Demo access</b><br>Sign in with the trial username and password SVM EdTech sent you.<br><a href="/demo-start" style="color:#7a2e8f;font-weight:700;">No login yet? Start the free demo &rarr;</a>';
       form.insertBefore(box, form.firstChild);
     }
   }).catch(() => {});
