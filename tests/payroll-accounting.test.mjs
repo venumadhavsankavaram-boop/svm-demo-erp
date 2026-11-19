@@ -112,6 +112,6 @@ test('the voucher date follows the date rule', async () => {
 });
 test('wiring: loaded after the leave statement and the settings key is guarded for staff', () => {
   assert.ok(idx.indexOf('84-leave-statement.js') > 0 && idx.indexOf('85-payroll-accounting.js') > idx.indexOf('84-leave-statement.js'));
-  assert.ok(/'payroll-accounting':\s*\['staff'\]/.test(srv));
+  assert.ok(/'payroll-accounting':\s*\['staffpay'\]/.test(srv));
 });
 done();

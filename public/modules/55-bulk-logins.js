@@ -327,7 +327,7 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
       '<div class="body"><div class="steps"><ol>' + T.en.map(t => '<li>' + t + '</li>').join('') + '</ol>' +
       '<ol class="te">' + T.te.map(t => '<li>' + t + '</li>').join('') + '</ol></div>' +
       '<div class="qr">' + svg + '<div class="url">' + esc(url.replace(/^https?:\/\//, '')) + '</div></div></div>' +
-      '<div class="inst"><div><b>Install on your phone:</b> open in Chrome → tap ⋮ (menu) → <b>Install app</b> (or Add to Home screen).</div><div><b>ఫోన్‌లో ఇన్‌స్టాల్:</b> Chrome లో తెరిచి → ⋮ (మెనూ) నొక్కి → <b>Install app</b> (లేదా Add to Home screen) నొక్కండి.</div></div></div>';
+      (typeof planAllowsParentApp === 'function' && !planAllowsParentApp() ? '' : '<div class="inst"><div><b>Install on your phone:</b> open in Chrome → tap ⋮ (menu) → <b>Install app</b> (or Add to Home screen).</div><div><b>ఫోన్‌లో ఇన్‌స్టాల్:</b> Chrome లో తెరిచి → ⋮ (మెనూ) నొక్కి → <b>Install app</b> (లేదా Add to Home screen) నొక్కండి.</div></div></div>');
   }
   const slipCss = `@page{size:A4;margin:8mm}*{box-sizing:border-box}body{font-family:Arial,"Nirmala UI","Gautami",sans-serif;margin:0;color:#111}
   .sheet{display:grid;grid-template-columns:1fr 1fr;gap:0;page-break-after:always}.sheet:last-child{page-break-after:auto}

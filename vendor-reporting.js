@@ -98,7 +98,8 @@ const PLAN_MODULE_TO_ERP_KEYS = {
   transport_library: ['transport', 'library'], // older plans (Transport + Library together) keep working
   // Finer choices (added so a school can buy only what it needs):
   accounting: ['accounting'],
-  staff_payroll: ['staff'],
+  staff_basic: ['staff'],            // staff directory, departments, ID cards, staff attendance (Core and above)
+  staff_payroll: ['staff', 'staffpay'], // + payroll and salary posting (Complete)
   inventory: ['inventory'],
   hostel: ['hostel'],
   transport: ['transport'],
@@ -113,7 +114,8 @@ const PLAN_MODULE_TO_ERP_KEYS = {
 // available) is both the starting value and what a school with no Plan set,
 // an "All Modules" Plan, or an unreachable/not-yet-configured dashboard
 // gets. Only "ERP — Selected Modules" ever produces `restricted: true`.
-let moduleAccess = { restricted: false, enabledKeys: [], website: true };
+const OPEN_FEATURES = { parentLogin: true, teacherLogin: true, parentApp: true };
+let moduleAccess = { restricted: false, enabledKeys: [], website: true, features: OPEN_FEATURES };
 
 // The plan this school was SOLD, set at launch time in the school's own
 // secrets as SCHOOL_PLAN so it still applies before the first heartbeat and
@@ -127,9 +129,45 @@ let moduleAccess = { restricted: false, enabledKeys: [], website: true };
 // behaviour of every school launched before this existed.
 // A plan the dashboard confirms by heartbeat always wins over this; this is
 // only what applies until then, or when the dashboard has no plan for the school.
+// The five per-student plans (svmedtech.com price list) and the module buckets each one switches on.
+// The vendor dashboard sends the same list in planModules at every heartbeat and that always wins;
+// this table is only what applies until the first heartbeat, or when the dashboard is unreachable.
+const TIER_BUCKETS = {
+  starter: ['fees', 'attendance', 'communications'],
+  basic: ['fees', 'attendance', 'exams', 'communications'],
+  core: ['fees', 'attendance', 'exams', 'communications', 'timetable_homework', 'staff_basic'],
+  complete: ['fees', 'attendance', 'exams', 'accounting', 'staff_basic', 'staff_payroll', 'inventory', 'hostel', 'transport', 'library', 'timetable_homework', 'communications'],
+  complete_website: ['fees', 'attendance', 'exams', 'accounting', 'staff_basic', 'staff_payroll', 'inventory', 'hostel', 'transport', 'library', 'timetable_homework', 'communications'],
+};
+// Which logins and apps each current plan includes (standard: a role not in the plan gets no login, and its
+// connected screens, such as the Inbox, disappear). The dashboard sends the same table as planFeatures.
+const TIER_FEATURES = {
+  starter:          { parentLogin: false, teacherLogin: false, parentApp: false },
+  basic:            { parentLogin: true,  teacherLogin: false, parentApp: false },
+  core:             { parentLogin: true,  teacherLogin: true,  parentApp: false },
+  complete:         { parentLogin: true,  teacherLogin: true,  parentApp: true },
+  complete_website: { parentLogin: true,  teacherLogin: true,  parentApp: true },
+};
+function accessForBuckets(buckets, website, features) {
+  const f = Object.assign({}, OPEN_FEATURES, features || {});
+  let enabledKeys = [];
+  (Array.isArray(buckets) ? buckets : []).forEach(b => { if (PLAN_MODULE_TO_ERP_KEYS[b]) enabledKeys.push(...PLAN_MODULE_TO_ERP_KEYS[b]); });
+  // The Inbox is for messages with teachers: without the Teacher login it has no purpose, so it goes too.
+  if (!f.teacherLogin) enabledKeys = enabledKeys.filter(k => k !== 'inbox');
+  return { restricted: true, enabledKeys, website: !!website, features: f };
+}
+// Is this role allowed to sign in under the school's plan? Office and admin roles are never blocked.
+export function planBlocksRole(role) {
+  const f = (moduleAccess && moduleAccess.features) || OPEN_FEATURES;
+  if (role === 'Student' || role === 'Parent') return f.parentLogin === false ? 'Parent and student logins are not included in your school\'s plan.' : null;
+  if (role === 'Teacher') return f.teacherLogin === false ? 'Teacher logins are not included in your school\'s plan.' : null;
+  return null;
+}
+//   SCHOOL_PLAN=starter | basic | core | complete | complete_website   (the five current plans)
 function localPlanFromEnv() {
   const raw = String(process.env.SCHOOL_PLAN || '').trim().toLowerCase();
   if (!raw) return null;
+  if (TIER_BUCKETS[raw]) return accessForBuckets(TIER_BUCKETS[raw], raw === 'complete_website', TIER_FEATURES[raw]);
   if (raw === 'all_website' || raw === 'erp_all_modules_website') return { restricted: false, enabledKeys: [], website: true };
   if (raw === 'all' || raw === 'erp_all_modules') return { restricted: false, enabledKeys: [], website: false };
   const m = raw.match(/^(?:selected|erp_selected_modules)\s*:\s*(.*)$/);
@@ -174,9 +212,17 @@ async function postToDashboard(path, body) {
   }
 }
 
+// server.js registers a function that returns how many students are active right now; it is sent with every
+// heartbeat so the vendor dashboard can bill a per-student plan from the real number. Fail-silent like everything here.
+let studentCounter = null;
+export function setStudentCounter(fn) { studentCounter = typeof fn === 'function' ? fn : null; }
+
 async function sendHeartbeat() {
+  let activeStudents;
+  try { if (studentCounter) { const n = Number(await studentCounter()); if (Number.isFinite(n) && n >= 0) activeStudents = Math.round(n); } } catch (e) { /* not ready yet: skip this time */ }
   const result = await postToDashboard('/api/ingest/heartbeat', {
     meta: {
+      activeStudents,
       uptimeSeconds: Math.round(process.uptime()),
       nodeVersion: process.version,
       reportedAt: new Date().toISOString(),
@@ -189,7 +235,11 @@ async function sendHeartbeat() {
   }
   // Same rule for the Plan/Modules gate — see moduleAccess's own comment.
   if (result && 'planType' in result) {
-    if (result.planType === 'erp_selected_modules') {
+    if (TIER_BUCKETS[result.planType]) {
+      // Current plans: the dashboard's module list decides (so a plan change or a one-off extra module applies at the next heartbeat).
+      const list = Array.isArray(result.planModules) && result.planModules.length ? result.planModules : TIER_BUCKETS[result.planType];
+      moduleAccess = accessForBuckets(list, result.planType === 'complete_website', Object.assign({}, TIER_FEATURES[result.planType], result.planFeatures || {}));
+    } else if (result.planType === 'erp_selected_modules') {
       const enabledKeys = [];
       (Array.isArray(result.planModules) ? result.planModules : []).forEach(m => {
         if (PLAN_MODULE_TO_ERP_KEYS[m]) enabledKeys.push(...PLAN_MODULE_TO_ERP_KEYS[m]);

@@ -25,9 +25,11 @@ import { initBranches, ensureBranchSchema, installBranchRoutes, branchGuard, kvB
 // Client"). Both are opt-in and fail silent: with VENDOR_DASHBOARD_URL /
 // VENDOR_SCHOOL_ID / VENDOR_API_KEY unset (the default for a school not
 // yet added to the vendor dashboard), this does nothing at all.
-import { startVendorReporting, reportVendorError, isAccessSuspended, getModuleAccess, reportDemoLead } from './vendor-reporting.js';
+import { startVendorReporting, setStudentCounter, planBlocksRole, reportVendorError, isAccessSuspended, getModuleAccess, reportDemoLead } from './vendor-reporting.js';
 import { handleVendorSupportLogin } from './vendor-support-login.js';
 import { newTotpSecret, checkTotp, otpauthUrl, newRecoveryCodes, hashCode, newEmailCode, smtpConfigured, maskEmail, looksLikeEmail, sendMail } from './twofa.js';
+// Active students (not deleted, status blank or Active): what a per-student plan is billed on.
+setStudentCounter(async () => Number((await sql`SELECT COUNT(*) AS c FROM students WHERE deleted_at IS NULL AND (status IS NULL OR status = '' OR LOWER(status) = 'active')`)[0].c) || 0);
 startVendorReporting();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1298,6 +1300,10 @@ app.use(async (req, res, next) => {
     // so an app left running in the background still signs out after the idle time.
     if (req.headers['x-background'] !== '1') sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()}, last_seen_at = now() WHERE id = ${idHash}`.catch(() => {});
     if (req.headers['x-background'] !== '1') { const altTok = parseCookies(req).sid_alt; if (altTok) sql`UPDATE sessions SET expires_at = ${newExpires.toISOString()} WHERE id = ${hashSessionToken(altTok)} AND expires_at > now()`.catch(() => {}); }
+    // A plan change takes effect on open sessions too: a role the plan no longer includes is signed out.
+    if (session.user_id !== 'vendor-support' && !session.impersonated_by && planBlocksRole(session.role)) {
+      return res.status(401).json({ error: planBlocksRole(session.role) + ' Please contact your school office.', planRestricted: true });
+    }
     req.authUser = { id: session.user_id, role: session.role, name: session.name, impersonatedBy: session.impersonated_by || null };
     // A trial login may look around and try things, but cannot lock out the shared demo accounts or other trials.
     if (DEMO_MODE && demoIsTrial(session.user_id)) {
@@ -2368,7 +2374,7 @@ const RESOURCE_TO_MODULE = {
   // Manage Student module, despite the resource's name.
   'admission-inquiries': ['websiteinquiries'],
   staff: ['staff'],
-  'staff-payroll': ['staff'],
+  'staff-payroll': ['staffpay'],
   // Communication
   'comms-messages': ['announcements'],
   'website-gallery': ['websitegallery'],
@@ -2383,9 +2389,9 @@ const KV_KEY_TO_MODULE = {
   // Public-website content (alumni, achievements, safety, vehicles, admission copy) — edited in Website Gallery > Website Content.
   'website-extras': ['websitegallery'],
   'finance-settings': ['managefee'],
-  'payroll-settings': ['staff'],
+  'payroll-settings': ['staffpay'],
   // Salary posting to Accounting: its settings and the record of which vouchers were created.
-  'payroll-accounting': ['staff'],
+  'payroll-accounting': ['staffpay'],
   // Fees prepared for the coming academic year (applied when that year is made current).
   'fee-plan-next': ['managefee'],
   // Log of mid-year class / section changes (Promotion & Transfer).
@@ -2478,7 +2484,7 @@ async function checkModuleAccess(req, res, moduleKeys) {
 // setup, announcements, etc.) is core and never gated by Plan, regardless of
 // which modules a school picked.
 const PLAN_GATED_MODULE_KEYS = ['managefee', 'attendance', 'exams', 'result', 'transport', 'library',
-  'accounting', 'staff', 'inventory', 'hostel', 'timetable', 'syllabus', 'announcements', 'inbox', 'noticeboard'];
+  'accounting', 'staff', 'staffpay', 'inventory', 'hostel', 'timetable', 'syllabus', 'announcements', 'inbox', 'noticeboard'];
 
 // Same call-site shape as checkModuleAccess (sends its own 403 and returns a
 // boolean) but a completely separate axis: this checks what the SCHOOL paid
@@ -6643,6 +6649,9 @@ app.post('/api/login', async (req, res) => {
         });
       }
     }
+    // The school's plan decides which logins exist (Parent/Student from Basic, Teacher from Core). Never blocks Admin or office roles.
+    { const blocked = planBlocksRole(user.role);
+      if (blocked) { recordLoginSuccess(rateKey); return res.status(403).json({ error: blocked + ' Please contact your school office.', planRestricted: true }); } }
     if (audience === 'staff' && !STAFF_LOGIN_ROLES.includes(user.role)) {
       recordLoginSuccess(rateKey);
       return res.status(403).json({ error: 'This is a Parent/Student account — switch to the "Parent & Student" tab to sign in.', wrongAudience: true });
@@ -8083,6 +8092,7 @@ function slugName(name) { return String(name || '').toLowerCase().replace(/[^a-z
 app.post('/api/student-logins/bulk', async (req, res) => {
   try {
     if (!req.authUser || req.authUser.role !== 'Admin') return res.status(403).json({ error: 'Only the Admin can create logins in bulk.' });
+    if (planBlocksRole('Parent')) return res.status(403).json({ error: 'Parent and student logins are not included in your school\'s plan.', planRestricted: true });
     const b = req.body || {};
     const className = String(b.className || '').trim(), section = String(b.section || '').trim();
     if (!className) return res.status(400).json({ error: 'Choose a class first.' });
@@ -8433,6 +8443,7 @@ app.get('/api/student-logins/health', async (req, res) => {
   } catch (err) { console.error('login health error:', err); return res.status(500).json({ error: 'Something went wrong on the server.' }); }
 });
 async function createLoginForStudent(studentId) {
+  if (planBlocksRole('Parent')) return null;
   const k = (await sql`SELECT id, first_name, last_name, class_name, section FROM students WHERE id = ${studentId} AND deleted_at IS NULL`)[0];
   if (!k) return null;
   const full = ((k.first_name || '') + ' ' + (k.last_name || '')).trim();
@@ -9726,6 +9737,12 @@ app.get(/^\/modules\/([A-Za-z0-9._-]+\.js)$/, (req, res, next) => {
   if (!st.isFile()) return next();
   return sendGzipped(req, res, file, st.mtimeMs + ':' + st.size, 'application/javascript', () => fs.readFileSync(file), String(req.query.v || '') === APP_BUILD);
 });
+// "Install on the phone" needs the web app manifest. Plans below Core have no phone app, so no install offer.
+app.get('/manifest.json', (req, res, next) => {
+  const f = (getModuleAccess() || {}).features;
+  if (f && f.teacherLogin === false && f.parentApp === false) return res.status(404).end();
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public'), {
   // 'allow' (not the Express default 'ignore') so /.well-known/assetlinks.json
   // is actually servable — that file is how the Android app (a Trusted Web
@@ -9769,7 +9786,7 @@ app.get(['/', '/index.html'], (req, res) => {
 const DEMO_TRIAL_TEMPLATES = { 'Admin': 'demo.admin', 'Principal': 'demo.principal', 'Accountant': 'demo.accountant', 'Office Assistant': 'demo.office', 'Teacher': 'demo.teacher', 'Parent': 'demo.parent', 'Student': 'demo.student' };
 const DEMO_ROLE_SLUG = { 'Admin': 'admin', 'Principal': 'principal', 'Accountant': 'accountant', 'Office Assistant': 'office', 'Teacher': 'teacher', 'Parent': 'parent', 'Student': 'student' };
 const demoTrialMods = new Map();    // user id -> { restricted, enabledKeys, website } for trials limited to chosen modules
-const DEMO_MODULE_BUCKETS = { fees: ['managefee'], attendance: ['attendance'], exams: ['exams', 'result'], accounting: ['accounting'], staff_payroll: ['staff'], inventory: ['inventory'], hostel: ['hostel'], transport: ['transport'], library: ['library'], timetable_homework: ['timetable', 'syllabus'], communications: ['announcements', 'inbox', 'noticeboard'] };
+const DEMO_MODULE_BUCKETS = { fees: ['managefee'], attendance: ['attendance'], exams: ['exams', 'result'], accounting: ['accounting'], staff_basic: ['staff'], staff_payroll: ['staff', 'staffpay'], inventory: ['inventory'], hostel: ['hostel'], transport: ['transport'], library: ['library'], timetable_homework: ['timetable', 'syllabus'], communications: ['announcements', 'inbox', 'noticeboard'] };
 const demoModsFor = list => { const ks = []; String(list || '').split(',').map(x => x.trim()).filter(x => DEMO_MODULE_BUCKETS[x]).forEach(b => ks.push(...DEMO_MODULE_BUCKETS[b])); return ks; };
 const DEMO_NO_EXPIRY = '2099-12-31 00:00:00';
 const demoTrialState = new Map();   // user id -> { exp (ms), revoked }

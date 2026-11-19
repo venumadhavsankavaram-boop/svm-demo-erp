@@ -384,7 +384,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     return role === 'Principal';
   }
   function allRoleNames(){
-    return [...ROLES, ...customRoles.map(r => r.name).filter(n => !ROLES.includes(n))];
+    return [...ROLES, ...customRoles.map(r => r.name).filter(n => !ROLES.includes(n))].filter(planAllowsRole);
   }
   function seedPermissionsFromDefault(roleName){
     const p = emptyPermSet();
@@ -444,6 +444,15 @@ const CUSTOM_ROLES_KEY = "custom-roles";
   // `restricted: false` (the default) means every module is available,
   // exactly as before this existed.
   let moduleAccess = { restricted: false, enabledKeys: [] };
+  // Which logins the school's plan includes (Parent/Student from Basic, Teacher from Core). No data = everything.
+  function planAllowsRole(role){
+    const f = moduleAccess && moduleAccess.features;
+    if(!f) return true;
+    if(role === 'Student' || role === 'Parent') return f.parentLogin !== false;
+    if(role === 'Teacher') return f.teacherLogin !== false;
+    return true;
+  }
+  function planAllowsParentApp(){ const f = moduleAccess && moduleAccess.features; return !f || f.parentApp !== false; }
   function isModuleEnabledByPlan(key){
     return !moduleAccess.restricted || moduleAccess.enabledKeys.includes(key);
   }
@@ -923,13 +932,13 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     document.getElementById('navPromoTransfer').style.display = allowed.includes('promotransfer') ? 'flex' : 'none';
     document.getElementById('navReports').style.display = allowed.includes('reports') ? 'flex' : 'none';
     const staffFullAccess = getRolePermission(currentUser.role, 'staff', 'view');
-    document.getElementById('navStaffDirectory').style.display = staffFullAccess ? 'flex' : 'none';
-    document.getElementById('navStaffDepts').style.display = getStaffSubpageAccess(currentUser.role, 'staff_depts') ? 'flex' : 'none';
-    document.getElementById('navStaffIdcards').style.display = getStaffSubpageAccess(currentUser.role, 'staff_idcards') ? 'flex' : 'none';
-    document.getElementById('navStaffPayroll').style.display = getStaffSubpageAccess(currentUser.role, 'staff_payroll') ? 'flex' : 'none';
-    document.getElementById('navStaffAttendance').style.display = getStaffAttendanceAccess(currentUser.role) ? 'flex' : 'none';
-    document.getElementById('navStaffReports').style.display = getStaffReportsAccess(currentUser.role) ? 'flex' : 'none';
-    document.getElementById('navStaffActivity').style.display = getStaffActivityAccess(currentUser.role) ? 'flex' : 'none';
+    document.getElementById('navStaffDirectory').style.display = (staffFullAccess && isModuleEnabledByPlan('staff')) ? 'flex' : 'none';
+    document.getElementById('navStaffDepts').style.display = (getStaffSubpageAccess(currentUser.role, 'staff_depts') && isModuleEnabledByPlan('staff')) ? 'flex' : 'none';
+    document.getElementById('navStaffIdcards').style.display = (getStaffSubpageAccess(currentUser.role, 'staff_idcards') && isModuleEnabledByPlan('staff')) ? 'flex' : 'none';
+    document.getElementById('navStaffPayroll').style.display = (getStaffSubpageAccess(currentUser.role, 'staff_payroll') && isModuleEnabledByPlan('staffpay')) ? 'flex' : 'none';
+    document.getElementById('navStaffAttendance').style.display = (getStaffAttendanceAccess(currentUser.role) && isModuleEnabledByPlan('staff')) ? 'flex' : 'none';
+    document.getElementById('navStaffReports').style.display = (getStaffReportsAccess(currentUser.role) && isModuleEnabledByPlan('staff')) ? 'flex' : 'none';
+    document.getElementById('navStaffActivity').style.display = (getStaffActivityAccess(currentUser.role) && isModuleEnabledByPlan('staff')) ? 'flex' : 'none';
     document.getElementById('navSchoolProfile').style.display = getSetupTabAccess(currentUser.role, 'setup_schoolprofile') ? 'flex' : 'none';
     document.getElementById('navClassesSetup').style.display = getSetupTabAccess(currentUser.role, 'setup_classes') ? 'flex' : 'none';
     document.getElementById('navAcademicYear').style.display = getSetupTabAccess(currentUser.role, 'setup_academicyear') ? 'flex' : 'none';
@@ -938,7 +947,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     document.getElementById('navRefundPolicy').style.display = currentUser.role === 'Admin' ? 'flex' : 'none';
     document.getElementById('navDeletedItems').style.display = ['Admin','Principal'].includes(currentUser.role) ? 'flex' : 'none';   // Admin only: the refund limit is not shown to other roles
     document.getElementById('navUsersRoles').style.display = currentUser.role === 'Admin' ? 'flex' : 'none';
-    document.getElementById('navStudentParentLogins').style.display = currentUser.role === 'Admin' ? 'flex' : 'none';
+    document.getElementById('navStudentParentLogins').style.display = (currentUser.role === 'Admin' && planAllowsRole('Parent')) ? 'flex' : 'none';
     document.getElementById('navRolesPermissions').style.display = currentUser.role === 'Admin' ? 'flex' : 'none';
     document.getElementById('navAdminTools2').style.display = currentUser.role === 'Admin' ? 'flex' : 'none';
     { const b = document.getElementById('applyLeaveBtn'); if(b) b.style.display = !['Student','Parent'].includes(currentUser.role) ? 'flex' : 'none'; }
@@ -950,7 +959,7 @@ const CUSTOM_ROLES_KEY = "custom-roles";
     document.getElementById('navHostel').style.display = allowed.includes('hostel') ? 'flex' : 'none';
     document.getElementById('navAccounting').style.display = allowed.includes('accounting') ? 'flex' : 'none';
     document.getElementById('navAnnouncements').style.display = allowed.includes('announcements') ? 'flex' : 'none';
-    document.getElementById('navInbox').style.display = allowed.includes('inbox') ? 'flex' : 'none';
+    document.getElementById('navInbox').style.display = (allowed.includes('inbox') && isModuleEnabledByPlan('inbox')) ? 'flex' : 'none';
     document.getElementById('navNoticeBoard').style.display = allowed.includes('noticeboard') ? 'flex' : 'none';
     document.getElementById('navWebsite').style.display = (allowed.includes('websiteinquiries') || allowed.includes('websitegallery')) ? 'flex' : 'none';
     document.getElementById('navContactVendor').style.display = allowed.includes('contactvendor') ? 'flex' : 'none';

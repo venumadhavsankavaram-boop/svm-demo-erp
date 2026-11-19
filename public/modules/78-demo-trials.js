@@ -31,7 +31,7 @@
     `;
     document.head.appendChild(s);
   }
-  const MOD_LABEL = { fees: 'Fees', attendance: 'Attendance', exams: 'Exams & results', accounting: 'Accounting', staff_payroll: 'Staff & payroll', inventory: 'Inventory', hostel: 'Hostel', transport: 'Transport', library: 'Library', timetable_homework: 'Timetable & homework', communications: 'Notices & messages' };
+  const MOD_LABEL = { fees: 'Fees', attendance: 'Attendance', exams: 'Exams & results', accounting: 'Accounting', staff_basic: 'Staff directory & attendance', staff_payroll: 'Staff payroll', inventory: 'Inventory', hostel: 'Hostel', transport: 'Transport', library: 'Library', timetable_homework: 'Timetable & homework', communications: 'Notices & messages' };
   const modsText = m => m ? m.split(',').map(x => MOD_LABEL[x] || x).join(', ') : 'All modules';
   const ROLE_HELP = { 'Admin': 'everything: students, fees, accounts, staff, settings', 'Principal': 'the management view', 'Accountant': 'fees, receipts and accounts', 'Office Assistant': 'front-office work', 'Teacher': 'attendance, marks and homework', 'Parent': 'the parent app: fees, attendance and notices', 'Student': 'the student view' };
   function inviteText(list, pw){

@@ -178,7 +178,7 @@ test('wiring: staff form, saving, payslip, server and the page list', () => {
   assert.ok(idx.includes('id="stfPayMode"') && idx.includes('id="stfPayrollExcluded"') && idx.includes('modules/81-payroll-pro.js'));
   assert.ok(m16.includes("payMode: g('stfPayMode')") && m16.includes("document.getElementById('stfPayrollExcluded').checked"));
   assert.ok(m17.includes('payslipExtraMeta(st, monthStr, preview)'));
-  assert.ok(srv.includes("'payroll-settings': ['staff']"));
+  assert.ok(srv.includes("'payroll-settings': ['staffpay']"));
   assert.ok(m17.includes('payrollLopDays(leaveDays, quota)') && rd('public/modules/26-student-parent-portal-tabs-part2.js').includes('payrollLopDays(takenMonth'));
   assert.ok(m17.includes('payrollQuotaFor(st, monthStr)') && rd('public/modules/26-student-parent-portal-tabs-part2.js').includes('payrollQuotaFor(st, ym)'));
   assert.ok(m16.includes("paidLeavesPerMonth: g('stfPaidLeaves') === '' ? '' :"));
