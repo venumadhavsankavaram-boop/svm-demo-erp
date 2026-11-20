@@ -7365,6 +7365,7 @@ app.post('/api/demo/suggest', async (req, res) => {
     const u = req.authUser; if (!u) return res.status(401).json({ error: 'Please sign in first.' });
     const message = String((req.body || {}).message || '').trim().slice(0, 600);
     const screen = String((req.body || {}).screen || '').trim().slice(0, 120);
+    const kind = (req.body || {}).kind === 'exit' ? 'exit' : 'suggest';
     if (message.length < 3) return res.status(400).json({ error: 'Please write your suggestion (a few words is enough).' });
     await demoSuggestTable();
     const recent = await sql`SELECT COUNT(*) AS n FROM demo_suggestions WHERE user_name = ${u.name} AND role = ${u.role} AND created_at > (NOW() - INTERVAL 1 DAY)`;
@@ -7376,7 +7377,7 @@ app.post('/api/demo/suggest', async (req, res) => {
       const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 10000);
       fetch(dashboardUrl.replace(/\/$/, '') + '/api/ingest/query', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
-        body: JSON.stringify({ schoolId, apiKey, subject: ('Demo suggestion' + (screen ? ': ' + screen : '')).slice(0, 300), message: `From: ${u.name} (${u.role})\n\n${message}`, priority: 'normal', type: 'customization' }),
+        body: JSON.stringify({ schoolId, apiKey, subject: (kind === 'exit' ? 'Demo exit feedback' : 'Demo suggestion' + (screen ? ': ' + screen : '')).slice(0, 300), message: `From: ${u.name} (${u.role})\n\n${message}`, priority: 'normal', type: 'customization' }),
       }).then(async r => { if (r.ok && id) await sql`UPDATE demo_suggestions SET sent_to_vendor = 1 WHERE id = ${id}`; }).catch(() => {}).finally(() => clearTimeout(t));
     }
     return res.status(200).json({ ok: true });
