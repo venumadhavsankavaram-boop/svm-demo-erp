@@ -94,7 +94,7 @@
   function detect(){
     /* Once the college settings have loaded they decide (so switching back to School works); until then, the server's answer. */
     let t = fetched || 'school';
-    try { if(typeof window.clgLoaded === 'function' && window.clgLoaded()) t = (window.clgIsDegreeCollege() ? 'degree_college' : window.clgIsJuniorCollege() ? 'junior_college' : 'school'); } catch(e){}
+    try { if(typeof window.clgLoaded === 'function' && window.clgLoaded()) t = ((typeof window.clgIsDegreeCollege === 'function' && window.clgIsDegreeCollege()) ? 'degree_college' : window.clgIsJuniorCollege() ? 'junior_college' : 'school'); } catch(e){}
     setType(t);
   }
   function start(){
