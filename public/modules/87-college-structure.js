@@ -57,7 +57,8 @@
   ];
 
   function clean(d){
-    const out = { institutionType: d && d.institutionType === 'junior_college' ? 'junior_college' : 'school', look: LOOKS.some(l => l.id === (d && d.look)) ? d.look : (d && d.institutionType === 'junior_college' ? 'portal' : 'classic'), combos: [] };
+    const it = d && (d.institutionType === 'junior_college' || d.institutionType === 'degree_college') ? d.institutionType : 'school';
+    const out = { institutionType: it, look: LOOKS.some(l => l.id === (d && d.look)) ? d.look : (it !== 'school' ? 'portal' : 'classic'), combos: [] };
     ((d && d.combos) || []).forEach(c => {
       const name = String(c.name || '').trim().slice(0, 16);
       if(!name) return;
@@ -98,10 +99,10 @@
     return `<button type="button" ${dis} data-clg-type="${val}" onclick="clgSetType('${val}')" aria-pressed="${on}" style="padding:10px 20px;border-radius:12px;border:2px solid ${on ? 'var(--navy,#1a2a52)' : 'var(--border,#dde3ee)'};background:${on ? 'var(--navy,#1a2a52)' : 'transparent'};color:${on ? '#fff' : 'var(--navy,#1a2a52)'};font-weight:700;cursor:pointer">${label}</button>`;
   }
   function typeCard(){
-    const jc = data.institutionType === 'junior_college';
+    const jc = data.institutionType === 'junior_college', dg = data.institutionType === 'degree_college';
     const dis = canEdit() ? '' : 'disabled';
-    return card('What kind of institution is this?', 'A school runs classes from Baby Class to 10th. A junior college runs 1st Year and 2nd Year with combinations such as MPC and BiPC. You can switch any time and nothing is deleted.',
-      `<div style="display:flex;gap:10px;flex-wrap:wrap">${typeBtn('school', 'School', !jc, dis)}${typeBtn('junior_college', 'Junior College', jc, dis)}</div>`)
+    return card('What kind of institution is this?', 'A school runs classes from Baby Class to 10th. A junior college runs 1st Year and 2nd Year with combinations such as MPC and BiPC. A degree college runs programmes such as B.A., B.Com and B.Sc with semesters and credits. You can switch any time and nothing is deleted.',
+      `<div style="display:flex;gap:10px;flex-wrap:wrap">${typeBtn('school', 'School', !jc && !dg, dis)}${typeBtn('junior_college', 'Junior College', jc, dis)}${typeBtn('degree_college', 'Degree College', dg, dis)}</div>`)
       + (true ? card('Look of the ERP', 'Pick how this ERP looks. It works for a school or a college, applies to everyone using this ERP, and can be changed any time.',
         `<div style="display:flex;gap:10px;flex-wrap:wrap">${LOOKS.map(l => `<button type="button" ${dis} class="sf-btn ${data.look === l.id ? 'sf-btn--primary' : 'sf-btn--soft'}" style="flex:1 1 200px;text-align:left;display:block;padding:12px 14px" onclick="clgChooseLook('${l.id}')"><b>${esc(l.name)}</b><br><small style="font-weight:400">${esc(l.note)}</small></button>`).join('')}</div>`) : '');
   }
@@ -156,6 +157,9 @@
          because joining 1st Year is a new admission into a combination, not an automatic promotion. */
   window.clgNextClass = function(cls){
     try {
+      /* Degree College years: each class moves up one year; the last year of a pattern leaves the college. */
+      const dm = /^(Honours|Degree) Year (\d)$/.exec(cls);
+      if(dm && data.institutionType === 'degree_college'){ const n = Number(dm[2]), last = dm[1] === 'Honours' ? 4 : 3; return n >= last ? '' : dm[1] + ' Year ' + (n + 1); }
       const i1 = CLASS_LEVELS.indexOf(YEARS[0]), i2 = CLASS_LEVELS.indexOf(YEARS[1]);
       if(i1 < 0 || i2 < 0 || !(classSectionOverrides[YEARS[0]] && classSectionOverrides[YEARS[0]].length)) return null;
       if(cls === YEARS[0]) return YEARS[1];
@@ -186,17 +190,17 @@
   const wordOrig = {};
   function applyWording(){
     try {
-      const jc = data.institutionType === 'junior_college';
+      const jc = data.institutionType !== 'school', dgc = data.institutionType === 'degree_college';
       setLook(data.look !== 'classic', data.look);
       const nav = document.getElementById('navClassesSetup');
       if(nav){
         const tn = Array.from(nav.childNodes).reverse().find(n => n.nodeType === 3 && n.textContent.trim());
-        if(tn){ if(!('nav' in wordOrig)) wordOrig.nav = tn.textContent; tn.textContent = jc ? ' Years & Combinations' : wordOrig.nav; }
+        if(tn){ if(!('nav' in wordOrig)) wordOrig.nav = tn.textContent; tn.textContent = dgc ? ' Programmes & Years' : jc ? ' Years & Combinations' : wordOrig.nav; }
       }
       const view = document.getElementById('view-classessetup');
       const h1 = view && view.querySelector('.topbar h1'), p = view && view.querySelector('.topbar p');
-      if(h1){ if(!('h1' in wordOrig)) wordOrig.h1 = h1.textContent; h1.textContent = jc ? 'Years & Combinations' : wordOrig.h1; }
-      if(p){ if(!('p' in wordOrig)) wordOrig.p = p.textContent; p.textContent = jc ? 'Manage 1st Year, 2nd Year and the combinations (MPC, BiPC, CEC, HEC) your college teaches.' : wordOrig.p; }
+      if(h1){ if(!('h1' in wordOrig)) wordOrig.h1 = h1.textContent; h1.textContent = dgc ? 'Programmes & Years' : jc ? 'Years & Combinations' : wordOrig.h1; }
+      if(p){ if(!('p' in wordOrig)) wordOrig.p = p.textContent; p.textContent = dgc ? 'Manage the programmes, years, semesters and courses your degree college teaches.' : jc ? 'Manage 1st Year, 2nd Year and the combinations (MPC, BiPC, CEC, HEC) your college teaches.' : wordOrig.p; }
     } catch(e){}
   }
   /* The college look (palette and pattern, see index.html). On for Junior College only. */
@@ -253,12 +257,17 @@
   window.clgRegisterCard = fn => { if(typeof fn === 'function') extras.push(fn); };
   window.clgRepaint = () => paint();
   window.clgIsJuniorCollege = () => data.institutionType === 'junior_college';
+  window.clgIsDegreeCollege = () => data.institutionType === 'degree_college';
+  /* The Degree College pack (96-degree-college.js) registers its panel here; it shows only when Degree College is chosen. */
+  const dgExtras = [];
+  window.clgRegisterDegreeCard = fn => { if(typeof fn === 'function') dgExtras.push(fn); };
 
   function paint(){
     const host = document.getElementById('collegeSetupHost');
     if(!host) return;
     applyWording();
-    host.innerHTML = typeCard() + collegeCard() + (data.institutionType === 'junior_college' ? extras.map(f => { try { return f(); } catch(e){ return ''; } }).join('') : '');
+    host.innerHTML = typeCard() + collegeCard() + (data.institutionType === 'junior_college' ? extras.map(f => { try { return f(); } catch(e){ return ''; } }).join('') : '')
+      + (data.institutionType === 'degree_college' ? dgExtras.map(f => { try { return f(); } catch(e){ return ''; } }).join('') : '');
   }
 
   async function ensureHost(body){
@@ -276,10 +285,10 @@
   /* ---- actions ---- */
   window.clgSetType = async function(t){
     if(!canEdit()) return;
-    data.institutionType = t === 'junior_college' ? 'junior_college' : 'school';
-    if(data.institutionType === 'junior_college' && data.look === 'classic') data.look = 'portal';
+    data.institutionType = t === 'junior_college' || t === 'degree_college' ? t : 'school';
+    if(data.institutionType !== 'school' && data.look === 'classic') data.look = 'portal';
     await persist(); paint();
-    showToast(data.institutionType === 'junior_college' ? 'Junior College selected. Add your combinations below.' : 'School selected.');
+    showToast(data.institutionType === 'degree_college' ? 'Degree College selected. Add your programmes below.' : data.institutionType === 'junior_college' ? 'Junior College selected. Add your combinations below.' : 'School selected.');
   };
   window.clgAddStandard = async function(){
     if(!canEdit()) return;

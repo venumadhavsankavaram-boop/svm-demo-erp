@@ -95,9 +95,9 @@ button:disabled{opacity:.6;cursor:default}
   // College demo: same gate, college wording.
   fetch('/api/demo-info',{cache:'no-store'}).then(function(r){return r.json()}).then(function(i){
     if(!i||!i.collegePack)return;
-    $('fh').textContent='Try the live demo of our college ERP';
-    $('fs').innerHTML='See years and combinations, attendance, exams, board hall tickets, scholarships and fees with sample junior-college data. Free for <span id="days">3</span> days.';
-    $('fl').textContent='College name';$('school').placeholder='e.g. Sri Sai Junior College';
+    $('fh').textContent='Try the live demo of our degree college ERP';
+    $('fs').innerHTML='See programmes and years, marks and results, attendance, fee reimbursement, internships and fees with sample degree-college data. Free for <span id="days">3</span> days.';
+    $('fl').textContent='College name';$('school').placeholder='e.g. Sri Sai Degree College';
     $('students').innerHTML='<option value="">Choose…</option><option>Up to 200</option><option>200-500</option><option>500-1000</option><option>1000-2000</option><option>Over 2000</option>';
     document.title='Try the live college demo';
   }).catch(function(){});

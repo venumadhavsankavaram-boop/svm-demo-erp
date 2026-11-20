@@ -52,6 +52,8 @@
   #clgDash .cd-tile b{display:block;font-size:1.35rem;color:var(--navy)}
   #clgDash .cd-tile span{font-size:.76rem;color:var(--ink-soft)}`;
 
+  window.cldCss = CSS;
+
   function panel(sm){
     const bar = (n, seats, label) => {
       const pct = seats ? Math.min(100, Math.round(100 * n / seats)) : 0;

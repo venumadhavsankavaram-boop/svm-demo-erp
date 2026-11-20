@@ -3902,7 +3902,9 @@ async function handleAttendanceSettings(req, res) {
 // no WhatsApp, no push notifications, no online payments.
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 // The separate college demo (DEMO_MODE + COLLEGE_PACK) loads a junior-college sample instead of the sample school.
-const DEMO_SEED_FILE = (DEMO_MODE && process.env.COLLEGE_PACK === 'true') ? 'seed-college.mjs' : 'seed-demo.mjs';
+// This branch is the DEGREE college demo (COLLEGE_KIND=junior switches back to the junior college sample).
+const COLLEGE_KIND = process.env.COLLEGE_KIND === 'junior' ? 'junior' : 'degree';
+const DEMO_SEED_FILE = (DEMO_MODE && process.env.COLLEGE_PACK === 'true') ? (COLLEGE_KIND === 'degree' ? 'seed-degree.mjs' : 'seed-college.mjs') : 'seed-demo.mjs';
 // TEST_MODE=true: a private test copy (the preview) running on its OWN database. Nothing leaves the server
 // (no WhatsApp, push or online payments) and an orange "TEST COPY" ribbon is shown, so it can never be mistaken for the live school.
 const TEST_MODE = process.env.TEST_MODE === 'true';
@@ -6644,7 +6646,7 @@ app.get('/api/demo-info', async (req, res) => {
   const collegePack = process.env.COLLEGE_PACK === 'true';
   // collegeLook: the College Pack is on and this install has been set to Junior College, so even the sign-in screen can wear the college look.
   let collegeLook = false;
-  if (collegePack) { try { const r = await sql`SELECT value FROM kv_store WHERE \`key\` = 'college-structure'`; collegeLook = !!r.length && /"institutionType"\s*:\s*"junior_college"/.test(typeof r[0].value === 'string' ? r[0].value : JSON.stringify(r[0].value)); } catch (e) {} }
+  if (collegePack) { try { const r = await sql`SELECT value FROM kv_store WHERE \`key\` = 'college-structure'`; collegeLook = !!r.length && /"institutionType"\s*:\s*"(junior|degree)_college"/.test(typeof r[0].value === 'string' ? r[0].value : JSON.stringify(r[0].value)); } catch (e) {} }
   if (!DEMO_MODE) return res.status(200).json({ demo: false, test: TEST_MODE, collegePack, collegeLook });
   return res.status(200).json({ demo: true, collegePack, collegeLook, password: process.env.DEMO_PASSWORD || 'Demo@123', showLogins: demoShowLogins,
     logins: !demoShowLogins ? [] : [['demo.admin','Admin'],['demo.principal','Principal'],['demo.accountant','Accountant'],['demo.office','Office Assistant'],['demo.teacher','Teacher'],['demo.parent','Parent'],['demo.student','Student'],['demo.branch','Branch Accountant (North Campus only)']] });
@@ -10115,7 +10117,7 @@ app.post('/api/demo/start', async (req, res) => {
       const students = String(b.students || '').replace(/[^0-9a-zA-Z+\- ]/g, '').slice(0, 20);
       grp = await demoCreateGroup(school, name, phone, 'Self-serve demo' + (students ? ' · ' + students + ' students' : ''));
       if (!grp) return res.status(503).json({ error: 'The demo is refreshing its sample data. Please try again in a minute.' });
-      reportDemoLead({ name, school, phone, message: (process.env.COLLEGE_PACK === 'true' ? '[Junior College demo] ' : '') + 'Started the live demo on ' + new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Calcutta' }) + (students ? '. Students: ' + students : '') + '. Pass lasts ' + DEMO_PASS_DAYS + ' days.' });
+      reportDemoLead({ name, school, phone, message: (process.env.COLLEGE_PACK === 'true' ? (COLLEGE_KIND === 'degree' ? '[Degree College demo] ' : '[Junior College demo] ') : '') + 'Started the live demo on ' + new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Calcutta' }) + (students ? '. Students: ' + students : '') + '. Pass lasts ' + DEMO_PASS_DAYS + ' days.' });
     }
     const rows = await demoGroupRows(grp); const g = { grp, rows };
     const out = demoPassOut(g, true);
