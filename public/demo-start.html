@@ -45,11 +45,11 @@ button:disabled{opacity:.6;cursor:default}
   <div class="card" id="loading"><p class="sub" style="margin:0">Opening the demo…</p></div>
 
   <form class="card" id="form" hidden novalidate>
-    <h1>Try the live demo of our school ERP</h1>
-    <p class="sub">See fees, attendance, exams, accounts and the parent and teacher apps with sample school data. Free for <span id="days">3</span> days.</p>
+    <h1 id="fh">Try the live demo of our school ERP</h1>
+    <p class="sub" id="fs">See fees, attendance, exams, accounts and the parent and teacher apps with sample school data. Free for <span id="days">3</span> days.</p>
     <label for="name">Your name</label>
     <input id="name" autocomplete="name" maxlength="120" placeholder="e.g. Ramesh Kumar">
-    <label for="school">School name</label>
+    <label for="school" id="fl">School name</label>
     <input id="school" autocomplete="organization" maxlength="160" placeholder="e.g. Sri Sai Public School">
     <label for="phone">WhatsApp number</label>
     <div class="phone"><span>+91</span><input id="phone" type="tel" inputmode="numeric" autocomplete="tel-national" maxlength="14" placeholder="10-digit mobile number"></div>
@@ -92,6 +92,15 @@ button:disabled{opacity:.6;cursor:default}
 <script>
 (function(){
   var $=function(i){return document.getElementById(i)};
+  // College demo: same gate, college wording.
+  fetch('/api/demo-info',{cache:'no-store'}).then(function(r){return r.json()}).then(function(i){
+    if(!i||!i.collegePack)return;
+    $('fh').textContent='Try the live demo of our college ERP';
+    $('fs').innerHTML='See years and combinations, attendance, exams, board hall tickets, scholarships and fees with sample junior-college data. Free for <span id="days">3</span> days.';
+    $('fl').textContent='College name';$('school').placeholder='e.g. Sri Sai Junior College';
+    $('students').innerHTML='<option value="">Choose…</option><option>Up to 200</option><option>200-500</option><option>500-1000</option><option>1000-2000</option><option>Over 2000</option>';
+    document.title='Try the live college demo';
+  }).catch(function(){});
   var WA='917780204177';
   function show(id){['loading','form','pick','ended'].forEach(function(x){$(x).hidden=x!==id})}
   function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{}),credentials:'same-origin'}).then(function(r){return r.json().catch(function(){return {}}).then(function(j){j._s=r.status;return j})})}

@@ -9880,7 +9880,7 @@ const DEMO_MODULE_BUCKETS = { fees: ['managefee'], attendance: ['attendance'], e
 const demoModsFor = list => { const ks = []; String(list || '').split(',').map(x => x.trim()).filter(x => DEMO_MODULE_BUCKETS[x]).forEach(b => ks.push(...DEMO_MODULE_BUCKETS[b])); return ks; };
 const DEMO_NO_EXPIRY = '2099-12-31 00:00:00';
 const demoTrialState = new Map();   // user id -> { exp (ms), revoked }
-let demoShowLogins = true, demoTrialTablesReady = false;
+let demoShowLogins = process.env.COLLEGE_PACK !== 'true', demoTrialTablesReady = false;
 const demoTrialUid = id => 'u_' + id;
 const demoIsTrial = userId => demoTrialState.has(String(userId));
 function demoTrialEnded(userId) {
@@ -9906,7 +9906,7 @@ async function demoTrialsRefresh() {
     const rows = await sql`SELECT id, expires_at, revoked, modules FROM demo_trials`;
     demoTrialState.clear(); demoTrialMods.clear();
     rows.forEach(r => { const m = String(r.modules || '').trim(); if (m) demoTrialMods.set(demoTrialUid(r.id), { restricted: true, enabledKeys: demoModsFor(m), website: false }); }); rows.forEach(r => demoTrialState.set(demoTrialUid(r.id), { exp: new Date(r.expires_at).getTime(), revoked: !!Number(r.revoked) }));
-    const s = await sql`SELECT v FROM demo_settings WHERE k = 'showLogins'`; demoShowLogins = !s.length || s[0].v !== '0';
+    const s = await sql`SELECT v FROM demo_settings WHERE k = 'showLogins'`; demoShowLogins = s.length ? s[0].v !== '0' : process.env.COLLEGE_PACK !== 'true'; // the college demo starts with the visitor gate ON (details first)
   } catch (e) { console.error('demo trials refresh failed:', e.message); }
 }
 // Make (or remake after the nightly reload) the login for one trial by copying the matching demo account.
@@ -10115,7 +10115,7 @@ app.post('/api/demo/start', async (req, res) => {
       const students = String(b.students || '').replace(/[^0-9a-zA-Z+\- ]/g, '').slice(0, 20);
       grp = await demoCreateGroup(school, name, phone, 'Self-serve demo' + (students ? ' · ' + students + ' students' : ''));
       if (!grp) return res.status(503).json({ error: 'The demo is refreshing its sample data. Please try again in a minute.' });
-      reportDemoLead({ name, school, phone, message: 'Started the live demo on ' + new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Calcutta' }) + (students ? '. Students: ' + students : '') + '. Pass lasts ' + DEMO_PASS_DAYS + ' days.' });
+      reportDemoLead({ name, school, phone, message: (process.env.COLLEGE_PACK === 'true' ? '[Junior College demo] ' : '') + 'Started the live demo on ' + new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Calcutta' }) + (students ? '. Students: ' + students : '') + '. Pass lasts ' + DEMO_PASS_DAYS + ' days.' });
     }
     const rows = await demoGroupRows(grp); const g = { grp, rows };
     const out = demoPassOut(g, true);
