@@ -252,6 +252,7 @@
   const extras = [];
   window.clgRegisterCard = fn => { if(typeof fn === 'function') extras.push(fn); };
   window.clgRepaint = () => paint();
+  window.clgLoaded = () => !!loaded;
   window.clgIsJuniorCollege = () => data.institutionType === 'junior_college';
 
   function paint(){

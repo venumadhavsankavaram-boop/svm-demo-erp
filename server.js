@@ -6643,10 +6643,10 @@ async function parentScopedKvValue(req, key, value) {
 app.get('/api/demo-info', async (req, res) => {
   const collegePack = process.env.COLLEGE_PACK === 'true';
   // collegeLook: the College Pack is on and this install has been set to Junior College, so even the sign-in screen can wear the college look.
-  let collegeLook = false;
-  if (collegePack) { try { const r = await sql`SELECT value FROM kv_store WHERE \`key\` = 'college-structure'`; collegeLook = !!r.length && /"institutionType"\s*:\s*"junior_college"/.test(typeof r[0].value === 'string' ? r[0].value : JSON.stringify(r[0].value)); } catch (e) {} }
-  if (!DEMO_MODE) return res.status(200).json({ demo: false, test: TEST_MODE, collegePack, collegeLook });
-  return res.status(200).json({ demo: true, collegePack, collegeLook, password: process.env.DEMO_PASSWORD || 'Demo@123', showLogins: demoShowLogins,
+  let collegeLook = false, institutionType = 'school';
+  if (collegePack) { try { const r = await sql`SELECT value FROM kv_store WHERE \`key\` = 'college-structure'`; collegeLook = !!r.length && /"institutionType"\s*:\s*"junior_college"/.test(typeof r[0].value === 'string' ? r[0].value : JSON.stringify(r[0].value)); if (collegeLook) institutionType = 'junior_college'; } catch (e) {} }
+  if (!DEMO_MODE) return res.status(200).json({ demo: false, test: TEST_MODE, collegePack, collegeLook, institutionType });
+  return res.status(200).json({ demo: true, collegePack, collegeLook, institutionType, password: process.env.DEMO_PASSWORD || 'Demo@123', showLogins: demoShowLogins,
     logins: !demoShowLogins ? [] : [['demo.admin','Admin'],['demo.principal','Principal'],['demo.accountant','Accountant'],['demo.office','Office Assistant'],['demo.teacher','Teacher'],['demo.parent','Parent'],['demo.student','Student'],['demo.branch','Branch Accountant (North Campus only)']] });
 });
 
