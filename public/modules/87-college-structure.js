@@ -256,6 +256,7 @@
   const extras = [];
   window.clgRegisterCard = fn => { if(typeof fn === 'function') extras.push(fn); };
   window.clgRepaint = () => paint();
+  window.clgLoaded = () => !!loaded;
   window.clgIsJuniorCollege = () => data.institutionType === 'junior_college';
   window.clgIsDegreeCollege = () => data.institutionType === 'degree_college';
   /* The Degree College pack (96-degree-college.js) registers its panel here; it shows only when Degree College is chosen. */
