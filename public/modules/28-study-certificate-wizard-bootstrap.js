@@ -476,6 +476,7 @@ const WIZARD_TABS = ['new','parent','previous','transport'];
           return false;
         }
       }
+      if(typeof window.clgSeatCheck === 'function' && !(await window.clgSeatCheck(data))) return false;   // Junior College: no seat left in the combination
       data.id = 'stu_' + Date.now();
       data.admissionNo = nextAdmissionNo();
       students.push(data);

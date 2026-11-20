@@ -47,7 +47,7 @@ export const BRANCH_KV = new Set([
   'inventory-items', 'inventory-sales', 'inventory-returns', 'inventory-vendor-returns', 'pending-approvals',
   'timetable-entries', 'timetable-periods', 'timetable-days',
   'transport-routes', 'library-books', 'library-issues', 'library-settings', 'hostel-rooms',
-  'fee-refunds', 'fee-late-waivers', 'fee-day-closings', 'class-section-overrides',
+  'fee-refunds', 'fee-late-waivers', 'fee-day-closings', 'class-section-overrides', 'college-structure', 'college-practicals', 'college-scholarships', 'college-board', 'college-programmes', 'college-absence',
 ]);
 
 const SAFE = /^[A-Za-z0-9_]+$/;

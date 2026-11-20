@@ -387,6 +387,114 @@
     background:var(--white); border-radius:22px; padding:40px 36px; width:100%; max-width:360px;
     box-shadow:var(--shadow); text-align:center;
   }
+
+  /* ===== COLLEGE LOOK =====
+     Only when the College Pack is on AND the install is set to Junior College (the script in 87-college-structure.js sets
+     data-institution="college"). A different palette (deep green) and a graph-paper pattern instead of dots, so a college
+     sees at a glance that this is not the school ERP. A school install never gets this attribute. If a college has its own
+     brand colours from the website theme, those win (the theme loader sets data-brand). */
+  html[data-institution="college"]:not([data-brand]){ --login-accent:#0F5A52; --login-accent-deep:#093A35; --login-accent-soft:#F3D58E; --login-accent-rgb:15,90,82; }
+  html[data-institution="college"][data-theme="dark"]:not([data-brand]){ --login-accent:#7FD6C8; --login-accent-deep:#06201D; --login-accent-soft:#C9A24A; --login-accent-rgb:127,214,200; }
+  html[data-institution="college"] .login-overlay{
+    background:
+      radial-gradient(ellipse at 50% 0%, var(--login-accent-soft) 0%, var(--cream) 60%),
+      linear-gradient(rgba(var(--login-accent-rgb),0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(var(--login-accent-rgb),0.07) 1px, transparent 1px);
+    background-size:auto, 28px 28px, 28px 28px; background-position:center, center, center;
+  }
+  html[data-institution="college"] .sidebar{ background:linear-gradient(165deg,var(--brand-navy),var(--brand-navy-deep)); }
+  html[data-institution="college"] .sidebar::before{
+    background:linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
+    background-size:28px 28px;
+  }
+
+  /* More of the college look: its own type (serif headings, Inter text), squarer corners, flat cards, green buttons, and the school's
+     "Total Strength" banner is replaced by the College at a glance panel (95-college-dashboard.js). */
+  html[data-institution="college"]{ --shadow:0 1px 2px rgba(15,40,38,0.06), 0 6px 16px -10px rgba(15,40,38,0.22); --shadow-hover:0 2px 4px rgba(15,40,38,0.08), 0 10px 22px -12px rgba(15,40,38,0.3); }
+  html[data-institution="college"]:not([data-theme="dark"]):not([data-brand]){ --navy:#0B3D38; --cream:#F6F9F8; }
+  html[data-institution="college"] body{ font-family:'Inter','Poppins','Noto Sans Telugu','Nirmala UI','Gautami',sans-serif; }
+  html[data-institution="college"] h1, html[data-institution="college"] h2, html[data-institution="college"] h3,
+  html[data-institution="college"] .sb-brand div, html[data-institution="college"] .empty-state b{ font-family:'Source Serif 4',Georgia,'Noto Sans Telugu','Nirmala UI',serif; letter-spacing:0; }
+  html[data-institution="college"] .profile-card, html[data-institution="college"] .scx-card, html[data-institution="college"] .login-card{ border-radius:8px; }
+  html[data-institution="college"] .btn, html[data-institution="college"] .btn-sm{ border-radius:6px; }
+  html[data-institution="college"] .btn-primary{ background:var(--login-accent); box-shadow:none; }
+  html[data-institution="college"] .btn-primary:hover{ box-shadow:0 6px 14px -8px rgba(var(--login-accent-rgb),0.7); }
+  html[data-institution="college"] .sidebar{ width:252px; }
+  html[data-institution="college"] .sb-link{ border-radius:6px; }
+  html[data-institution="college"] .strength-hero-wrap{ display:none; }
+
+  /* ===== COLLEGE LOOKS (chosen in Settings > What kind of institution). campus = the green rules above. ===== */
+  .sb-top-sec{ display:contents; }
+  html[data-clook] .sf-btn--primary{ background:var(--login-accent) !important; border-color:var(--login-accent) !important; color:#fff !important; }
+  /* Shared by the two light-sidebar looks (academic, minimal) */
+  html[data-clook="academic"], html[data-clook="minimal"]{ --clk-ink:#1F2A44; --clk-soft:#4A5370; }
+  html[data-clook="academic"]:not([data-brand]){ --login-accent:#7A1F2B; --login-accent-deep:#5A1019; --login-accent-soft:#E8C9A0; --login-accent-rgb:122,31,43; --navy:#1B2B5B; --cream:#FBF8F2; --clk-ink:#1F2A44; --clk-soft:#4A5370; --clk-line:#E6DFD0; }
+  html[data-clook="minimal"]:not([data-brand]){ --login-accent:#4F46E5; --login-accent-deep:#3730A3; --login-accent-soft:#C7D2FE; --login-accent-rgb:79,70,229; --navy:#111827; --cream:#FAFAFC; --clk-ink:#111827; --clk-soft:#6B7280; --clk-line:#ECEEF2; }
+  html[data-clook="academic"] body, html[data-clook="academic"].x body{ font-family:'Public Sans','Noto Sans Telugu','Nirmala UI',sans-serif; }
+  html[data-clook="academic"] h1, html[data-clook="academic"] h2, html[data-clook="academic"] h3, html[data-clook="academic"] .sb-brand div{ font-family:'Newsreader',Georgia,'Noto Sans Telugu','Nirmala UI',serif; font-weight:600; }
+  html[data-clook="minimal"] body, html[data-clook="minimal"] h1, html[data-clook="minimal"] h2, html[data-clook="minimal"] h3, html[data-clook="minimal"] .sb-brand div{ font-family:'DM Sans','Noto Sans Telugu','Nirmala UI',sans-serif; letter-spacing:-0.01em; }
+  html[data-clook="minimal"] h1, html[data-clook="minimal"] h2, html[data-clook="minimal"] h3{ font-weight:700; }
+  html[data-clook="academic"] .profile-card, html[data-clook="academic"] .scx-card, html[data-clook="academic"] .login-card{ border-radius:4px; }
+  html[data-clook="minimal"] .profile-card, html[data-clook="minimal"] .scx-card, html[data-clook="minimal"] .login-card{ border-radius:14px; }
+  html[data-clook="academic"] .btn, html[data-clook="academic"] .btn-sm{ border-radius:3px; }
+  html[data-clook="minimal"] .btn, html[data-clook="minimal"] .btn-sm{ border-radius:10px; }
+  html[data-clook="academic"] .login-overlay, html[data-clook="minimal"] .login-overlay{ background:var(--cream); }
+  html[data-clook="academic"] .sidebar, html[data-clook="minimal"] .sidebar{ background:#fff; color:var(--clk-ink); width:244px; border-right:1px solid var(--clk-line); box-shadow:none; }
+  html[data-clook="academic"] .sidebar::before, html[data-clook="academic"] .sidebar::after,
+  html[data-clook="minimal"] .sidebar::before, html[data-clook="minimal"] .sidebar::after{ display:none; }
+  html[data-clook="academic"] .sb-brand div, html[data-clook="minimal"] .sb-brand div{ color:var(--navy); }
+  html[data-clook="academic"] .sb-brand span, html[data-clook="minimal"] .sb-brand span{ color:var(--login-accent); }
+  html[data-clook="academic"] .sb-section-toggle, html[data-clook="minimal"] .sb-section-toggle{ color:var(--clk-soft); }
+  html[data-clook="academic"] .sb-section-toggle:hover, html[data-clook="minimal"] .sb-section-toggle:hover{ color:var(--clk-ink); background:rgba(var(--login-accent-rgb),.06); }
+  html[data-clook="academic"] .sb-link, html[data-clook="minimal"] .sb-link{ color:var(--clk-soft); border-radius:6px; }
+  html[data-clook="academic"] .sb-link:hover, html[data-clook="minimal"] .sb-link:hover{ background:rgba(var(--login-accent-rgb),.07); color:var(--clk-ink); }
+  html[data-clook="academic"] .sb-link.active, html[data-clook="minimal"] .sb-link.active{ background:rgba(var(--login-accent-rgb),.1); color:var(--login-accent); font-weight:600; }
+  html[data-clook="academic"] .sb-section-group, html[data-clook="minimal"] .sb-section-group{ border-bottom-color:var(--clk-line); }
+  html[data-clook="academic"] .sb-search-input, html[data-clook="minimal"] .sb-search-input{ background:var(--cream); color:var(--clk-ink); border:1px solid var(--clk-line); }
+  html[data-clook="academic"] .sb-user-footer, html[data-clook="minimal"] .sb-user-footer{ border-top-color:var(--clk-line); color:var(--clk-ink); }
+  html[data-clook="academic"] .main, html[data-clook="minimal"] .main{ background:var(--cream); }
+  html[data-clook="academic"] .sb-search-input::placeholder, html[data-clook="minimal"] .sb-search-input::placeholder{ color:var(--clk-soft); opacity:1; }
+  html[data-clook="academic"] .sb-search-icon, html[data-clook="minimal"] .sb-search-icon{ color:var(--clk-soft); }
+  html[data-clook="academic"] .sb-user-footer *, html[data-clook="minimal"] .sb-user-footer *{ color:var(--clk-ink); }
+  html[data-clook="academic"] .sb-user-footer .sb-user-role, html[data-clook="minimal"] .sb-user-footer .sb-user-role{ color:var(--clk-soft); }
+
+  /* Top-bar Portal: navy header, menu sections become drop-downs. Desktop only; on a phone the normal slide-out menu is kept. */
+  html[data-clook="portal"]:not([data-brand]){ --login-accent:#0B2A5B; --login-accent-deep:#071C3F; --login-accent-soft:#FF9F1C; --login-accent-rgb:11,42,91; --brand-navy:#0B2A5B; --brand-navy-deep:#0B2A5B; --navy:#0B2A5B; --cream:#EEF2F9; }
+  html[data-clook="portal"][data-theme="dark"]:not([data-brand]){ --login-accent:#8FB0F0; --login-accent-deep:#0B1B38; --login-accent-soft:#FF9F1C; --login-accent-rgb:143,176,240; --navy:#DCE6F8; --cream:#0E1627; }
+  html[data-clook="portal"] body{ font-family:'Plus Jakarta Sans','Noto Sans Telugu','Nirmala UI',sans-serif; }
+  html[data-clook="portal"] h1, html[data-clook="portal"] h2, html[data-clook="portal"] h3, html[data-clook="portal"] .sb-brand div, html[data-clook="portal"] .empty-state b{ font-family:'Plus Jakarta Sans','Noto Sans Telugu','Nirmala UI',sans-serif; font-weight:800; letter-spacing:-0.01em; }
+  html[data-clook="portal"] .profile-card, html[data-clook="portal"] .scx-card, html[data-clook="portal"] .login-card{ border-radius:16px; }
+  html[data-clook="portal"] .btn, html[data-clook="portal"] .btn-sm{ border-radius:10px; }
+  html[data-clook="portal"] .btn-primary{ background:var(--login-accent); }
+  html[data-clook="portal"] .login-overlay{ background:var(--cream); }
+  @media (min-width:821px){
+    html[data-clook="portal"] .app{ flex-direction:column; }
+    html[data-clook="portal"] .sidebar{ width:100%; gap:12px; height:auto !important; max-height:none !important; flex:0 0 auto; flex-direction:row; align-items:center; gap:18px; padding:0 24px; overflow:visible; box-shadow:0 2px 10px rgba(7,28,63,.25); border-bottom:3px solid #FF9F1C; }
+    html[data-clook="portal"] .sidebar::before, html[data-clook="portal"] .sidebar::after{ display:none; }
+    html[data-clook="portal"] .sb-brand{ margin:0; padding:10px 0; flex-shrink:0; max-width:280px; }
+    html[data-clook="portal"] .sb-brand img{ width:34px; height:34px; }
+    html[data-clook="portal"] .sb-brand div{ font-size:.95rem; }
+    html[data-clook="portal"] .sb-nav-scroll{ display:flex; flex-direction:row; align-items:center; gap:2px; overflow:visible !important; flex:1; min-width:0; flex-wrap:nowrap; height:auto; }
+    html[data-clook="portal"] .sb-nav-scroll > .sb-link{ width:auto; margin:0; padding:18px 9px; border-radius:0; color:#DCE6F8; font-size:.85rem; font-weight:700; order:99; }
+    html[data-clook="portal"] .sb-nav-scroll > .sb-link > span:not(.sb-icon-wrap){ display:none; }
+    html[data-clook="portal"] .sb-nav-scroll > .sb-link .sb-icon-wrap{ display:flex; }
+        html[data-clook="portal"] .sb-top-sec{ display:flex; align-items:center; position:relative; }
+    html[data-clook="portal"] .sb-top-sec > .sb-link{ width:auto; margin:0 4px 0 0; padding:8px; color:#DCE6F8; }
+    html[data-clook="portal"] .sb-top-sec > .sb-link > span:not(.sb-icon-wrap):not(.sb-icon){ display:none; }
+    html[data-clook="portal"] .sb-section-toggle{ width:auto; padding:18px 7px; margin:0 !important; border-radius:0; font-size:.8rem; font-weight:700; letter-spacing:0; text-transform:none; color:#DCE6F8; }
+    html[data-clook="portal"] .sb-section-toggle:hover, html[data-clook="portal"] .sb-top-sec:focus-within .sb-section-toggle{ color:#fff; background:rgba(255,255,255,.08); }
+    html[data-clook="portal"] .sb-section-icon, html[data-clook="portal"] .sb-section-count, html[data-clook="portal"] .sb-section-toggle-right{ display:none; }
+    html[data-clook="portal"] .sb-section-group{ display:none; position:absolute; top:100%; left:0; min-width:240px; max-height:70vh !important; overflow-y:auto; opacity:1 !important; background:#fff; border-radius:0 0 12px 12px; padding:8px; box-shadow:0 14px 30px -10px rgba(7,28,63,.45); border:1px solid #DCE3F0; z-index:50; }
+    html[data-clook="portal"] .sb-top-sec:hover .sb-section-group, html[data-clook="portal"] .sb-top-sec:focus-within .sb-section-group{ display:block; }
+    html[data-clook="portal"] .sb-section-group .sb-link{ color:#14233C; border-radius:8px; margin-bottom:2px; }
+    html[data-clook="portal"] .sb-section-group .sb-link:hover{ background:#EEF2F9; }
+    html[data-clook="portal"] .sb-section-group .sb-link .sb-icon-wrap, html[data-clook="portal"] .sb-section-group .sb-link .sb-icon{ color:#0B2A5B; background:#E3EBFA; }
+    html[data-clook="portal"] .sb-section-group .sb-link.active{ background:#E3EBFA; color:#0B2A5B; font-weight:700; }
+    html[data-clook="portal"] .sb-search-wrap{ display:none; order:9; margin:0 0 0 auto; width:150px; flex-shrink:0; }
+    html[data-clook="portal"] .sb-user-footer{ border:none; padding:0; margin:0; flex-shrink:0; }
+    @media (min-width:1500px){ html[data-clook="portal"] .sb-search-wrap{ display:block; } }
+    html[data-clook="portal"] .main{ height:auto !important; flex:1 1 0; overflow-y:auto; min-height:0; max-width:1500px; width:100%; margin:0 auto; }
+  }
   .login-logo{width:56px; height:56px; border-radius:50%; margin:0 auto 14px; object-fit:cover;}
   .login-card h2{font-size:1.2rem; margin-bottom:4px; color:var(--login-accent);}
   .login-sub{font-size:0.85rem; color:var(--ink-soft); margin-bottom:22px;}
@@ -3167,6 +3275,7 @@
         var styleEl = document.createElement('style');
         styleEl.textContent = css;
         document.head.appendChild(styleEl);
+        document.documentElement.setAttribute('data-brand', '1');
       })
       .catch(function(){ /* offline, theme.json not uploaded yet, or CORS header
                              not configured yet — keep the hardcoded defaults above */ });
@@ -5094,6 +5203,15 @@
 <script src="modules/84-leave-statement.js"></script>
 <script src="modules/85-payroll-accounting.js"></script>
 <script src="modules/81-payroll-pro.js"></script>
+<script src="modules/87-college-structure.js"></script>
+<script src="modules/88-college-practicals.js"></script>
+<script src="modules/89-college-scholarships.js"></script>
+<script src="modules/90-college-board-exams.js"></script>
+<script src="modules/91-college-programmes.js"></script>
+<script src="modules/92-college-absence.js"></script>
+<script src="modules/93-college-exams.js"></script>
+<script src="modules/94-demo-suggest.js"></script>
+<script src="modules/95-college-dashboard.js"></script>
 
 <!-- PWA installability — registered standalone, after everything else, so a
      school whose deploy doesn't yet include sw.js/manifest.json just skips

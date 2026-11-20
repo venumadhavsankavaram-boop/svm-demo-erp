@@ -198,6 +198,8 @@ function fpxPoActive(cls){
 }
 function fpxPoTarget(cls){
   const i = CLASS_LEVELS.indexOf(cls);
+  const cn = (typeof window.clgNextClass === 'function') ? window.clgNextClass(cls) : null;   // Junior College years; null = no change
+  if(cn !== null) return cn;
   return CLASS_LEVELS[i + 1] || '';   // '' means graduation
 }
 
@@ -289,7 +291,7 @@ function fpxPoMainHtml(){
 
 function renderPromotionsTab(body){
   fpxPoHost = body;
-  const rows = CLASS_LEVELS.map((c, idx) => ({ c, idx, n: fpxPoActive(c).length, next: CLASS_LEVELS[idx + 1] || '' }));
+  const rows = CLASS_LEVELS.map((c, idx) => ({ c, idx, n: fpxPoActive(c).length, next: fpxPoTarget(c) }));
   if(!CLASS_LEVELS.includes(fpxPoSel) || !rows.find(r => r.c === fpxPoSel).n){
     const first = rows.find(r => r.n > 0);
     fpxPoSel = first ? first.c : '';

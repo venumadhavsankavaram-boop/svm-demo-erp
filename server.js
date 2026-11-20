@@ -2452,6 +2452,12 @@ const KV_KEY_TO_MODULE = {
   'class-levels': ['setup'],
   'section-levels': ['setup'],
   'class-section-overrides': ['setup'],
+  'college-structure': ['setup'],
+  'college-practicals': ['setup'],
+  'college-board': ['setup'],
+  'college-programmes': ['setup'],
+  'college-absence': ['setup'],
+  'college-scholarships': ['setup', 'managefee'],
   // Feeds both the Inventory "Approvals" tab and Promotion & Transfer's
   // "Approve Requests" tab — either module's access is enough.
   'pending-approvals': ['inventory', 'promotransfer'],
@@ -3895,6 +3901,8 @@ async function handleAttendanceSettings(req, res) {
 // DEMO_MODE=true: a showcase install with sample data. Nothing leaves the server —
 // no WhatsApp, no push notifications, no online payments.
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
+// The separate college demo (DEMO_MODE + COLLEGE_PACK) loads a junior-college sample instead of the sample school.
+const DEMO_SEED_FILE = (DEMO_MODE && process.env.COLLEGE_PACK === 'true') ? 'seed-college.mjs' : 'seed-demo.mjs';
 // TEST_MODE=true: a private test copy (the preview) running on its OWN database. Nothing leaves the server
 // (no WhatsApp, push or online payments) and an orange "TEST COPY" ribbon is shown, so it can never be mistaken for the live school.
 const TEST_MODE = process.env.TEST_MODE === 'true';
@@ -4751,6 +4759,34 @@ async function feeReminderTick() {
 setInterval(feeReminderTick, 60 * 60 * 1000);
 setTimeout(feeReminderTick, 120 * 1000); // after first-boot table creation has finished
 const REMINDER_ROLES = ['Admin'];
+
+// Junior College: tell parents their child has been absent several days in a row. The office chooses who, the
+// screen sends the list here; one notice per student per last-absent date and day count (repeat presses are skipped).
+app.post('/api/college/absence-notice', async (req, res) => {
+  try {
+    if (!req.authUser || !['Admin', 'Principal', 'Office Assistant'].includes(req.authUser.role)) return res.status(403).json({ error: 'Only the Admin, Principal or Office Assistant can send absence notices.' });
+    const list = Array.isArray(req.body && req.body.notices) ? req.body.notices.slice(0, 300) : [];
+    if (!list.length) return res.status(400).json({ error: 'Nothing to send.' });
+    let sent = 0, skipped = 0, missing = 0;
+    for (const n of list) {
+      const days = Math.floor(Number(n && n.days));
+      const last = String((n && n.lastDate) || '').slice(0, 10);
+      if (!n || !n.studentId || !(days >= 1 && days <= 60) || !/^\d{4}-\d{2}-\d{2}$/.test(last)) { missing++; continue; }
+      const rows = await sql`SELECT * FROM students WHERE id = ${String(n.studentId)} AND deleted_at IS NULL`;
+      const st = rows[0];
+      if (!st) { missing++; continue; }
+      if (!(await insertNotificationEventIfNew(st.id, 'absence_streak', last + '|' + days))) { skipped++; continue; }
+      const name = `${st.last_name} ${st.first_name}`;
+      await sendPushToStudent(st.id, { title: `Absent ${days} days in a row`, body: `${name} has been absent for ${days} days in a row (last marked ${last}). Please contact the college.`, tag: 'attendance-streak-' + last, url: '/' });
+      sent++;
+    }
+    return res.status(200).json({ ok: true, sent, skipped, invalid: missing });
+  } catch (err) {
+    console.error('absence-notice failed', err);
+    return res.status(500).json({ error: 'Could not send the notices.' });
+  }
+});
+
 app.get('/api/fee-reminders/settings', async (req, res) => {
   if (!req.authUser || !REMINDER_ROLES.includes(req.authUser.role)) return res.status(403).json({ error: 'Only the Admin can use this.' });
   return res.status(200).json({ settings: await readReminderSettings(), whatsapp: whatsappConfigured(), push: webPushConfigured() });
@@ -6604,9 +6640,13 @@ async function parentScopedKvValue(req, key, value) {
 }
 
 // Lets the login page show the "demo" banner and the demo logins. Reveals nothing when not a demo.
-app.get('/api/demo-info', (req, res) => {
-  if (!DEMO_MODE) return res.status(200).json({ demo: false, test: TEST_MODE });
-  return res.status(200).json({ demo: true, password: process.env.DEMO_PASSWORD || 'Demo@123', showLogins: demoShowLogins,
+app.get('/api/demo-info', async (req, res) => {
+  const collegePack = process.env.COLLEGE_PACK === 'true';
+  // collegeLook: the College Pack is on and this install has been set to Junior College, so even the sign-in screen can wear the college look.
+  let collegeLook = false;
+  if (collegePack) { try { const r = await sql`SELECT value FROM kv_store WHERE \`key\` = 'college-structure'`; collegeLook = !!r.length && /"institutionType"\s*:\s*"junior_college"/.test(typeof r[0].value === 'string' ? r[0].value : JSON.stringify(r[0].value)); } catch (e) {} }
+  if (!DEMO_MODE) return res.status(200).json({ demo: false, test: TEST_MODE, collegePack, collegeLook });
+  return res.status(200).json({ demo: true, collegePack, collegeLook, password: process.env.DEMO_PASSWORD || 'Demo@123', showLogins: demoShowLogins,
     logins: !demoShowLogins ? [] : [['demo.admin','Admin'],['demo.principal','Principal'],['demo.accountant','Accountant'],['demo.office','Office Assistant'],['demo.teacher','Teacher'],['demo.parent','Parent'],['demo.student','Student'],['demo.branch','Branch Accountant (North Campus only)']] });
 });
 
@@ -7301,6 +7341,56 @@ app.get('/api/vendor/backup-snapshot', async (req, res) => {
     console.error('vendor backup-snapshot error:', err);
     return res.status(500).json({ error: 'Something went wrong on the server taking the backup snapshot.' });
   }
+});
+
+
+// ---- Demo install only: "Suggest a change". Any signed-in demo user can send a one-line idea from the screen
+// they are looking at. It is kept in its own table (the nightly sample reload never wipes it) and, when this install
+// is linked to the vendor dashboard (VENDOR_DASHBOARD_URL / VENDOR_SCHOOL_ID / VENDOR_API_KEY), also sent there as a
+// customization request. Does nothing on a real school's ERP.
+let demoSuggestReady = false;
+async function demoSuggestTable() {
+  if (demoSuggestReady) return;
+  await sql`CREATE TABLE IF NOT EXISTS demo_suggestions (
+    id VARCHAR(40) PRIMARY KEY, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    user_name VARCHAR(191), role VARCHAR(40), screen VARCHAR(120), message TEXT, sent_to_vendor TINYINT NOT NULL DEFAULT 0
+  )`;
+  demoSuggestReady = true;
+}
+app.post('/api/demo/suggest', async (req, res) => {
+  try {
+    if (!DEMO_MODE) return res.status(404).json({ error: 'Not found.' });
+    const u = req.authUser; if (!u) return res.status(401).json({ error: 'Please sign in first.' });
+    const message = String((req.body || {}).message || '').trim().slice(0, 600);
+    const screen = String((req.body || {}).screen || '').trim().slice(0, 120);
+    if (message.length < 3) return res.status(400).json({ error: 'Please write your suggestion (a few words is enough).' });
+    await demoSuggestTable();
+    const recent = await sql`SELECT COUNT(*) AS n FROM demo_suggestions WHERE user_name = ${u.name} AND role = ${u.role} AND created_at > (NOW() - INTERVAL 1 DAY)`;
+    if (Number(recent[0].n) >= 20) return res.status(429).json({ error: 'That is plenty for today. Thank you!' });
+    const id = 'sg_' + crypto.randomBytes(8).toString('hex');
+    await sql`INSERT INTO demo_suggestions (id, user_name, role, screen, message) VALUES (${id}, ${u.name}, ${u.role}, ${screen}, ${message})`;
+    const dashboardUrl = process.env.VENDOR_DASHBOARD_URL, schoolId = process.env.VENDOR_SCHOOL_ID, apiKey = process.env.VENDOR_API_KEY;
+    if (dashboardUrl && schoolId && apiKey) {
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 10000);
+      fetch(dashboardUrl.replace(/\/$/, '') + '/api/ingest/query', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
+        body: JSON.stringify({ schoolId, apiKey, subject: ('Demo suggestion' + (screen ? ': ' + screen : '')).slice(0, 300), message: `From: ${u.name} (${u.role})\n\n${message}`, priority: 'normal', type: 'customization' }),
+      }).then(async r => { if (r.ok && id) await sql`UPDATE demo_suggestions SET sent_to_vendor = 1 WHERE id = ${id}`; }).catch(() => {}).finally(() => clearTimeout(t));
+    }
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('demo suggest error:', err);
+    return res.status(500).json({ error: 'Could not save your suggestion. Please try again.' });
+  }
+});
+app.get('/api/demo/suggestions', async (req, res) => {
+  try {
+    if (!DEMO_MODE) return res.status(404).json({ error: 'Not found.' });
+    if (!req.authUser || req.authUser.role !== 'Admin') return res.status(403).json({ error: 'Only the Admin can read suggestions.' });
+    await demoSuggestTable();
+    const rows = await sql`SELECT id, created_at, user_name, role, screen, message, sent_to_vendor FROM demo_suggestions ORDER BY created_at DESC, id DESC LIMIT 200`;
+    return res.status(200).json({ suggestions: rows });
+  } catch (err) { console.error('demo suggestions list error:', err); return res.status(500).json({ error: 'Could not read suggestions.' }); }
 });
 
 // Lets a signed-in staff member send a message directly to the vendor from
@@ -10087,7 +10177,7 @@ if (DEMO_MODE) {
   // Re-load the sample school whenever demo/seed-demo.mjs changes (its fingerprint is kept in kv_store).
   const seedFingerprint = async () => {
     const { createHash } = await import('node:crypto'); const fs = await import('node:fs');
-    return createHash('sha256').update(fs.readFileSync(new URL('./demo/seed-demo.mjs', import.meta.url))).digest('hex').slice(0, 16);
+    return createHash('sha256').update(fs.readFileSync(new URL('./demo/' + DEMO_SEED_FILE, import.meta.url))).digest('hex').slice(0, 16);
   };
   const markSeeded = async () => {
     const h = await seedFingerprint();
@@ -10109,7 +10199,7 @@ if (DEMO_MODE) {
         for (const [k, v] of Object.entries(r.headers)) { if (Array.isArray(v)) v.forEach(x => h.append(k, x)); else if (v !== undefined) h.set(k, String(v)); }
         return new Response([204, 304].includes(r.statusCode) ? null : r.payload, { status: r.statusCode, headers: h });
       };
-      const mod = await import('./demo/seed-demo.mjs?run=' + Date.now());
+      const mod = await import('./demo/' + DEMO_SEED_FILE + '?run=' + Date.now());
       await mod.finished;
       await markSeeded();
       await demoTrialsRestore();

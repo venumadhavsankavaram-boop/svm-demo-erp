@@ -63,6 +63,7 @@ const PENDING_APPROVALS_KEY = "pending-approvals";
   function renderPTRoster(body){
     const list = students.filter(s => s.className===ptClass && isActive(s)).sort((a,b) => (a.section+a.firstName).localeCompare(b.section+b.firstName));
     const classIdx = CLASS_LEVELS.indexOf(ptClass);
+    const ptCn = (typeof window.clgNextClass === 'function') ? window.clgNextClass(ptClass) : null;   // Junior College years; null = no change
     const isAdmin = currentUser.role === 'Admin';
     const explanationBlock = !isAdmin ? `
       <div class="profile-card" style="max-width:640px; margin-bottom:16px; border-left:4px solid var(--gold);">
@@ -96,8 +97,8 @@ const PENDING_APPROVALS_KEY = "pending-approvals";
                 <option value="previous" selected>Previous Year Dues</option>
               </select>` : '—'}</td>
               <td><select class="pt-target-class" data-student="${s.id}">
-                ${CLASS_LEVELS.map((c,i) => `<option value="${c}" ${i===classIdx+1?'selected':''}>${c}${i>=classIdx+2?' (Double Promotion)':''}</option>`).join('')}
-                <option value="__graduate__">Graduate</option>
+                ${CLASS_LEVELS.map((c,i) => `<option value="${c}" ${(ptCn !== null ? c===ptCn : i===classIdx+1)?'selected':''}>${c}${i>=classIdx+2?' (Double Promotion)':''}</option>`).join('')}
+                <option value="__graduate__" ${ptCn === '' ? 'selected' : ''}>Graduate</option>
               </select></td>
             </tr>`;
           }).join('')}
@@ -387,7 +388,8 @@ const PENDING_APPROVALS_KEY = "pending-approvals";
 
   async function promoteClass(cls){
     const idx = CLASS_LEVELS.indexOf(cls);
-    const next = CLASS_LEVELS[idx+1];
+    const cnx = (typeof window.clgNextClass === 'function') ? window.clgNextClass(cls) : null;
+    const next = cnx !== null ? cnx : CLASS_LEVELS[idx+1];
     const affected = students.filter(s => s.className===cls && isActive(s));
     if(affected.length===0) return;
     const msg = next
