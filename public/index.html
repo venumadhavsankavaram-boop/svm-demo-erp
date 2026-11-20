@@ -492,6 +492,8 @@
     html[data-clook="portal"] .sb-section-group .sb-link.active{ background:#E3EBFA; color:#0B2A5B; font-weight:700; }
     html[data-clook="portal"] .sb-search-wrap{ display:none; order:9; margin:0 0 0 auto; width:150px; flex-shrink:0; }
     html[data-clook="portal"] .sb-user-footer{ border:none; padding:0; margin:0; flex-shrink:0; }
+    /* The account menu normally opens upward from a bottom sidebar; in the top-bar look the chip is at the top, so open it downward and keep it on screen. */
+    html[data-clook="portal"] .sb-menu{ top:calc(100% + 8px); bottom:auto; left:auto; right:0; width:230px; }
     @media (min-width:1500px){ html[data-clook="portal"] .sb-search-wrap{ display:block; } }
     html[data-clook="portal"] .main{ height:auto !important; flex:1 1 0; overflow-y:auto; min-height:0; max-width:1500px; width:100%; margin:0 auto; }
   }
