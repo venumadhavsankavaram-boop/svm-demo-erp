@@ -16,10 +16,12 @@
   const word = (re, to) => ({ re, fn: m => sameCase(m, to) });
   const R = {
     junior_college: [
+      { re: /\bReport Cards?\b/gi, fn: m => m === m.toUpperCase() ? 'MARKS MEMO' : m[0] === 'R' ? 'Marks Memo' : 'marks memo' },
       word(/\bClass Teachers?\b/gi, 'Class In-charge'),
       word(/\bTeachers\b/gi, 'Lecturers'), word(/\bTeacher\b/gi, 'Lecturer'),
     ],
     degree_college: [
+      { re: /\bReport Cards?\b/gi, fn: m => m === m.toUpperCase() ? 'MARKS MEMO' : m[0] === 'R' ? 'Marks Memo' : 'marks memo' },
       word(/\bClass Teachers?\b/gi, 'Class Mentor'),
       { re: /\b(a|an) teacher\b/gi, fn: m => m[0] === 'A' ? 'A faculty member' : 'a faculty member' },
       word(/\bTeachers\b/gi, 'Faculty'), word(/\bTeacher\b/gi, 'Faculty'),
