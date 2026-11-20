@@ -29,6 +29,11 @@ test('school becomes college only in fixed phrases, never in names', () => {
   assert.equal(c('Welcome to your school', 'junior_college'), 'Welcome to your college');
   assert.equal(c('Sunrise Public School', 'degree_college'), 'Sunrise Public School');
 });
+test('colleges say Marks Memo, school keeps Report Card', () => {
+  assert.equal(c('Print Report Card', 'degree_college'), 'Print Marks Memo');
+  assert.equal(c('report cards', 'junior_college'), 'marks memo');
+  assert.equal(c('Report Card', 'school'), 'Report Card');
+});
 test('unknown type and non-text are returned as they are', () => { assert.equal(c('Teacher', 'x'), 'Teacher'); assert.equal(c(null, 'degree_college'), null); });
 test('word list for the three types', () => { assert.equal(win.instNames('junior_college').staff, 'Lecturers'); assert.equal(win.instNames('degree_college').staff, 'Faculty'); assert.equal(win.instNames('school').staff, 'Teachers'); });
 done();
