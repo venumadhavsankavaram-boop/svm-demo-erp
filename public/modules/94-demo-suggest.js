@@ -67,5 +67,60 @@
       try { const r = await fetch('/api/demo-info', { credentials: 'same-origin' }); const j = await r.json(); if(j && j.demo) addButton(); } catch(e){}
     } else if(tries > 120) clearInterval(t);
   }, 1000);
+
+  /* Exit feedback: when a demo visitor presses Sign out, ask once (per visit) for a rating and what to add or change.
+     Skipping is one tap and signs out straight away. Automatic idle sign-out is never interrupted. */
+  function typeName(){
+    try { const t = typeof window.instCurrentType === 'function' ? window.instCurrentType() : ''; return ({ school: 'School', junior_college: 'Junior College', degree_college: 'Degree College' })[t] || ''; } catch(e){ return ''; }
+  }
+  function exitDialog(done){
+    close();
+    let rating = 0;
+    const m = document.createElement('div');
+    m.id = 'dsgModal';
+    m.style.cssText = 'position:fixed;inset:0;z-index:100001;background:rgba(20,16,40,.55);display:flex;align-items:center;justify-content:center;padding:16px';
+    m.innerHTML = `<div style="background:#fff;color:#1c1840;border-radius:16px;max-width:460px;width:100%;padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:inherit" role="dialog" aria-label="Feedback before you go">
+      <div style="font-weight:800;font-size:1.05rem;margin-bottom:4px">Before you go</div>
+      <div style="font-size:.85rem;color:#5b6784;margin-bottom:10px">How was the demo? Your answer helps us build the right ERP. Both boxes are optional.</div>
+      <div id="dsgStars" style="display:flex;gap:6px;margin-bottom:10px">${[1,2,3,4,5].map(n => `<button type="button" data-n="${n}" aria-pressed="false" aria-label="${n} out of 5" style="flex:1;border:1px solid #cfd4e4;background:#fff;border-radius:10px;padding:8px 0;font-size:1.3rem;cursor:pointer">${['😞','😕','😐','🙂','😀'][n-1]}</button>`).join('')}</div>
+      <textarea id="dsgExitText" maxlength="450" rows="3" placeholder="What did you like, and what should we add or change?" style="width:100%;box-sizing:border-box;border:1px solid #cfd4e4;border-radius:10px;padding:10px;font:inherit;resize:vertical"></textarea>
+      <div id="dsgMsg" style="min-height:1.2em;font-size:.82rem;color:#b3261e;margin-top:6px"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap">
+        <button type="button" id="dsgSkip" style="border:1px solid #cfd4e4;background:#fff;color:#1c1840;border-radius:10px;padding:8px 14px;font:inherit;cursor:pointer">Skip and sign out</button>
+        <button type="button" id="dsgExitSend" style="border:0;background:#1c1840;color:#fff;border-radius:10px;padding:8px 16px;font:inherit;font-weight:700;cursor:pointer">Send and sign out</button>
+      </div></div>`;
+    document.body.appendChild(m);
+    m.querySelectorAll('#dsgStars button').forEach(b => { b.onclick = () => { rating = +b.getAttribute('data-n'); m.querySelectorAll('#dsgStars button').forEach(x => { const on = +x.getAttribute('data-n') === rating; x.setAttribute('aria-pressed', String(on)); x.style.background = on ? '#1c1840' : '#fff'; }); }; });
+    document.getElementById('dsgSkip').onclick = () => { close(); done(); };
+    document.getElementById('dsgExitSend').onclick = async () => {
+      const text = document.getElementById('dsgExitText').value.trim(), msg = document.getElementById('dsgMsg'), btn = document.getElementById('dsgExitSend');
+      if(!rating && !text){ msg.textContent = 'Pick a face or write a few words, or press Skip.'; return; }
+      btn.disabled = true;
+      const message = ('[Exit feedback]' + (typeName() ? '[' + typeName() + '] ' : ' ') + 'Rating: ' + (rating ? rating + '/5' : 'not given') + (text ? ' | ' + text : '')).slice(0, 600);
+      try { await Promise.race([fetch('/api/demo/suggest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ message, screen: screenName(), kind: 'exit' }) }), new Promise(r => setTimeout(r, 4000))]); } catch(e){}
+      close(); done();
+    };
+  }
+  (function wrapLogout(){
+    let tries = 0;
+    const t = setInterval(async () => {
+      tries++;
+      let ready = false; try { ready = !!currentUser; } catch(e){}
+      if(!ready){ if(tries > 120) clearInterval(t); return; }
+      clearInterval(t);
+      try {
+        const r = await fetch('/api/demo-info', { credentials: 'same-origin' }); const j = await r.json();
+        if(!(j && j.demo) || typeof window.logout !== 'function') return;
+        const orig = window.logout;
+        window.logout = function(){
+          let asked = false; try { asked = sessionStorage.getItem('dsgExitAsked') === '1'; } catch(e){}
+          if(asked) return orig.apply(this, arguments);
+          try { sessionStorage.setItem('dsgExitAsked', '1'); } catch(e){}
+          exitDialog(() => orig());
+        };
+      } catch(e){}
+    }, 1000);
+  })();
+
   window.dsgOpen = open; window.dsgScreenName = screenName;
 })();
