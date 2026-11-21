@@ -3005,6 +3005,7 @@ app.get('/api/student-media/:id', async (req, res) => {
 function studentAdmKey(v) {
   return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, '').replace(/\d+/g, d => String(parseInt(d, 10)));
 }
+const IDEMPOTENT_ID_TABLES = new Set(['exam_hall_tickets']);
 async function handleHybrid(req, res, config) {
   const { table, core, softDelete, deleteViaApprovalOnly } = config;
   if (req.method === 'GET') {
@@ -3081,14 +3082,7 @@ async function handleHybrid(req, res, config) {
         if (hit) return res.status(409).json({ error: `Admission No ${body.admissionNo} already belongs to ${(hit.first_name || '')} ${(hit.last_name || '')}`.trim() + '. Use a different number or leave it blank.' });
       }
     }
-    if (req.method === 'POST') {
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
-      await sql.query(
-        `INSERT INTO ${table} (${cols.join(', ')}, extra) VALUES (${placeholders}, $${cols.length + 1}::jsonb)`,
-        [...vals, JSON.stringify(extra)]
-      );
-      return res.status(201).json({ ok: true });
-    } else {
+    const runUpdate = async () => {
       // Some tables (rooms, exam-hall-tickets, exam-room-config) have no real columns besides id — then SET is just extra.
       const setParts = cols.filter(c => c !== 'id').map((c, i) => `${c} = $${i + 2}`);
       const nonIdVals = core.filter(f => f.col !== 'id').map(f => coreVals[f.app]);
@@ -3098,6 +3092,24 @@ async function handleHybrid(req, res, config) {
         [body.id, ...nonIdVals, JSON.stringify(extra)]
       );
       return res.status(200).json({ ok: true });
+    };
+    if (req.method === 'POST') {
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      try {
+        await sql.query(
+          `INSERT INTO ${table} (${cols.join(', ')}, extra) VALUES (${placeholders}, $${cols.length + 1}::jsonb)`,
+          [...vals, JSON.stringify(extra)]
+        );
+        return res.status(201).json({ ok: true });
+      } catch (e) {
+        // Hall tickets use a fixed id (ht_<exam>_<student>), so two people generating
+        // them for the same exam at the same moment (common on the shared demo) used to
+        // collide with a 500. The same id means the same ticket, so save it as an update.
+        if (IDEMPOTENT_ID_TABLES.has(table) && /Duplicate entry/i.test(String((e && e.message) || ''))) return await runUpdate();
+        throw e;
+      }
+    } else {
+      return await runUpdate();
     }
   }
   if (req.method === 'DELETE') {
