@@ -19,6 +19,16 @@
     document.head.appendChild(st);
     const setH = () => document.documentElement.style.setProperty('--demo-h', bar.offsetHeight + 'px');
     setH(); window.addEventListener('resize', setH);
+    /* Switch between the three SVM EdTech demos (School, Junior College, Degree College). Each demo is its own app, so each asks for its own sign-in once. */
+    (function demoSwitch(){
+      const sw = document.createElement('div'); sw.id = 'demoSwitch';
+      const items = [['demo.svmedtech.com', 'School'], ['college.svmedtech.com', 'Junior College'], ['degree.svmedtech.com', 'Degree College']];
+      sw.innerHTML = '<span style="opacity:.8">Demo:</span> ' + items.map(i => i[0] === location.hostname
+        ? '<b style="background:#fff;color:#7a2e8f;border-radius:10px;padding:2px 9px">' + i[1] + '</b>'
+        : '<a href="https://' + i[0] + '/" style="color:#fff;text-decoration:underline;font-weight:600;padding:2px 4px">' + i[1] + '</a>').join(' ');
+      sw.style.cssText = 'position:fixed;right:10px;bottom:calc(var(--demo-h,24px) + 8px);z-index:99998;background:#7a2e8f;color:#fff;font:12px system-ui,sans-serif;padding:6px 11px;border-radius:18px;box-shadow:0 2px 10px rgba(0,0,0,.25);display:flex;gap:6px;align-items:center;flex-wrap:wrap;max-width:calc(100vw - 20px)';
+      document.body.appendChild(sw);
+    })();
     document.title = 'DEMO — ' + document.title;
     /* A visitor who started the demo from svmedtech.com: show how long the pass lasts, a way to switch view, and a WhatsApp link. */
     fetch('/api/demo/pass', { cache: 'no-store', credentials: 'same-origin' }).then(r => r.ok ? r.json() : null).then(p => {
