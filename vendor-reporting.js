@@ -216,13 +216,19 @@ async function postToDashboard(path, body) {
 // heartbeat so the vendor dashboard can bill a per-student plan from the real number. Fail-silent like everything here.
 let studentCounter = null;
 export function setStudentCounter(fn) { studentCounter = typeof fn === 'function' ? fn : null; }
+// Same idea for the kind of institute (school, junior_college, degree_college), so the vendor dashboard can tell them apart without anyone typing it.
+let kindReporter = null;
+export function setKindReporter(fn) { kindReporter = typeof fn === 'function' ? fn : null; }
 
 async function sendHeartbeat() {
   let activeStudents;
   try { if (studentCounter) { const n = Number(await studentCounter()); if (Number.isFinite(n) && n >= 0) activeStudents = Math.round(n); } } catch (e) { /* not ready yet: skip this time */ }
+  let kind;
+  try { if (kindReporter) { const k = String(await kindReporter() || ''); if (['school', 'junior_college', 'degree_college'].includes(k)) kind = k; } } catch (e) { /* skip this time */ }
   const result = await postToDashboard('/api/ingest/heartbeat', {
     meta: {
       activeStudents,
+      kind,
       uptimeSeconds: Math.round(process.uptime()),
       nodeVersion: process.version,
       reportedAt: new Date().toISOString(),
