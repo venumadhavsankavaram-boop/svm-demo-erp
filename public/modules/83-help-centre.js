@@ -309,14 +309,20 @@
   /* ---------- first-login tour ---------- */
   let tourRun = null;
   const uid = () => { const u = me(); return u ? String(u.id || u.username || u.name || 'u') : 'u'; };
-  const tourKey = () => 'hcTour:' + uid() + ':' + audOf() + (demo ? ':demo' : '');
+  const tourKey = () => demo ? 'hcTour:demo' : 'hcTour:' + uid() + ':' + audOf();   // the demo shows its welcome once per browser, not once per demo login
   function tourCards() {
     const a = audOf(); let own = C.tour[a] || [];
     if (a === 'admin' && !demo && !isMgr()) own = own.filter(c => c[1][0] !== 'You decide what they see' && (c[1][0] !== 'Fees and UPI' || roleSeesTopic('admin', 'fees')));
     return (demo ? C.tour.demo : []).concat(own);
   }
+  /* First login shows ONE short card ("Help is in the menu"); the full walkthrough is only a button inside Help ("Take the tour"). */
+  function introCards() {
+    const own = tourCards(), a = audOf(), mine = C.tour[a] || [];
+    const help = mine.length ? mine[mine.length - 1] : null;
+    return (demo ? C.tour.demo : []).concat(help ? [help] : []);
+  }
   function startTour(force) {
-    const cards = tourCards(); if (!cards.length || $('hcTour')) return; css();
+    const cards = force ? tourCards() : introCards(); if (!cards.length || $('hcTour')) return; css();
     tourRun = { i: 0, cards }; paintTour();
   }
   function paintTour() {
