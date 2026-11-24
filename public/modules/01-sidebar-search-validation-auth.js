@@ -639,7 +639,7 @@ let sbPreSearchCollapse = null;
     Principal: ['dashboard','insights','admissions','managefee','attendance','exams','subjects','promotransfer','result','staff','accounting','announcements','inbox','noticeboard','websiteinquiries','websitegallery','contactvendor','reports','inventory','timetable','syllabus','transport','library','hostel','setup'],
     Accountant: ['dashboard','admissions','managefee','accounting','reports','inventory','transport'],
     'Office Assistant': ['admissions'],
-    Teacher: ['admissions','attendance','exams','subjects','result','timetable','syllabus','library','announcements','inbox'],
+    Teacher: ['admissions','attendance','exams','subjects','result','timetable','syllabus','library','announcements','noticeboard','inbox'],
     Staff: ['admissions','attendance','inbox'],
     Student: ['myprofile'],
     Parent: ['myprofile'],
