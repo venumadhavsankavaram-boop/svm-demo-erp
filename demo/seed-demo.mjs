@@ -108,7 +108,7 @@ async function safetyCheckAndWipe() {
     throw new Error(`Refusing to wipe: this database holds "${name || 'a school'}" with ${nStudents} students, not the demo school.`);
   }
   console.log('Wiping demo tables…');
-  const tables = ['students','staff','staff_payroll','payments','student_discounts','student_extra_fees','attendance_records','holidays','exam_results','staff_attendance_records','acct_income','acct_expenses','comms_messages','subjects','exam_defs','admission_inquiries','website_gallery','user_notifications','notification_events','audit_log','deletion_requests','sessions','doc_counters','kv_store','exam_plans','online_attempts','online_exams','study_material','homework_items','student_submissions','student_concerns','staff_leave_requests'];
+  const tables = ['students','staff','staff_payroll','payments','student_discounts','student_extra_fees','attendance_records','holidays','exam_results','staff_attendance_records','acct_income','acct_expenses','comms_messages','subjects','exam_defs','admission_inquiries','website_gallery','user_notifications','notification_events','audit_log','deletion_requests','sessions','doc_counters','kv_store','exam_plans','online_attempts','online_exams','study_material','homework_items','student_submissions','student_concerns','staff_leave_requests','rooms','exam_hall_tickets','exam_room_config'];
   for (const t of tables) { try { await sql.query(`DELETE FROM ${t}`); } catch (e) { console.warn(`  (skip ${t}: ${e.message.slice(0, 60)})`); } }
   try { await sql.query('DELETE FROM users'); } catch (e) { console.warn('  (skip users)'); }
   try { await sql.query('DELETE FROM branches WHERE is_main = 0'); } catch (e) {}
