@@ -35,6 +35,10 @@ button:disabled{opacity:.6;cursor:default}
 .role:hover{border-color:var(--gold)}.role b{display:block;color:var(--navy)}.role span{font-size:.84rem;color:var(--soft)}
 .role em{font-style:normal;font-size:1.4rem;flex:none}
 .grp{margin:16px 0 2px;font-size:.78rem;text-transform:uppercase;letter-spacing:.07em;color:var(--soft)}
+.sw{display:flex;gap:6px;margin:0 0 14px;padding:4px;background:var(--card);border:1px solid var(--line);border-radius:13px}
+.sw a{flex:1;text-align:center;padding:9px 6px;border-radius:10px;font-size:.84rem;font-weight:600;color:var(--soft);text-decoration:none;line-height:1.2}
+.sw a.on{background:var(--navy);color:#fff}
+@media (prefers-color-scheme:dark){.sw a.on{color:#12152b}}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -42,6 +46,7 @@ button:disabled{opacity:.6;cursor:default}
 <div class="wrap">
   <div class="brand"><span class="logo"><i></i><i></i><i></i><i></i><i class="g"></i><i></i><i></i><i></i><i></i></span>SVM EDTECH</div>
 
+  <nav class="sw" id="sw" aria-label="Choose a demo"><a data-h="demo.svmedtech.com" href="https://demo.svmedtech.com/demo-start">School</a><a data-h="college.svmedtech.com" href="https://college.svmedtech.com/demo-start">Junior College</a><a data-h="degree.svmedtech.com" href="https://degree.svmedtech.com/demo-start">Degree College</a></nav>
   <div class="card" id="loading"><p class="sub" style="margin:0">Opening the demo…</p></div>
 
   <form class="card" id="form" hidden novalidate>
@@ -93,6 +98,8 @@ button:disabled{opacity:.6;cursor:default}
 (function(){
   var $=function(i){return document.getElementById(i)};
   var WA='917780204177';
+  document.querySelectorAll('#sw a').forEach(function(a){if(a.dataset.h===location.hostname)a.className='on'});
+
   function show(id){['loading','form','pick','ended'].forEach(function(x){$(x).hidden=x!==id})}
   function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{}),credentials:'same-origin'}).then(function(r){return r.json().catch(function(){return {}}).then(function(j){j._s=r.status;return j})})}
   function when(iso){var d=new Date(iso);return d.toLocaleString('en-IN',{day:'numeric',month:'short',hour:'numeric',minute:'2-digit'})}
