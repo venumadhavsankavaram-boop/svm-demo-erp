@@ -25,11 +25,17 @@ import { initBranches, ensureBranchSchema, installBranchRoutes, branchGuard, kvB
 // Client"). Both are opt-in and fail silent: with VENDOR_DASHBOARD_URL /
 // VENDOR_SCHOOL_ID / VENDOR_API_KEY unset (the default for a school not
 // yet added to the vendor dashboard), this does nothing at all.
-import { startVendorReporting, setStudentCounter, planBlocksRole, reportVendorError, isAccessSuspended, getModuleAccess, reportDemoLead } from './vendor-reporting.js';
+import { startVendorReporting, setStudentCounter, setKindReporter, planBlocksRole, reportVendorError, isAccessSuspended, getModuleAccess, reportDemoLead } from './vendor-reporting.js';
 import { handleVendorSupportLogin } from './vendor-support-login.js';
 import { newTotpSecret, checkTotp, otpauthUrl, newRecoveryCodes, hashCode, newEmailCode, smtpConfigured, maskEmail, looksLikeEmail, sendMail } from './twofa.js';
 // Active students (not deleted, status blank or Active): what a per-student plan is billed on.
 setStudentCounter(async () => Number((await sql`SELECT COUNT(*) AS c FROM students WHERE deleted_at IS NULL AND (status IS NULL OR status = '' OR LOWER(status) = 'active')`)[0].c) || 0);
+// Kind of institute, reported with every heartbeat: the College Pack installs say junior or degree college (set on the College structure screen); everything else is a school.
+setKindReporter(async () => {
+  if (process.env.COLLEGE_PACK !== 'true') return 'school';
+  try { const r = await sql`SELECT value FROM kv_store WHERE \`key\` = 'college-structure'`; const m = r.length && /"institutionType"\s*:\s*"(junior_college|degree_college)"/.exec(typeof r[0].value === 'string' ? r[0].value : JSON.stringify(r[0].value)); if (m) return m[1]; } catch (e) {}
+  return 'junior_college';
+});
 startVendorReporting();
 
 const __filename = fileURLToPath(import.meta.url);
