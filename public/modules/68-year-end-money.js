@@ -302,7 +302,7 @@
     const cf = h.carried > 0 ? studentExtraFees.find(e => e.studentId === s.id && e.kind === 'carry' && String(e.name).indexOf('— ' + h.className + ' (' + h.academicYear + ')') >= 0 && Math.abs(Number(e.amount) - Number(h.carried)) < 0.01) : null;
     if(cf && (cf.paid || Number(cf.paidAmount) > 0)){ showToast('Part of the carried dues is already paid, so this cannot be undone safely.'); return; }
     if(!await showConfirmDialog('Undo the ' + (grad ? 'graduation' : 'promotion') + ' of ' + (s.firstName || '') + ' ' + (s.lastName || '') + '? They go back to ' + h.className + (cf ? ' and the carried dues of ' + money(cf.amount) + ' are removed (the unpaid fees show in ' + h.className + ' again).' : '.'), { title: 'Undo promotion', okText: 'Yes, undo' })) return;
-    s.className = h.className; if(h.section) s.section = h.section; if(grad) s.status = 'Active';
+    s.className = h.className; if(h.section) s.section = h.section; if(grad){ s.status = 'Active'; delete s.passedOutYear; }
     if(cf) studentExtraFees.splice(studentExtraFees.indexOf(cf), 1);
     feeYearHistory.splice(feeYearHistory.indexOf(h), 1);
     await persist();
