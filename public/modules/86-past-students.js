@@ -16,7 +16,8 @@
    opening balances included) - the same numbers the fee reports show.
    ========================================================================== */
 (function(){
-  const PS = { q: '', status: 'all', year: 'all', owes: 'all', cls: 'all', edit: '' };
+  const MARKS = ['Not received', 'Received', 'Handed over'];
+  const PS = { q: '', status: 'all', year: 'all', owes: 'all', cls: 'all', marks: 'all', edit: '' };
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const rs = n => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
   const isPast = s => !s.deleted && String(s.status || 'Active').trim().toLowerCase() !== 'active';
@@ -36,13 +37,14 @@
     return (students || []).filter(isPast).map(s => {
       const li = leftInfo(s), pays = (payments || []).filter(p => p.studentId === s.id && !p.voided);
       return { s, name: nameOf(s), year: li.year, due: oldDue(s), receipts: pays.length, paid: pays.reduce((a, p) => a + (typeof payNet === 'function' ? payNet(p) : Number(p.amount) || 0), 0),
-        status: s.status || 'Inactive', joined: s.joinedClass || '', last: s.className || '' };
+        status: s.status || 'Inactive', joined: s.joinedClass || '', last: s.className || '', marks: s.boardMarksStatus || 'Not received' };
     });
   }
   function filtered(all){
     const q = PS.q.trim().toLowerCase();
     return all.filter(r => (!q || (r.name + ' ' + (r.s.admissionNo || '') + ' ' + (r.s.fatherName || '')).toLowerCase().includes(q))
       && (PS.status === 'all' || r.status === PS.status) && (PS.year === 'all' || r.year === PS.year) && (PS.cls === 'all' || r.last === PS.cls)
+      && (PS.marks === 'all' || r.marks === PS.marks)
       && (PS.owes === 'all' || (PS.owes === 'yes' ? r.due > 0 : r.due <= 0)))
       .sort((a, b) => String(b.year).localeCompare(String(a.year)) || a.name.localeCompare(b.name));
   }
@@ -80,16 +82,18 @@
         <input id="psQ" value="${esc(PS.q)}" placeholder="Search name, admission no, father" oninput="psSearch(this.value)" style="flex:1;min-width:200px;padding:8px 10px;border:1px solid var(--line,#d9ddec);border-radius:8px;">
         ${sel('psStatus', PS.status, statuses, 'Any status')}${sel('psYear', PS.year, years, 'Any year')}${sel('psCls', PS.cls, classes, 'Any last class')}
         <select id="psOwes" onchange="psSet('psOwes',this.value)" style="padding:7px 9px;border:1px solid var(--line,#d9ddec);border-radius:8px;"><option value="all">Dues: any</option><option value="yes" ${PS.owes === 'yes' ? 'selected' : ''}>Owes money</option><option value="no" ${PS.owes === 'no' ? 'selected' : ''}>No dues</option></select>
+        <select id="psMarks" onchange="psSet('psMarks',this.value)" style="padding:7px 9px;border:1px solid var(--line,#d9ddec);border-radius:8px;"><option value="all">Marks sheet: any</option>${MARKS.map(o => `<option ${PS.marks === o ? 'selected' : ''}>${o}</option>`).join('')}</select>
         <button class="btn btn-ghost" onclick="psExport()">Download Excel</button>
       </div>
       <div style="overflow-x:auto;border:1px solid var(--line,#d9ddec);border-radius:10px;"><table style="width:100%;border-collapse:collapse;font-size:.85rem;">
-        <thead><tr style="background:var(--soft,#edeff8);text-align:left;">${['Name', 'Adm. No', 'Joined', 'Last class', 'Status', 'Year', 'Old dues', 'Receipts', ''].map(h => `<th style="padding:8px;white-space:nowrap;">${h}</th>`).join('')}</tr></thead>
+        <thead><tr style="background:var(--soft,#edeff8);text-align:left;">${['Name', 'Adm. No', 'Joined', 'Last class', 'Status', 'Year', 'Old dues', 'Receipts', 'Marks sheet', ''].map(h => `<th style="padding:8px;white-space:nowrap;">${h}</th>`).join('')}</tr></thead>
         <tbody>${list.slice(0, 300).map(r => `<tr style="border-top:1px solid var(--line,#d9ddec);">
           <td style="padding:7px 8px;"><b>${esc(r.name)}</b><div style="color:var(--ink-soft,#55608a);font-size:.75rem;">${esc(r.s.fatherName || '')}</div></td>
           <td style="padding:7px 8px;">${esc(r.s.admissionNo || '')}</td><td style="padding:7px 8px;">${esc(r.joined || '—')}</td><td style="padding:7px 8px;">${esc(r.last)}</td>
           <td style="padding:7px 8px;">${esc(r.status)}</td><td style="padding:7px 8px;">${esc(r.year || '—')}</td>
           <td style="padding:7px 8px;font-weight:600;color:${r.due > 0 ? '#b3261e' : 'inherit'};">${r.due > 0 ? rs(r.due) : '—'}</td><td style="padding:7px 8px;">${r.receipts}</td>
-          <td style="padding:7px 8px;white-space:nowrap;"><button class="btn btn-ghost btn-sm" onclick="psFees('${esc(r.s.id)}')">Fees</button> <button class="btn btn-ghost btn-sm" onclick="psEdit('${esc(r.s.id)}')">Edit</button></td></tr>`).join('') || `<tr><td colspan="9" style="padding:22px;text-align:center;color:var(--ink-soft,#55608a);">${all.length ? 'No students match these filters.' : 'No past students yet. Students appear here when they are promoted out of the highest class, transferred, or set to Inactive.'}</td></tr>`}</tbody></table></div>
+          <td style="padding:7px 8px;white-space:nowrap;color:${r.marks === 'Handed over' ? '#1b7a3a' : r.marks === 'Received' ? '#b26a00' : 'inherit'};">${esc(r.marks)}${r.s.boardMarksDate ? '<div style="font-size:.72rem;color:var(--ink-soft,#55608a);">' + esc(r.s.boardMarksDate) + '</div>' : ''}</td>
+          <td style="padding:7px 8px;white-space:nowrap;"><button class="btn btn-ghost btn-sm" onclick="psFees('${esc(r.s.id)}')">Fees</button> <button class="btn btn-ghost btn-sm" onclick="psEdit('${esc(r.s.id)}')">Edit</button></td></tr>`).join('') || `<tr><td colspan="10" style="padding:22px;text-align:center;color:var(--ink-soft,#55608a);">${all.length ? 'No students match these filters.' : 'No past students yet. Students appear here when they are promoted out of the highest class, transferred, or set to Inactive.'}</td></tr>`}</tbody></table></div>
       ${list.length > 300 ? `<div style="font-size:.8rem;color:var(--ink-soft,#55608a);margin-top:6px;">Showing the first 300 of ${list.length}. Use the filters or download Excel for all.</div>` : ''}
       <div style="font-size:.78rem;color:var(--ink-soft,#55608a);margin-top:10px;">Certificates (TC, study, bonafide) for past students: use <b>More Actions</b> and pick the student. Old dues are collected from the student's fee page (press <b>Fees</b>).</div>
       <div id="psEditBox"></div>`;
@@ -107,6 +111,11 @@
         <label>Year they left<input id="psEYear" value="${esc(s.passedOutYear || leftInfo(s).year)}" placeholder="2025-26" style="${f}"></label>
         <label>Class they joined<select id="psEJoin" style="${f}">${opt(cls, s.joinedClass || '')}</select></label>
         <label>Last class<select id="psELast" style="${f}">${opt(cls, s.className || '')}</select></label></div>
+      <div style="font-weight:600;margin:4px 0;">Board marks sheet</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:6px 0 10px;">
+        <label>Where is it<select id="psEMarks" style="${f}">${MARKS.map(o => `<option ${o === (s.boardMarksStatus || 'Not received') ? 'selected' : ''}>${o}</option>`).join('')}</select></label>
+        <label>Date<input id="psEMDate" type="date" value="${esc(s.boardMarksDate || '')}" style="${f}"></label>
+        <label>Handed to (name / signature taken)<input id="psEMTo" value="${esc(s.boardMarksTo || '')}" placeholder="Father / self / other" style="${f}"></label></div>
       <div style="font-size:.78rem;color:var(--ink-soft,#55608a);margin-bottom:8px;">Setting status to <b>Active</b> brings the student back into the normal lists.</div>
       <button class="btn btn-primary" onclick="psSave()">Save</button> <button class="btn btn-ghost" onclick="psEditClose()">Cancel</button></div>`;
     box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -120,7 +129,7 @@
     PS.edit = ''; shell().style.display = 'flex'; paint();
   };
   window.closePastStudents = function(){ const el = document.getElementById('psOverlay'); if(el) el.style.display = 'none'; };
-  window.psSet = (id, v) => { PS[{ psStatus: 'status', psYear: 'year', psCls: 'cls', psOwes: 'owes' }[id]] = v; paint(); };
+  window.psSet = (id, v) => { PS[{ psStatus: 'status', psYear: 'year', psCls: 'cls', psOwes: 'owes', psMarks: 'marks' }[id]] = v; paint(); };
   let _t; window.psSearch = v => { PS.q = v; clearTimeout(_t); _t = setTimeout(() => { paint(); const i = document.getElementById('psQ'); if(i){ i.focus(); i.setSelectionRange(v.length, v.length); } }, 250); };
   window.psFees = id => { closePastStudents(); try { switchView('managefee'); setTimeout(() => openStudentLedger(id), 400); } catch(e){ showToast('Open Manage Fee and search for the student.'); } };
   window.psEdit = id => { PS.edit = id; paintEdit(); };
@@ -129,14 +138,14 @@
     const s = (students || []).find(x => x.id === PS.edit); if(!s) return;
     const v = id => (document.getElementById(id) || {}).value || '';
     if(typeof isManagementUser === 'function' && !isManagementUser()){ showToast('Only Admin or Principal can change this.'); return; }
-    s.status = v('psEStatus') || s.status; s.passedOutYear = v('psEYear').trim(); s.joinedClass = v('psEJoin'); if(v('psELast')) s.className = v('psELast');
+    s.status = v('psEStatus') || s.status; s.passedOutYear = v('psEYear').trim(); s.joinedClass = v('psEJoin'); s.boardMarksStatus = v('psEMarks') || 'Not received'; s.boardMarksDate = v('psEMDate'); s.boardMarksTo = v('psEMTo').trim(); if(v('psELast')) s.className = v('psELast');
     try { await persist(); showToast('Saved.'); } catch(e){ showToast('Could not save - try again.'); return; }
     PS.edit = ''; paint();
   };
   window.psExport = function(){
     if(typeof XLSX === 'undefined'){ showToast('Excel is not available in this view.'); return; }
     const list = filtered(rowsAll());
-    const aoa = [['Name', 'Admission No', 'Father', 'Joined class', 'Last class', 'Status', 'Year left', 'Old dues', 'Receipts', 'Mobile']].concat(list.map(r => [r.name, r.s.admissionNo || '', r.s.fatherName || '', r.joined, r.last, r.status, r.year, r.due, r.receipts, r.s.fatherPhone || r.s.contact || '']));
+    const aoa = [['Name', 'Admission No', 'Father', 'Joined class', 'Last class', 'Status', 'Year left', 'Old dues', 'Receipts', 'Board marks sheet', 'Marks sheet date', 'Handed to', 'Mobile']].concat(list.map(r => [r.name, r.s.admissionNo || '', r.s.fatherName || '', r.joined, r.last, r.status, r.year, r.due, r.receipts, r.marks, r.s.boardMarksDate || '', r.s.boardMarksTo || '', r.s.fatherPhone || r.s.contact || '']));
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Past students'); XLSX.writeFile(wb, 'past-students.xlsx');
   };
 })();
