@@ -71,4 +71,11 @@ t('past students: status, year left and joined class are read', () => {
   assert.match(msgs, /Transferred student has no "year left"/); assert.match(msgs, /Status "Weird" not understood/); assert.match(msgs, /Year left "2025-27" not understood/);
   assert.equal(importable(students, problems).length, 4);
 });
+t('current-only skips past students', () => {
+  const csv = 'Adm No,Name,Std,Status\n1,RAO SITA,X STD,Passed Out\n2,KUMAR RAVI,VII STD,Active\n3,NEW KID,II STD,';
+  const { headers, records } = tableFromRows(parseCsv(csv)); const m = autoMapColumns(headers);
+  const { students, problems } = buildStudents(records, { map: m.map, currentOnly: true });
+  assert.deepEqual(importable(students, problems).map(x => x.admissionNo), ['2', '3']);
+  assert.match(problems.map(p => p.message).join('|'), /Past student \(Passed Out\) - skipped/);
+});
 console.log(`\n${n} migration tests passed`);

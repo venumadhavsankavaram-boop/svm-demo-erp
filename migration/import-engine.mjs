@@ -161,7 +161,7 @@ export function cleanAcademicYear(v) {
 
 // opts: { map, classMap, nameOrder, defaultSection, existing: [{admissionNo,...}], idPrefix }
 export function buildStudents(records, opts = {}) {
-  const { map, classMap = {}, nameOrder = 'surname-first', defaultSection = 'A', existing = [], idPrefix = 'stu_mig_' } = opts;
+  const { map, classMap = {}, nameOrder = 'surname-first', defaultSection = 'A', existing = [], idPrefix = 'stu_mig_', currentOnly = false } = opts;
   const inv = {}; for (const [h, f] of Object.entries(map)) if (f) inv[f] = h;
   const get = (r, f) => (inv[f] ? String(r[inv[f]] ?? '').trim() : '');
   const students = [], problems = [];
@@ -193,6 +193,7 @@ export function buildStudents(records, opts = {}) {
     if (rawJoin) { const jc = normalizeClass(rawJoin, classMap); if (jc) { s.joinedClass = jc; s.admissionClass = jc; } }
     if (s.status !== 'Active' && !s.passedOutYear) problems.push({ line, level: 'warn', student: s.name || '(no name)', admissionNo, message: `${s.status} student has no "year left" - add it in Past Students after import.` });
     const bad = (level, msg) => problems.push({ line, level, student: s.name || '(no name)', admissionNo, message: msg });
+    if (currentOnly && s.status !== 'Active') bad('skip', `Past student (${s.status}) - skipped: this school wants current students only.`);
     if (!s.firstName) bad('error', 'No student name.');
     if (!className) bad('error', 'No class.'); else if (!KNOWN_CLASSES.has(className)) bad('warn', `Class "${className}" is not one of the standard class names - add it to the class map or fix after import.`);
     if (!admissionNo) bad('warn', 'No admission number - one will be needed to match fees later.');

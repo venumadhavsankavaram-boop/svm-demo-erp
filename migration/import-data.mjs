@@ -6,7 +6,8 @@
 //
 // SAFE BY DEFAULT: without --apply it only READS and REPORTS (a dry run) - nothing is saved.
 // Login: env IMPORT_USER / IMPORT_PASS (an Admin login of the school's ERP). Optional: --class-map=map.json,
-//        --name-order=given-first (default surname-first), --default-section=A, --report=report.json
+//        --name-order=given-first (default surname-first), --default-section=A, --report=report.json,
+//        --current-only (skip passed-out / left / transferred students: for schools that do not want past students)
 import fs from 'node:fs';
 import {
   parseCsv, tableFromRows, parseFeeDueReport, autoMapColumns, buildStudents, importable, buildOpeningDues, reconcile, normalizeClass,
@@ -73,7 +74,7 @@ async function doStudents(file) {
   headers.forEach(h => console.log(`  ${h.padEnd(28)} -> ${m.map[h] || '(ignored)'}`));
   if (m.missing.length) throw new Error('Could not find a column for: ' + m.missing.join(', ') + '. Rename the column in the sheet and run again.');
   const existing = await existingStudents();
-  const { students, problems } = buildStudents(records, { map: m.map, classMap, nameOrder, defaultSection, existing });
+  const { students, problems } = buildStudents(records, { map: m.map, classMap, nameOrder, defaultSection, existing, currentOnly: has('current-only') });
   const ok = importable(students, problems);
   show(problems);
   const perClass = {}; ok.forEach(s => { perClass[s.className] = (perClass[s.className] || 0) + 1; });
