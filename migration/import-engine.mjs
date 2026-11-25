@@ -68,6 +68,9 @@ export const FIELD_SYNONYMS = {
   contact: ['contact', 'contactno', 'mobile', 'mobileno', 'phone', 'phoneno', 'parentmobile', 'parentcontact', 'fathermobile', 'whatsapp'],
   email: ['email', 'emailid', 'mail'],
   address: ['address', 'residentialaddress', 'permanentaddress', 'fatheraddress'],
+  status: ['status', 'studentstatus', 'currentstatus', 'studying'],
+  passedOutYear: ['passedoutyear', 'passoutyear', 'yearleft', 'leftyear', 'yearofpassing', 'yearofleaving', 'academicyearleft'],
+  joinedClass: ['joinedclass', 'classjoined', 'joiningclass', 'admissionclass', 'classatadmission'],
   admDate: ['admissiondate', 'dateofadmission', 'doa', 'admdate', 'dateofjoining'],
   caste: ['caste', 'category', 'castecategory'],
   religion: ['religion'],
@@ -136,6 +139,26 @@ export function splitName(full, order = 'surname-first') {
 }
 
 // ---------- 5. rows -> student records + problem list ----------
+// Old ERPs say this in many ways. Returns '' when not understood.
+export function normStatusWord(v) {
+  const t = String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+  if (!t) return '';
+  if (/^(active|studying|current|continuing|present|regular)$/.test(t)) return 'Active';
+  if (/pass|graduat|completed|alumni/.test(t)) return 'Passed Out';
+  if (/transfer|^tc$|tcissued/.test(t)) return 'Transferred';
+  if (/left|inactive|discontinu|dropout|withdr|struck/.test(t)) return 'Inactive';
+  return '';
+}
+// "2025-26", "2025-2026", "2025/26" -> "2025-26"; a lone "2026" -> "2025-26" (the year they finished). '' if not understood.
+export function cleanAcademicYear(v) {
+  const t = String(v || '').trim();
+  let m = t.match(/^(\d{4})\s*[-\/–]\s*(\d{2}|\d{4})$/);
+  if (m) { const a = +m[1], b = m[2].length === 4 ? +m[2] % 100 : +m[2]; if ((a + 1) % 100 === b) return `${a}-${String(b).padStart(2, '0')}`; return ''; }
+  m = t.match(/^(\d{4})$/);
+  if (m) { const e = +m[1]; if (e >= 1990 && e <= 2100) return `${e - 1}-${String(e % 100).padStart(2, '0')}`; }
+  return '';
+}
+
 // opts: { map, classMap, nameOrder, defaultSection, existing: [{admissionNo,...}], idPrefix }
 export function buildStudents(records, opts = {}) {
   const { map, classMap = {}, nameOrder = 'surname-first', defaultSection = 'A', existing = [], idPrefix = 'stu_mig_' } = opts;
@@ -159,6 +182,16 @@ export function buildStudents(records, opts = {}) {
       admDate: cleanDate(get(r, 'admDate')), caste: get(r, 'caste'), religion: get(r, 'religion'), aadhaar: get(r, 'aadhaar').replace(/\D/g, ''),
     };
     s.parent = s.fatherName; s.fatherPhone = s.contact;
+    const rawStatus = get(r, 'status');
+    if (rawStatus) {
+      const st = normStatusWord(rawStatus);
+      if (st) s.status = st; else problems.push({ line, level: 'warn', student: s.name || '(no name)', admissionNo, message: `Status "${rawStatus}" not understood; treated as Active.` });
+    }
+    const rawYear = get(r, 'passedOutYear');
+    if (rawYear) { const y = cleanAcademicYear(rawYear); if (y) s.passedOutYear = y; else problems.push({ line, level: 'warn', student: s.name || '(no name)', admissionNo, message: `Year left "${rawYear}" not understood (use like 2025-26); left blank.` }); }
+    const rawJoin = get(r, 'joinedClass');
+    if (rawJoin) { const jc = normalizeClass(rawJoin, classMap); if (jc) { s.joinedClass = jc; s.admissionClass = jc; } }
+    if (s.status !== 'Active' && !s.passedOutYear) problems.push({ line, level: 'warn', student: s.name || '(no name)', admissionNo, message: `${s.status} student has no "year left" - add it in Past Students after import.` });
     const bad = (level, msg) => problems.push({ line, level, student: s.name || '(no name)', admissionNo, message: msg });
     if (!s.firstName) bad('error', 'No student name.');
     if (!className) bad('error', 'No class.'); else if (!KNOWN_CLASSES.has(className)) bad('warn', `Class "${className}" is not one of the standard class names - add it to the class map or fix after import.`);

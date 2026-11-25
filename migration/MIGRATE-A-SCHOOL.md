@@ -3,7 +3,7 @@
 For you (Venu) to run during setup. Schools never touch this.
 
 ## What to ask the school for (any ERP: Vidya ERP, mPencil, others)
-1. **Student list** as Excel/CSV (Admission No, Name, Class, Section, Father name, Mobile, DOB).
+1. **Student list** as Excel/CSV (Admission No, Name, Class, Section, Father name, Mobile, DOB). Ask for **past students too** (passed out / left) with three extra columns: **Status** (Passed Out / Transferred / Left / Active), **Year Left** (like 2025-26) and **Class Joined**. These become Past Students (Alumni) in the new ERP, with their old dues.
    Every old ERP has an "Export to Excel" on the student list. This is the best route.
 2. **Fee Due report** (class-wise or student-wise) as PDF. Typed PDFs work; scanned/photographed ones do not.
 3. Anything else they have (staff list, marks, attendance): ask for Excel; we add these step by step.

@@ -1,6 +1,6 @@
 // node tests/migration-engine.test.mjs
 import assert from 'node:assert/strict';
-import { parseCsv, tableFromRows, autoMapColumns, buildStudents, importable, normalizeClass, cleanPhone, cleanDate, splitName, parseFeeDueReport, buildOpeningDues, reconcile } from '../migration/import-engine.mjs';
+import { parseCsv, tableFromRows, autoMapColumns, buildStudents, importable, normalizeClass, cleanPhone, cleanDate, splitName, parseFeeDueReport, buildOpeningDues, reconcile, normStatusWord, cleanAcademicYear } from '../migration/import-engine.mjs';
 
 let n = 0; const t = (name, fn) => { fn(); n++; console.log('ok -', name); };
 
@@ -56,5 +56,19 @@ t('Crystal-style fee due report: rows, wrapped names, reconcile', () => {
   const r = buildOpeningDues(rows, by, { date: '2026-11-25' });
   assert.equal(r.entries.length, 2); assert.equal(r.total, 12300); assert.equal(r.problems.length, 1);
   assert.deepEqual([r.entries[0].kind, r.entries[0].name, r.entries[0].paid], ['opening', 'Previous Dues (opening balance)', false]);
+});
+t('past students: status, year left and joined class are read', () => {
+  assert.deepEqual(['Passed out', 'TC issued', 'Left', 'Studying', 'banana'].map(normStatusWord), ['Passed Out', 'Transferred', 'Inactive', 'Active', '']);
+  assert.deepEqual(['2025-26', '2025-2026', '2025/26', '2026', '2025-27', 'abc'].map(cleanAcademicYear), ['2025-26', '2025-26', '2025-26', '2025-26', '', '']);
+  const csv = 'Adm No,Name,Std,Status,Year Left,Class Joined\n1,RAO SITA,X STD,Passed Out,2025-26,LKG\n2,KUMAR RAVI,VII STD,TC,,\n3,NEW KID,II STD,,,\n4,ODD ONE,V STD,Weird,2025-27,';
+  const { headers, records } = tableFromRows(parseCsv(csv)); const m = autoMapColumns(headers);
+  assert.equal(m.map['Status'], 'status'); assert.equal(m.map['Year Left'], 'passedOutYear'); assert.equal(m.map['Class Joined'], 'joinedClass');
+  const { students, problems } = buildStudents(records, { map: m.map });
+  assert.deepEqual(students.map(x => x.status), ['Passed Out', 'Transferred', 'Active', 'Active']);
+  assert.equal(students[0].passedOutYear, '2025-26'); assert.equal(students[0].joinedClass, 'LKG'); assert.equal(students[0].admissionClass, 'LKG');
+  assert.equal(students[2].passedOutYear, undefined);
+  const msgs = problems.map(p => p.message).join(' | ');
+  assert.match(msgs, /Transferred student has no "year left"/); assert.match(msgs, /Status "Weird" not understood/); assert.match(msgs, /Year left "2025-27" not understood/);
+  assert.equal(importable(students, problems).length, 4);
 });
 console.log(`\n${n} migration tests passed`);
