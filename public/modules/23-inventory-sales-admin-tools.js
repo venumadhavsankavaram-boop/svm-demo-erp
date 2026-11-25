@@ -209,7 +209,7 @@ const PENDING_APPROVALS_KEY = "pending-approvals";
       payments.forEach(pay => {
         if(pay.studentId === p.studentId && !pay.classAtPayment){ pay.classAtPayment = s.className; paymentsChanged = true; }
       });
-      if(p.target === '__graduate__'){ s.status = 'Inactive'; graduatedCount++; }
+      if(p.target === '__graduate__'){ s.status = 'Passed Out'; s.passedOutYear = (typeof currentAcademicYearValue !== 'undefined' && currentAcademicYearValue) || autoAcademicYear(); if(!s.joinedClass && s.admissionClass) s.joinedClass = s.admissionClass; graduatedCount++; }
       else { s.className = p.target; promotedCount++; }
     });
     await persist();

@@ -354,7 +354,7 @@ function certLetterheadTop(){
     }
   }
   function printStudyCertificate(s, cert){
-    const isCurrentlyStudying = (s.status || 'Active') !== 'Inactive';
+    const isCurrentlyStudying = !['Inactive', 'Passed Out', 'Transferred'].includes(s.status || 'Active');
     const guardianLabel = s.fatherName ? `S/o Sri ${s.fatherName}` : (s.motherName ? `D/o Smt ${s.motherName}` : '');
     const studyLine = isCurrentlyStudying
       ? `is currently studying in Class <b>${s.className} — Section ${s.section}</b> during the academic year <b>${cert.academicYear}</b>.`

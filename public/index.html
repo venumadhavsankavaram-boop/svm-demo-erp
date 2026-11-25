@@ -3525,6 +3525,7 @@
         <span class="ay-badge" id="ayBadge"></span>
         <select id="statusFilter" onchange="onStatusFilterChange()">
           <option value="Active" selected>Active</option>
+          <option value="Passed Out">Passed Out</option>
           <option value="Inactive">Inactive</option>
           <option value="Transferred">Transferred</option>
           <option value="all">All</option>
@@ -3542,6 +3543,7 @@
             <button type="button" onclick="openCertPicker('Character')">Character Certificate</button>
             <button type="button" onclick="openCertPicker('Migration')">Migration Certificate</button>
             <button type="button" onclick="openDuplicatesModal()">Find Duplicate Students</button>
+            <button type="button" onclick="openPastStudents()" title="Students who passed out, left or are inactive - old dues, receipts, year left">Past Students (Alumni)</button>
             <button type="button" onclick="openTrashModal('students')">Recently Deleted Students</button>
             <button type="button" onclick="openDeletionRequestsModal()">Pending Deletion Requests</button>
           </div>
@@ -5208,6 +5210,7 @@
 <script src="modules/84-leave-statement.js"></script>
 <script src="modules/85-payroll-accounting.js"></script>
 <script src="modules/81-payroll-pro.js"></script>
+<script src="modules/86-past-students.js"></script>
 <script src="modules/87-college-structure.js"></script>
 <script src="modules/88-college-practicals.js"></script>
 <script src="modules/89-college-scholarships.js"></script>
