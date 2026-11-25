@@ -161,7 +161,7 @@
     const names = (o.types || []).map(c => RT()[c]).concat(o.old ? ['Old balance'] : [], o.extras ? ['Extra fees'] : []);
     if(names.length !== Object.keys(RT()).length + 2) bits.push('Includes: ' + (names.join(', ') || 'nothing'));
     if(o.asOn && o.asOn < todayISO()) bits.push('As on ' + dmy(o.asOn));
-    if(o.includeInactive) bits.push('Includes inactive students');
+    if(o.includeInactive) bits.push('Includes past students (passed out / left)');
     if(typeof branchScopeText === 'function' && branchScopeText()) bits.push(branchScopeText());
     if(extra) bits.push(extra);
     return bits.join('  ·  ');
@@ -373,7 +373,7 @@
             <div style="display:flex;gap:14px;flex-wrap:wrap;">${Object.keys(types).map(c => `<label style="font-size:0.82rem;display:flex;gap:5px;align-items:center;"><input type="checkbox" id="fr2_t_${c}" ${(!ft || ft === c) ? 'checked' : ''} onchange="fr2Refresh()"> ${esc(types[c])}</label>`).join('')}
               <label style="font-size:0.82rem;display:flex;gap:5px;align-items:center;"><input type="checkbox" id="fr2_t_old" ${ft ? '' : 'checked'} onchange="fr2Refresh()"> Old balance (previous year dues)</label>
               <label style="font-size:0.82rem;display:flex;gap:5px;align-items:center;"><input type="checkbox" id="fr2_t_extra" ${ft ? '' : 'checked'} onchange="fr2Refresh()"> Extra fees (admission, fines, other)</label></div></div>
-          ${isRec ? '' : `<label style="font-size:0.82rem;display:flex;gap:6px;align-items:center;margin-bottom:12px;"><input type="checkbox" id="fr2_inactive" onchange="fr2Refresh()"> Also include inactive students</label>`}
+          ${isRec ? '' : `<label style="font-size:0.82rem;display:flex;gap:6px;align-items:center;margin-bottom:12px;"><input type="checkbox" id="fr2_inactive" onchange="fr2Refresh()"> Also include past students (passed out / left) so their old dues show</label>`}
           <div id="fr2_preview" style="padding:10px 12px;border-radius:10px;background:#f4f1fb;font-size:0.82rem;margin-bottom:16px;"></div>
           <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">
             <button type="button" class="btn btn-ghost" onclick="fr2Close()">Cancel</button>
