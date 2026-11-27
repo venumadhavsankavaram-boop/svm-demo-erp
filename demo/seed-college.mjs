@@ -143,7 +143,7 @@ function buildStaff() {
   mk(2, 'Ramesh', 'Babu', 'Male', 'Administration', 'Office Assistant', ['Administration'], 20000);
   mk(3, 'Padma', 'Kumari', 'Female', 'Accounts', 'Accountant', ['Administration'], 28000);
   const L = [['Lakshmi','Devi','Female'],['Srinivas','Reddy','Male'],['Anitha','Varma','Female'],['Mahesh','Naidu','Male'],['Jyothi','Sharma','Female'],['Kiran','Kumar','Male'],['Vani','Patel','Female'],['Suresh','Goud','Male'],['Radha','Krishna','Female'],['Naresh','Yadav','Male'],['Swapna','Menon','Female'],['Prakash','Das','Male']];
-  L.forEach((n, k) => mk(4 + k, n[0], n[1], n[2], 'Teaching', k < 6 ? 'Junior Lecturer' : 'Senior Lecturer', ['Teaching'], int(30, 55) * 1000));
+  L.forEach((n, k) => mk(4 + k, n[0], n[1], n[2], 'Teaching', k < 6 ? 'Junior Lecturer' : 'Senior Lecturer', ['Teaching'], int(30, 55) * 1000, k === 0 ? { classTeacherClass: '1st Year', classTeacherSection: 'MPC', linkedUserId: 'u_demo_teacher', loginUsername: 'demo.teacher' } : {}));
   mk(20, 'Savitri', 'Bai', 'Female', 'Support', 'Attender', ['Support'], 10000);
   return rows;
 }

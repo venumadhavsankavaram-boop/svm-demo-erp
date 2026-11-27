@@ -174,7 +174,7 @@ function buildStaff() {
   mk(2, 'Ramesh', 'Babu', 'Male', 'Administration', 'Office Assistant', ['Administration'], 20000);
   mk(3, 'Padma', 'Kumari', 'Female', 'Accounts', 'Accountant', ['Administration'], 28000);
   const L = [['Lakshmi','Devi','Female'],['Srinivas','Reddy','Male'],['Anitha','Varma','Female'],['Mahesh','Naidu','Male'],['Jyothi','Sharma','Female'],['Kiran','Kumar','Male'],['Vani','Patel','Female'],['Suresh','Goud','Male'],['Radha','Krishna','Female'],['Naresh','Yadav','Male'],['Swapna','Menon','Female'],['Prakash','Das','Male']];
-  L.forEach((n, k) => mk(4 + k, n[0], n[1], n[2], 'Teaching', k < 6 ? 'Assistant Professor' : 'Associate Professor', ['Teaching'], int(30, 55) * 1000));
+  L.forEach((n, k) => mk(4 + k, n[0], n[1], n[2], 'Teaching', k < 6 ? 'Assistant Professor' : 'Associate Professor', ['Teaching'], int(30, 55) * 1000, k === 0 ? { classTeacherClass: 'Honours Year 1', classTeacherSection: 'B.COM (GENERAL)', linkedUserId: 'u_demo_teacher', loginUsername: 'demo.teacher' } : {}));
   mk(20, 'Savitri', 'Bai', 'Female', 'Support', 'Attender', ['Support'], 10000);
   return rows;
 }
@@ -245,6 +245,24 @@ async function main() {
     if(Object.keys(m).length) marks[s.id] = m;
   });
   await api('PUT', '/api/kv/degree-results', { marks });
+
+  // One released exam (Mid-Semester Exam, current semester courses) so the Enter Marks, Results and parent Marks screens
+  // have something to show. The semester-wise Internal/External marks above stay as the main degree results.
+  console.log('Mid-Semester exam…');
+  const midId = 'exam_dgc_mid1', midMax = 30, midSubj = {};
+  YEARS.forEach((y, yi0) => PROGS.forEach(p => {
+    const cur = p.courses.filter(c => c.sem === 2 * (yi0 + 1) - 1 && c.type !== 'Internship' && c.type !== 'Project');
+    midSubj[`${y}||${p.name}`] = cur.map((c, k) => ({ code: c.type.slice(0, 3).toUpperCase(), name: c.title, maxMarks: midMax, internalMax: 0, countable: true, elective: false, date: isoDay(daysAgo(14 - k)), staffIds: [lecturers[(yi0 + k) % lecturers.length].id] }));
+  }));
+  await api('POST', '/api/exam-defs', { id: midId, name: 'Mid-Semester Exam', examType: 'Mid-Semester Exam', startDate: isoDay(daysAgo(14)), endDate: isoDay(daysAgo(9)), classSubjects: midSubj });
+  const midRes = [];
+  students.forEach(s => (midSubj[`${s.className}||${s.section}`] || []).forEach(sb => {
+    const m = clampN(midMax * Math.min(1, Math.max(0.1, strength[s.id] + (rnd() - 0.5) * 0.3)), midMax);
+    midRes.push({ id: `res_${midId}_${s.id}_${sb.name}`.replace(/\s+/g, '_'), examId: midId, studentId: s.id, subject: sb.name, marks: m, written: m, internal: 0, absent: false });
+  }));
+  await pool(midRes, r => api('POST', '/api/exam-results', r), 12);
+  const released = {}; YEARS.forEach(y => { released[`${midId}|${y}`] = { at: new Date().toISOString(), by: 'Demo Principal' }; });
+  await api('PUT', '/api/kv/exam-releases', { legacy: [], released, revised: {} });
 
   // Fees: admission + a mix of paid in full, part paid, unpaid
   console.log('Fee receipts…');

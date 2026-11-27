@@ -1662,7 +1662,7 @@ async function handleKv(req, res, key) {
   // dispatcher's PARENT_SHARED_REFERENCE_RESOURCES: a Student/Parent login
   // reading shared reference data (right now, the late-fee policy) needs no
   // staff module permission — there's nothing per-student here to leak.
-  const parentSharedKvBypass = req.method === 'GET' && req.authUser && ((PARENT_LOGIN_ROLES.includes(req.authUser.role) && PARENT_SHARED_REFERENCE_KV_KEYS.includes(key)) || teacherReadsTimetable(req, key));
+  const parentSharedKvBypass = req.method === 'GET' && req.authUser && ((PARENT_LOGIN_ROLES.includes(req.authUser.role) && PARENT_SHARED_REFERENCE_KV_KEYS.includes(key)) || teacherReadsTimetable(req, key)) || (req.method === 'GET' && req.authUser && COLLEGE_STRUCTURE_READ_KV_KEYS.includes(key));
   if (KV_KEY_TO_MODULE[key]) {
     // Plan gating applies regardless of role (including Admin, and the
     // parent/student shared-reference bypass below) — it's about what the
@@ -6610,6 +6610,8 @@ const PARENT_SHARED_REFERENCE_RESOURCES = ['fee-structure', 'exam-defs', 'subjec
 // office sees (it holds only dates and percentages, nothing per-student).
 // The timetable's period times and working days are the same for everyone. 'timetable-entries' is also let through,
 // but only the student's OWN class and section is returned (see parentScopedKvValue), never the whole school's.
+// Years, combinations and academic-year names are plain reference data every signed-in role needs to show class lists (Accountant, Office, Lecturer, Parent). Reading is open to any signed-in user; changing them still needs the Setup permission.
+const COLLEGE_STRUCTURE_READ_KV_KEYS = ['class-levels', 'section-levels', 'class-section-overrides', 'college-structure', 'college-programmes', 'academic-years', 'current-academic-year'];
 const PARENT_SHARED_REFERENCE_KV_KEYS = ['late-fee-settings', 'syllabus-topics', 'fee-schedule', 'grading-scale', 'grading-schemes', 'timetable-periods', 'timetable-days', 'timetable-entries', 'exam-releases', 'portal-settings', 'admit-card-policy', 'fee-refunds'];
 // A Teacher can always READ the timetable (periods, working days and entries) so My Day and My Timetable can show their own
 // periods, even when the role's Roles & Permissions only switch on a timetable sub-tab. Writing still needs the Timetable permission.
