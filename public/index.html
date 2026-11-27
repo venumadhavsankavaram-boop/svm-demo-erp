@@ -568,6 +568,17 @@
   .ll-spark{animation:llTwinkle 1.8s ease-in-out infinite; transform-box:fill-box; transform-origin:center;}
   .ll-s2{animation-delay:.5s} .ll-s3{animation-delay:1s}
   @keyframes llTwinkle{0%,100%{opacity:.15; transform:scale(.6)} 50%{opacity:1; transform:scale(1.1)}}
+  .ll-jc,.ll-dc,.ll-scroll{display:none;}
+  html[data-itype="junior_college"] .ll-school,html[data-itype="degree_college"] .ll-school{display:none;}
+  html[data-itype="junior_college"] .ll-jc{display:inline;}
+  html[data-itype="degree_college"] .ll-dc,html[data-itype="degree_college"] .ll-scroll{display:inline;}
+  html[data-itype="degree_college"] .ll-book{display:none;}
+  .ll-jc .ll-d:nth-child(2),.ll-dc .ll-d:nth-child(2){animation-delay:.15s} .ll-jc .ll-d:nth-child(3),.ll-dc .ll-d:nth-child(3){animation-delay:.3s}
+  .ll-jc .ll-d:nth-child(4),.ll-dc .ll-d:nth-child(4){animation-delay:.45s} .ll-jc .ll-d:nth-child(5),.ll-dc .ll-d:nth-child(5){animation-delay:.6s}
+  .ll-dc .ll-d:nth-child(n+6){animation-delay:.8s} .ll-scroll .ll-d{animation-delay:1s}
+  .ll-jc{transform-box:fill-box; transform-origin:center; animation:llBob 2.4s ease-in-out infinite;}
+  @keyframes llBob{50%{transform:translateY(-3px)}}
+  .login-loader.is-done .ll-jc,.login-loader.is-done .ll-dc,.login-loader.is-done .ll-scroll{opacity:.12; animation:none;}
   .ll-text{font-size:0.86rem; font-weight:600; color:var(--ink); text-align:center; min-height:1.3em;}
   .ll-bar{width:78%; height:6px; border-radius:999px; background:var(--border); overflow:hidden;}
   .ll-bar span{display:block; height:100%; width:0; border-radius:inherit; background:linear-gradient(90deg,var(--teal),var(--login-accent-soft)); transition:width .5s ease;}
@@ -580,7 +591,7 @@
   .login-loader.is-done .ll-tick{animation-delay:.2s;}
   @keyframes llTick{to{stroke-dashoffset:0}}
   @media (prefers-reduced-motion:reduce){
-    .ll-d{animation:none; stroke-dashoffset:0;} .ll-spark{animation:none; opacity:.8;}
+    .ll-d{animation:none; stroke-dashoffset:0;} .ll-jc{animation:none;} .ll-spark{animation:none; opacity:.8;}
     .ll-art{animation:llPulse 1.6s ease-in-out infinite;}
     @keyframes llPulse{50%{opacity:.55}}
   }
@@ -3333,6 +3344,23 @@
           <path class="ll-d" d="M90 100 V76 a10 10 0 0 1 20 0 V100"/>
           <rect class="ll-d" x="70" y="62" width="12" height="12" rx="2"/><rect class="ll-d" x="118" y="62" width="12" height="12" rx="2"/>
           <path class="ll-d" d="M48 100 H152"/>
+        </g>
+        <g class="ll-jc" stroke="var(--login-accent)" stroke-width="3">
+          <path class="ll-d" d="M100 18 L162 46 L100 74 L38 46 Z"/>
+          <path class="ll-d" d="M66 60 V86 C82 100 118 100 134 86 V60"/>
+          <path class="ll-d" d="M162 46 V82"/><circle class="ll-d" cx="162" cy="88" r="5"/>
+          <path class="ll-d" d="M100 46 L162 46"/>
+        </g>
+        <g class="ll-dc" stroke="var(--login-accent)" stroke-width="3">
+          <path class="ll-d" d="M46 52 L100 20 L154 52 Z"/>
+          <path class="ll-d" d="M52 58 H148"/>
+          <path class="ll-d" d="M66 64 V98"/><path class="ll-d" d="M88 64 V98"/><path class="ll-d" d="M112 64 V98"/><path class="ll-d" d="M134 64 V98"/>
+          <path class="ll-d" d="M44 104 H156 M36 112 H164"/>
+          <circle class="ll-d" cx="100" cy="42" r="5"/>
+        </g>
+        <g class="ll-scroll" stroke="var(--login-accent-soft)" stroke-width="3.5">
+          <path class="ll-d" d="M58 126 H142 a7 7 0 0 1 0 14 H58 a7 7 0 0 1 0 -14 Z"/>
+          <circle class="ll-d" cx="128" cy="133" r="3"/>
         </g>
         <g class="ll-book" stroke="var(--login-accent-soft)" stroke-width="3.5">
           <path class="ll-d" d="M100 122 C88 114 66 114 50 120 V140 C66 134 88 134 100 142 C112 134 134 134 150 140 V120 C134 114 112 114 100 122 Z"/>
