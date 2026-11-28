@@ -7911,7 +7911,13 @@ app.post('/api/submissions', async (req, res) => {
               ${b.homeworkId || null}, ${String(b.title).trim().slice(0, 300)},
               ${String(b.description || '').trim().slice(0, 4000)}, ${JSON.stringify(attachments)}::jsonb)
     `;
-    return res.status(201).json({ ok: true, id });
+    res.status(201).json({ ok: true, id });
+    // Tell whoever it is for, so submitted work is never sitting unseen: the class/subject teacher, or Management.
+    const who = (student.first_name + ' ' + (student.last_name || '')).trim();
+    const alert = { title: 'New student submission', body: `${who} (${student.class_name} ${student.section}): ${String(b.title).trim().slice(0, 140)}`, tag: 'submission', url: '/?view=inbox' };
+    if (b.recipientType === 'management') notifyUsersByRole(MANAGEMENT_ROLES, alert).catch(() => {});
+    else getStaffUserId(b.recipientStaffId).then(uid => uid ? sendPushToUser(uid, alert) : notifyUsersByRole(MANAGEMENT_ROLES, { ...alert, title: 'No login for ' + (b.recipientName || 'the teacher'), body: 'Work was submitted to a teacher who has no ERP login linked, so they cannot see it. ' + alert.body })).catch(() => {});
+    return;
   } catch (err) {
     console.error('submissions create error:', err);
     return res.status(500).json({ error: 'Something went wrong on the server.' });
@@ -7979,7 +7985,10 @@ app.put('/api/submissions/:id/review', async (req, res) => {
         reviewed_by = ${req.authUser.name}, reviewed_at = now()
       WHERE id = ${req.params.id}
     `;
-    return res.status(200).json({ ok: true });
+    res.status(200).json({ ok: true });
+    // Tell the student/parent their work was reviewed or needs resubmitting.
+    sendPushToStudent(submission.student_id, { title: status === 'resubmit' ? 'Please resubmit: ' + String(submission.title || '').slice(0, 60) : 'Your work was reviewed', body: (feedback ? String(feedback).trim().slice(0, 100) : String(submission.title || '').slice(0, 100)) + (marks ? ' (Marks: ' + String(marks).trim().slice(0, 20) + ')' : ''), tag: 'submission-review', url: '/?view=myprofile' }).catch(() => {});
+    return;
   } catch (err) {
     console.error('submissions review error:', err);
     return res.status(500).json({ error: 'Something went wrong on the server.' });
