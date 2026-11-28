@@ -2379,11 +2379,11 @@ const HYBRID_RESOURCES = {
 // Mirrors ROLE_VIEWS in index.html — keep the two in sync. This is the
 // fallback used whenever a role has no saved override for a given module.
 const SERVER_ROLE_VIEWS = {
-  Admin: ['dashboard','admissions','managefee','attendance','exams','subjects','promotransfer','result','staff','accounting','announcements','inbox','noticeboard','websiteinquiries','websitegallery','contactvendor','reports','inventory','timetable','syllabus','transport','library','hostel','setup'],
-  Principal: ['dashboard','admissions','managefee','attendance','exams','subjects','promotransfer','result','staff','accounting','announcements','inbox','noticeboard','websiteinquiries','websitegallery','contactvendor','reports','inventory','timetable','syllabus','transport','library','hostel','setup'],
+  Admin: ['dashboard','admissions','managefee','attendance','exams','subjects','promotransfer','result','staff','accounting','announcements','inbox','noticeboard','websiteinquiries','websitegallery','contactvendor','reports','inventory','timetable','syllabus','transport','library','hostel','scouts','setup'],
+  Principal: ['dashboard','admissions','managefee','attendance','exams','subjects','promotransfer','result','staff','accounting','announcements','inbox','noticeboard','websiteinquiries','websitegallery','contactvendor','reports','inventory','timetable','syllabus','transport','library','hostel','scouts','setup'],
   Accountant: ['dashboard','admissions','managefee','accounting','reports','inventory','transport'],
   'Office Assistant': ['admissions'],
-  Teacher: ['admissions','attendance','exams','subjects','result','timetable','syllabus','library','announcements','noticeboard','inbox'],
+  Teacher: ['admissions','attendance','exams','subjects','result','timetable','syllabus','library','scouts','announcements','noticeboard','inbox'],
   Staff: ['admissions','attendance','inbox'],
   Student: ['myprofile'],
   Parent: ['myprofile'],
@@ -2505,6 +2505,7 @@ const KV_KEY_TO_MODULE = {
   'library-issues': ['library'],
   'library-settings': ['library'],
   'hostel-rooms': ['hostel'],
+  'scouts-guides': ['scouts'],
   'acct-expense-categories': ['accounting'],
   'acct-income-categories': ['accounting'],
   'acct-cost-centers': ['accounting'],
